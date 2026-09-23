@@ -47,8 +47,8 @@ scripts Finder, which can raise a macOS permission dialog.
 
 John's yes first; record it on the ticket.
 
-1. Quit LLM Wiki (John quits it, or `kill` its pid – not `osascript`, which
-   raises an Automation permission dialog).
+1. Ask John to quit LLM Wiki, so it saves its state. Fallback only: `kill`
+   its pid. Not `osascript`, which raises an Automation permission dialog.
 2. Archive the old app and its data to
    `~/Room-101/<date>-llm-wiki-<old version>/`: the `.app`, plus
    `~/Library/{Application Support,Caches,WebKit}/com.llmwiki.app` under
@@ -56,6 +56,8 @@ John's yes first; record it on the ticket.
    entry; commit. Leave the data folders in place – the new build reuses them.
 3. `ditto` the new `.app` to `/Applications/LLM Wiki.app`.
 4. Open it. Check Settings > About shows the new stamp and John's wikis load.
+   John's settings live in `app-state.json` in the Application Support
+   folder; compare its keys with the archived copy.
 
 ## Taking an upstream release
 
@@ -68,7 +70,8 @@ cd /Users/johnp/Code/llm_wiki
 git fetch upstream --tags
 git diff --name-only main...estate        # files estate changed; compare with the list above
 git switch main && git merge --ff-only vX.Y.Z && git push origin main
-git switch estate && git merge vX.Y.Z     # conflicts only in the files above
+git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
+                                          # in vite.config.ts keep the estate stamp
 npm ci && npm run typecheck && npm run test:mocks
 git push origin estate
 ```
