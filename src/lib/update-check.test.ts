@@ -49,6 +49,12 @@ describe("isNewer — semver comparison", () => {
     expect(isNewer("0.3.10", "0.3.9")).toBe(true)
   })
 
+  it("ignores the estate build stamp on local", () => {
+    // The fork's builds report e.g. "0.6.11+estate.e808211" (vite.config.ts).
+    expect(isNewer("v0.6.11", "0.6.11+estate.e808211")).toBe(false)
+    expect(isNewer("v0.6.12", "0.6.11+estate.e808211")).toBe(true)
+  })
+
   it("double-digit minor/patch compare correctly", () => {
     expect(isNewer("0.10.0", "0.9.99")).toBe(true)
     expect(isNewer("0.10.5", "0.10.4")).toBe(true)

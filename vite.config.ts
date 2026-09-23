@@ -1,5 +1,6 @@
 import path from "path"
 import { readFileSync } from "fs"
+import { execSync } from "child_process"
 import { defineConfig } from "vite"
 import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
@@ -10,6 +11,18 @@ const host = process.env.TAURI_DEV_HOST
 // UI can show the running app version without duplicating the string.
 const pkgJson = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"), "utf-8"))
 
+// Estate fork (pearson-tfl/llm_wiki): stamp the version with the commit it
+// was built from, so Settings > About names the exact build, e.g.
+// "0.6.11+estate.e808211". See ESTATE.md.
+const estateCommit = (() => {
+  try {
+    return execSync("git rev-parse --short HEAD", { cwd: __dirname }).toString().trim()
+  } catch {
+    return ""
+  }
+})()
+const appVersion = `${pkgJson.version}+estate${estateCommit ? `.${estateCommit}` : ""}`
+
 // https://vitejs.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
@@ -19,7 +32,7 @@ export default defineConfig(async () => ({
   },
 
   define: {
-    __APP_VERSION__: JSON.stringify(pkgJson.version),
+    __APP_VERSION__: JSON.stringify(appVersion),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
