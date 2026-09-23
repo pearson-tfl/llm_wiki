@@ -18,14 +18,19 @@ Keep this list current. Merge conflicts can only come from these files.
 
 - `vite.config.ts` – version stamp. Settings > About shows
   `v<release>+estate.<commit>`, e.g. `v0.6.11+estate.e808211`, naming the
-  exact commit the app was built from. No manual bump needed.
+  exact commit the app was built from. No manual bump needed. `-dirty` on the
+  end means the build had uncommitted edits; no commit at all means it was
+  built outside a git checkout. Finder's Get Info still shows the plain
+  release: the bundle version comes from `src-tauri/tauri.conf.json`, which
+  changes every upstream release, so stamping it would conflict every merge.
 - `src/lib/update-check.test.ts` – one test: the stamp does not confuse the
   update check.
 - `ESTATE.md` – this file.
 
 ## Build
 
-Needs Node 22 and Rust (installed at `~/.cargo/bin`, not on the agent PATH).
+Needs Node 20 or later (built here with 22) and Rust (installed at
+`~/.cargo/bin`, not on the agent PATH).
 
 ```sh
 cd /Users/johnp/Code/llm_wiki

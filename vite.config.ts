@@ -13,11 +13,15 @@ const pkgJson = JSON.parse(readFileSync(path.resolve(__dirname, "package.json"),
 
 // Estate fork (pearson-tfl/llm_wiki): stamp the version with the commit it
 // was built from, so Settings > About names the exact build, e.g.
-// "0.6.11+estate.e808211". See ESTATE.md.
+// "0.6.11+estate.e808211", or "...e808211-dirty" when tracked files had
+// uncommitted edits. See ESTATE.md.
 const estateCommit = (() => {
   try {
-    return execSync("git rev-parse --short HEAD", { cwd: __dirname }).toString().trim()
+    return execSync('git describe --always --dirty --exclude "*"', { cwd: __dirname })
+      .toString()
+      .trim()
   } catch {
+    // No git checkout (e.g. a source tarball) — stamp "+estate" alone.
     return ""
   }
 })()
