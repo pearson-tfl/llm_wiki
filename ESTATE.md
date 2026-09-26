@@ -43,7 +43,10 @@ Keep this list current. Merge conflicts can only come from these files.
   Claude Code or Codex CLI provider, a chat question that matches no wiki page
   no longer fails with "Backend Agent LLM is not configured" before `claude`
   starts (upstream issues #696, #703, #720). When an upstream release contains
-  #727, take upstream's version of this file.
+  #727, take upstream's version of this file. Side effect: HTTP API / MCP
+  callers on a CLI provider now get a "did not find matching wiki pages" reply
+  instead of an error. Known gap it does not fix: with a CLI provider, pages
+  attached with @ never reach the model.
 - `ESTATE.md` – this file.
 
 ## Build
