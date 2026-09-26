@@ -45,8 +45,13 @@ Keep this list current. Merge conflicts can only come from these files.
   starts (upstream issues #696, #703, #720). When an upstream release contains
   #727, take upstream's version of this file. Side effect: HTTP API / MCP
   callers on a CLI provider now get a "did not find matching wiki pages" reply
-  instead of an error. Known gap it does not fix: with a CLI provider, pages
-  attached with @ never reach the model.
+  instead of an error.
+- `src-tauri/src/agent/runtime.rs`, `src-tauri/src/agent/context.rs` – with
+  the Claude Code or Codex CLI provider, pages attached with @ reach the
+  model: the chat turn's retrieval answer carries their text, in the same
+  form the HTTP providers get. Upstream sends it only to HTTP providers.
+  `context.rs` moves that formatting into its own function,
+  `render_explicit_files`, unchanged. Test in `runtime.rs`.
 - `ESTATE.md` – this file.
 
 ## Build

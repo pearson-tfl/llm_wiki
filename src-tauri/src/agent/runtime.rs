@@ -13,7 +13,8 @@ use crate::commands::search::SearchEmbeddingConfig;
 use super::cancel::AgentCancellationToken;
 use super::context::{
     build_agent_context, collapse_whitespace, intent_label, load_explicit_context_files,
-    load_project_context, trim_chars, AgentContextInput, BuiltAgentContext,
+    load_project_context, render_explicit_files, trim_chars, AgentContextInput,
+    BuiltAgentContext,
 };
 use super::events::AgentEvent;
 use super::permissions::{AgentCapability, PermissionPolicy};
@@ -1276,7 +1277,14 @@ impl AgentRuntime {
             }
             // Preserve the retrieval-only API behavior, but never expose
             // router diagnostics as assistant prose when no generator exists.
-            build_retrieval_answer(message, &references)
+            let mut answer = build_retrieval_answer(message, &references);
+            // Estate fork (pearson-tfl/llm_wiki): the CLI model sees only this
+            // answer, so carry the files the user attached with @.
+            if is_cli_transport && !explicit_files.is_empty() {
+                answer.push_str("\n\n");
+                answer.push_str(&render_explicit_files(&explicit_files));
+            }
+            answer
         };
         emit_event(
             &mut events,
@@ -4170,6 +4178,59 @@ mod tests {
         assert!(response.references.is_empty());
         assert!(!response.message.contains("Chat model is unavailable"));
         assert!(!response.message.contains("Router intent="));
+    }
+
+    #[tokio::test]
+    async fn cli_transport_answer_carries_attached_files() {
+        // Estate fork: the CLI model sees only the retrieval answer, so a page
+        // attached with @ must be in it even when the search finds nothing.
+        let project = temp_project("cli-transport-attached");
+        fs::write(
+            project.join("wiki").join("concepts").join("attached.md"),
+            "# Attached\n\nzebracornucopia body text",
+        )
+        .unwrap();
+        let runtime = AgentRuntime::new(
+            "project-1",
+            project.to_string_lossy(),
+            None,
+            Some(LlmConfig {
+                provider: "claude-code".to_string(),
+                api_key: String::new(),
+                model: "claude-opus-5-5".to_string(),
+                ollama_url: String::new(),
+                custom_endpoint: String::new(),
+                azure_api_version: None,
+                azure_model_family: None,
+                api_mode: None,
+                reasoning: None,
+                max_tokens: None,
+                max_context_size: None,
+                custom_headers: std::collections::BTreeMap::new(),
+                streaming_enabled: None,
+            }),
+            None,
+            None,
+        );
+
+        let response = runtime
+            .run_once(AgentChatRequest {
+                message: "did you read this page".to_string(),
+                session_id: Some("s1".to_string()),
+                mode: AgentMode::Standard,
+                tools: AgentToolOptions {
+                    wiki: true,
+                    web: false,
+                    anytxt: false,
+                },
+                context_files: vec!["wiki/concepts/attached.md".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect("retrieval-only turn must succeed for CLI transports");
+
+        assert!(response.message.contains("User-selected project files:"));
+        assert!(response.message.contains("zebracornucopia body text"));
     }
 
     #[tokio::test]

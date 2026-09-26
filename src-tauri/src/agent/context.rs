@@ -190,28 +190,7 @@ fn build_user_context(input: AgentContextInput<'_>) -> String {
     }
 
     if !input.explicit_files.is_empty() {
-        out.push_str("User-selected project files:\n");
-        let mut remaining = MAX_EXPLICIT_CONTEXT_CHARS;
-        for (path, content) in input.explicit_files {
-            if remaining == 0 {
-                break;
-            }
-            // File bodies remain untrusted even when the user selected them.
-            // Escaping prevents contents from closing host-owned context tags.
-            // Budget the body separately so truncation never drops the closing
-            // tag and leaves subsequent host context structurally ambiguous.
-            let prefix = format!("\n<file path=\"{}\">\n", escape_xml(path));
-            let suffix = "\n</file>\n";
-            let overhead = prefix.chars().count() + suffix.chars().count();
-            if remaining <= overhead {
-                break;
-            }
-            let body = trim_chars(&escape_xml(content), remaining - overhead);
-            out.push_str(&prefix);
-            out.push_str(&body);
-            out.push_str(suffix);
-            remaining = remaining.saturating_sub(overhead + body.chars().count());
-        }
+        out.push_str(&render_explicit_files(input.explicit_files));
         out.push_str("\n\n");
     }
 
@@ -267,6 +246,34 @@ fn build_user_context(input: AgentContextInput<'_>) -> String {
     out.push_str(&trim_chars(input.retrieval_summary, 8_000));
     out.push_str("\n\nLatest user request:\n");
     out.push_str(input.query.trim());
+    out
+}
+
+/// Estate fork (pearson-tfl/llm_wiki): split out of `build_user_context` so
+/// the CLI-provider retrieval answer can carry @-attached files too.
+pub fn render_explicit_files(files: &[(String, String)]) -> String {
+    let mut out = String::from("User-selected project files:\n");
+    let mut remaining = MAX_EXPLICIT_CONTEXT_CHARS;
+    for (path, content) in files {
+        if remaining == 0 {
+            break;
+        }
+        // File bodies remain untrusted even when the user selected them.
+        // Escaping prevents contents from closing host-owned context tags.
+        // Budget the body separately so truncation never drops the closing
+        // tag and leaves subsequent host context structurally ambiguous.
+        let prefix = format!("\n<file path=\"{}\">\n", escape_xml(path));
+        let suffix = "\n</file>\n";
+        let overhead = prefix.chars().count() + suffix.chars().count();
+        if remaining <= overhead {
+            break;
+        }
+        let body = trim_chars(&escape_xml(content), remaining - overhead);
+        out.push_str(&prefix);
+        out.push_str(&body);
+        out.push_str(suffix);
+        remaining = remaining.saturating_sub(overhead + body.chars().count());
+    }
     out
 }
 
