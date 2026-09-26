@@ -51,7 +51,9 @@ Keep this list current. Merge conflicts can only come from these files.
   model: the chat turn's retrieval answer carries their text, in the same
   form the HTTP providers get. Upstream sends it only to HTTP providers.
   `context.rs` moves that formatting into its own function,
-  `render_explicit_files`, unchanged. Test in `runtime.rs`.
+  `render_explicit_files`, unchanged. Test in `runtime.rs`. HTTP API / MCP
+  callers on a CLI provider that pass attached files get their text in the
+  reply too.
 - `ESTATE.md` – this file.
 
 ## Build

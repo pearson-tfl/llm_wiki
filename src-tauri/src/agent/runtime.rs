@@ -13,8 +13,7 @@ use crate::commands::search::SearchEmbeddingConfig;
 use super::cancel::AgentCancellationToken;
 use super::context::{
     build_agent_context, collapse_whitespace, intent_label, load_explicit_context_files,
-    load_project_context, render_explicit_files, trim_chars, AgentContextInput,
-    BuiltAgentContext,
+    load_project_context, render_explicit_files, trim_chars, AgentContextInput, BuiltAgentContext,
 };
 use super::events::AgentEvent;
 use super::permissions::{AgentCapability, PermissionPolicy};
@@ -1281,7 +1280,9 @@ impl AgentRuntime {
             // Estate fork (pearson-tfl/llm_wiki): the CLI model sees only this
             // answer, so carry the files the user attached with @.
             if is_cli_transport && !explicit_files.is_empty() {
-                answer.push_str("\n\n");
+                answer.push_str(
+                    "\n\nThe user attached these files with @. Use them even if the search above found nothing.\n",
+                );
                 answer.push_str(&render_explicit_files(&explicit_files));
             }
             answer
