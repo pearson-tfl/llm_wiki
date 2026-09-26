@@ -420,7 +420,9 @@ describe("buildExitError", () => {
   it("translates Unauthenticated stderr into an actionable login hint", () => {
     const msg = buildExitError(1, "Unauthenticated: please log in")
     expect(msg).toMatch(/not authenticated/i)
-    expect(msg).toMatch(/`claude`/)
+    // Estate fork: LLM Wiki runs claude on ~/.claude (claude_cli.rs), so the
+    // hint must sign in that same config dir. See ESTATE.md.
+    expect(msg).toContain("`CLAUDE_CONFIG_DIR=~/.claude claude`")
     expect(msg).toMatch(/terminal/i)
   })
 

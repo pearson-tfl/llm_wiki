@@ -25,6 +25,19 @@ Keep this list current. Merge conflicts can only come from these files.
   changes every upstream release, so stamping it would conflict every merge.
 - `src/lib/update-check.test.ts` – one test: the stamp does not confuse the
   update check.
+- `src-tauri/src/commands/claude_cli.rs` – the Claude Code provider starts
+  `claude` with `CLAUDE_CONFIG_DIR=~/.claude` unless the app's environment
+  already names one, so it reads `~/.claude/.claude.json`, not
+  `~/.claude.json`: the account it signs in with, and also the user-level MCP
+  servers it loads. Tests in the same file. Opening the app from a terminal
+  that exports another `CLAUDE_CONFIG_DIR` puts it on that account, with no
+  error; open it from the Dock.
+- `src/lib/claude-cli-transport.ts`,
+  `src/components/settings/sections/llm-provider-section.tsx` – the app's
+  sign-in hints say `CLAUDE_CONFIG_DIR=~/.claude claude`, not bare `claude`,
+  which would sign in the other account.
+- `src/lib/__tests__/claude-cli-transport.test.ts` – the hint test expects
+  that command.
 - `ESTATE.md` – this file.
 
 ## Build
@@ -57,7 +70,8 @@ John's yes first; record it on the ticket.
 3. `ditto` the new `.app` to `/Applications/LLM Wiki.app`.
 4. Open it. Check Settings > About shows the new stamp and John's wikis load.
    John's settings live in `app-state.json` in the Application Support
-   folder; compare its keys with the archived copy.
+   folder; compare its keys with the archived copy. Then John sends one chat
+   message on the Claude Code provider and it answers.
 
 ## Taking an upstream release
 
@@ -73,6 +87,7 @@ git switch main && git merge --ff-only vX.Y.Z && git push origin main
 git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
                                           # in vite.config.ts keep the estate stamp
 npm ci && npm run typecheck && npm run test:mocks
+(cd src-tauri && cargo test --lib claude_cli)
 git push origin estate
 ```
 
