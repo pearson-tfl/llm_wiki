@@ -38,6 +38,12 @@ Keep this list current. Merge conflicts can only come from these files.
   which would sign in the other account.
 - `src/lib/__tests__/claude-cli-transport.test.ts` – the hint test expects
   that command.
+- `src-tauri/src/agent/runtime.rs` – upstream PR nashsu/llm_wiki#727
+  (unmerged there when taken, 26 Sep 2026), cherry-picked as is: with the
+  Claude Code or Codex CLI provider, a chat question that matches no wiki page
+  no longer fails with "Backend Agent LLM is not configured" before `claude`
+  starts (upstream issues #696, #703, #720). When an upstream release contains
+  #727, take upstream's version of this file.
 - `ESTATE.md` – this file.
 
 ## Build
