@@ -99,7 +99,7 @@ git switch main && git merge --ff-only vX.Y.Z && git push origin main
 git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
                                           # in vite.config.ts keep the estate stamp
 npm ci && npm run typecheck && npm run test:mocks
-(cd src-tauri && cargo test --lib claude_cli)
+(cd src-tauri && cargo test --lib -- claude_cli agent::runtime)
 git push origin estate
 ```
 
