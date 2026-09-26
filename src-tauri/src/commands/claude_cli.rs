@@ -298,6 +298,12 @@ pub async fn claude_cli_spawn(
     if let Some(path_env) = child_path_env().await {
         cmd.env("PATH", path_env);
     }
+    if let Some(config_dir) = estate_claude_config_dir(
+        std::env::var_os("CLAUDE_CONFIG_DIR"),
+        std::env::var_os("HOME"),
+    ) {
+        cmd.env("CLAUDE_CONFIG_DIR", config_dir);
+    }
     cmd.args(build_claude_cli_args(&model, isolate_local_config));
     cmd.current_dir(&working_directory);
 
@@ -424,6 +430,25 @@ pub async fn claude_cli_spawn(
     });
 
     Ok(())
+}
+
+/// Estate fork (pearson-tfl/llm_wiki): name `~/.claude` as the config dir
+/// when the app's own environment names none. Claude Code keys the login by
+/// whether `CLAUDE_CONFIG_DIR` is set: unset reads `~/.claude.json` and the
+/// unsuffixed keychain entry; set to `~/.claude` reads
+/// `~/.claude/.claude.json` and its own keychain entry. On John's Mac those
+/// hold different accounts, and LLM Wiki belongs on the `~/.claude` one.
+/// Sessions, settings and memory live in `~/.claude` either way. See
+/// ESTATE.md.
+fn estate_claude_config_dir(
+    existing: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    if existing.is_some_and(|dir| !dir.is_empty()) {
+        return None;
+    }
+    let home = home.filter(|dir| !dir.is_empty())?;
+    Some(PathBuf::from(home).join(".claude"))
 }
 
 fn build_claude_cli_args(model: &str, isolate_local_config: bool) -> Vec<String> {
@@ -608,6 +633,27 @@ mod tests {
             blocks[1].get("type").and_then(serde_json::Value::as_str),
             Some("image")
         );
+    }
+
+    #[test]
+    fn estate_config_dir_defaults_to_home_dot_claude() {
+        assert_eq!(
+            estate_claude_config_dir(None, Some("/Users/j".into())),
+            Some(PathBuf::from("/Users/j/.claude"))
+        );
+        assert_eq!(
+            estate_claude_config_dir(Some("".into()), Some("/Users/j".into())),
+            Some(PathBuf::from("/Users/j/.claude"))
+        );
+    }
+
+    #[test]
+    fn estate_config_dir_leaves_an_inherited_dir_alone() {
+        assert_eq!(
+            estate_claude_config_dir(Some("/Users/j/.other".into()), Some("/Users/j".into())),
+            None
+        );
+        assert_eq!(estate_claude_config_dir(None, None), None);
     }
 
     #[test]

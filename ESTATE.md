@@ -25,6 +25,10 @@ Keep this list current. Merge conflicts can only come from these files.
   changes every upstream release, so stamping it would conflict every merge.
 - `src/lib/update-check.test.ts` – one test: the stamp does not confuse the
   update check.
+- `src-tauri/src/commands/claude_cli.rs` – the Claude Code provider starts
+  `claude` with `CLAUDE_CONFIG_DIR=~/.claude` unless the app's environment
+  already names one, so it signs in with the account under `~/.claude`, not
+  the one in `~/.claude.json`. Two tests in the same file.
 - `ESTATE.md` – this file.
 
 ## Build
