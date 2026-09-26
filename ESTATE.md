@@ -68,7 +68,10 @@ John's yes first; record it on the ticket.
    `data/`. Add the folder to Room 101's `.gitignore` and an `INDEX.md`
    entry; commit. Leave the data folders in place – the new build reuses them.
 3. `ditto` the new `.app` to `/Applications/LLM Wiki.app`.
-4. Open it. Check Settings > About shows the new stamp and John's wikis load.
+4. John opens it from the Dock or Finder. Not `open` from an agent's shell:
+   the app inherits that session's environment, including its
+   `CLAUDE_CONFIG_DIR`, and Claude Code chats then run on the agent's
+   profile. Check Settings > About shows the new stamp and John's wikis load.
    John's settings live in `app-state.json` in the Application Support
    folder; compare its keys with the archived copy. Then John sends one chat
    message on the Claude Code provider and it answers.
