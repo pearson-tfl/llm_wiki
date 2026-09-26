@@ -438,8 +438,9 @@ pub async fn claude_cli_spawn(
 /// unsuffixed keychain entry; set to `~/.claude` reads
 /// `~/.claude/.claude.json` and its own keychain entry. On John's Mac those
 /// hold different accounts, and LLM Wiki belongs on the `~/.claude` one.
-/// Sessions, settings and memory live in `~/.claude` either way. See
-/// ESTATE.md.
+/// Sessions, settings and memory live in `~/.claude` either way; the account
+/// file also carries user-level MCP servers and per-project entries, so
+/// those follow the switch too. See ESTATE.md.
 fn estate_claude_config_dir(
     existing: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
