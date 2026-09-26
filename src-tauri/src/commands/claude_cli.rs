@@ -653,6 +653,10 @@ mod tests {
             estate_claude_config_dir(Some("/Users/j/.other".into()), Some("/Users/j".into())),
             None
         );
+    }
+
+    #[test]
+    fn estate_config_dir_is_left_unset_without_home() {
         assert_eq!(estate_claude_config_dir(None, None), None);
     }
 

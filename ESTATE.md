@@ -28,7 +28,13 @@ Keep this list current. Merge conflicts can only come from these files.
 - `src-tauri/src/commands/claude_cli.rs` – the Claude Code provider starts
   `claude` with `CLAUDE_CONFIG_DIR=~/.claude` unless the app's environment
   already names one, so it signs in with the account under `~/.claude`, not
-  the one in `~/.claude.json`. Two tests in the same file.
+  the one in `~/.claude.json`. Tests in the same file.
+- `src/lib/claude-cli-transport.ts`,
+  `src/components/settings/sections/llm-provider-section.tsx` – the app's
+  sign-in hints say `CLAUDE_CONFIG_DIR=~/.claude claude`, not bare `claude`,
+  which would sign in the other account.
+- `src/lib/__tests__/claude-cli-transport.test.ts` – the hint test expects
+  that command.
 - `ESTATE.md` – this file.
 
 ## Build

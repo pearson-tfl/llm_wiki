@@ -1147,7 +1147,7 @@ function ClaudeCliStatusPill() {
               <div className="text-muted-foreground">
                 {t("settings.sections.llm.cliAuthBefore")}{" "}
                 <code className="rounded bg-background/60 px-1 py-0.5 font-mono text-[10px]">
-                  claude
+                  CLAUDE_CONFIG_DIR=~/.claude claude
                 </code>{" "}
                 {" "}{t("settings.sections.llm.cliAuthAfter")}
               </div>

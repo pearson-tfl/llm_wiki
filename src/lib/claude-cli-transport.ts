@@ -333,7 +333,7 @@ export function buildExitError(
   if (/unauthenticated|please.*log\s*in|authentication.*failed/i.test(stderr)) {
     return [
       "Claude Code CLI is not authenticated.",
-      "Please open a terminal and run `claude` to complete the OAuth login,",
+      "Please open a terminal and run `CLAUDE_CONFIG_DIR=~/.claude claude` to complete the OAuth login,",
       "then retry. (LLM Wiki only spawns the binary — it can't run the",
       "login flow on your behalf.)",
       stderr ? `\n\n— stderr —\n${stderr}` : "",
