@@ -1051,6 +1051,7 @@
     "processing": "Elaborazione: {{title}}",
     "done": "Completato: {{title}}",
     "clearCompleted": "Rimuovi i completati",
+    "clearFinishedQueue": "Rimuovi terminati dalla coda",
     "ingestQueue": "Coda di elaborazione",
     "ingestQueuePaused": "Coda di elaborazione (in pausa)",
     "pauseQueue": "Pausa",

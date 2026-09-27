@@ -1051,6 +1051,7 @@
     "processing": "Processing: {{title}}",
     "done": "Done: {{title}}",
     "clearCompleted": "Clear completed",
+    "clearFinishedQueue": "Clear finished from queue",
     "ingestQueue": "Ingest Queue",
     "ingestQueuePaused": "Ingest Queue (paused)",
     "pauseQueue": "Pause",

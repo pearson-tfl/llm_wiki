@@ -54,6 +54,12 @@ Keep this list current. Merge conflicts can only come from these files.
   `render_explicit_files`, unchanged. Test in `runtime.rs`. HTTP API / MCP
   callers on a CLI provider that pass attached files get their text in the
   reply too.
+- `src/components/layout/activity-panel.tsx`, `src/i18n/{en,it,ru,zh}.json` –
+  a "Clear finished from queue" link at the bottom of the activity panel,
+  under "Clear completed". It removes done, failed and cancelled items from
+  the ingest queue; upstream has the function (`clearCompletedTasks`) but no
+  button for it, so a cancelled item could not be removed. Test in
+  `src/lib/ingest-queue.test.ts`.
 - `ESTATE.md` – this file.
 
 ## Build

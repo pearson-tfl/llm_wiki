@@ -20,6 +20,7 @@ import {
   cancelTask,
   cancelTasks,
   cancelAllTasks,
+  clearCompletedTasks,
   movePendingTask,
   pauseProcessing,
   resumeProcessing,
@@ -155,6 +156,11 @@ export function ActivityPanel() {
       setQueueTasks([...getQueue()])
     })
   }, [project, selectedTaskIds])
+
+  const handleClearFinished = useCallback(() => {
+    if (!project) return
+    void clearCompletedTasks().then(() => setQueueTasks([...getQueue()]))
+  }, [project])
 
   const handleMoveTask = useCallback((taskId: string, direction: "up" | "down") => {
     void movePendingTask(taskId, direction).then(() => setQueueTasks([...getQueue()]))
@@ -465,6 +471,16 @@ export function ActivityPanel() {
               className="w-full px-3 py-1 text-center text-[10px] text-muted-foreground hover:underline"
             >
               {t("activity.clearCompleted")}
+            </button>
+          )}
+          {/* Estate fork (pearson-tfl/llm_wiki): removes done, failed and
+              cancelled items from the ingest queue itself. */}
+          {queueTasks.some((task) => task.status !== "pending" && task.status !== "processing") && (
+            <button
+              onClick={handleClearFinished}
+              className="w-full px-3 py-1 text-center text-[10px] text-muted-foreground hover:underline"
+            >
+              {t("activity.clearFinishedQueue")}
             </button>
           )}
         </div>

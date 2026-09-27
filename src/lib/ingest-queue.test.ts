@@ -695,6 +695,23 @@ describe("ingest-queue — clearCompletedTasks & summary", () => {
     await clearCompletedTasks()
     expect(getQueue()).toHaveLength(0)
   })
+
+  // Estate fork: the activity panel's "Clear finished from queue" link
+  // relies on cancelled items going and waiting items staying.
+  it("clearCompletedTasks drops cancelled tasks and keeps pending ones", async () => {
+    pauseProcessing()
+    const [cancelledId] = await enqueueBatch(TEST_ID, [
+      { sourcePath: "cancel-me.md", folderContext: "" },
+      { sourcePath: "keep-me.md", folderContext: "" },
+    ])
+    await cancelTask(cancelledId)
+
+    await clearCompletedTasks()
+
+    expect(getQueue().map((task) => [task.sourcePath, task.status])).toEqual([
+      ["keep-me.md", "pending"],
+    ])
+  })
 })
 
 describe("ingest-queue — queue-drain triggers review sweep", () => {

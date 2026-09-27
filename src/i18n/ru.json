@@ -1051,6 +1051,7 @@
     "processing": "Обработка: {{title}}",
     "done": "Готово: {{title}}",
     "clearCompleted": "Очистить завершённые",
+    "clearFinishedQueue": "Убрать завершённые из очереди",
     "ingestQueue": "Очередь обработки",
     "ingestQueuePaused": "Очередь обработки (приостановлена)",
     "pauseQueue": "Пауза",

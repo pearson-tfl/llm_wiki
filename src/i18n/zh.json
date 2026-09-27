@@ -1051,6 +1051,7 @@
     "processing": "处理中：{{title}}",
     "done": "已完成：{{title}}",
     "clearCompleted": "清除已完成",
+    "clearFinishedQueue": "从队列清除已结束项",
     "ingestQueue": "摄取队列",
     "ingestQueuePaused": "摄取队列（已暂停）",
     "pauseQueue": "暂停",
