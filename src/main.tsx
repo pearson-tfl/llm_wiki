@@ -5,6 +5,7 @@ import "./index.css";
 import "@/i18n";
 import { loadAndApplyTheme, watchSystemTheme } from "@/lib/theme";
 import { AppDialogHost } from "@/components/app-dialog-host";
+import { handleExternalLinkClick } from "@/lib/external-links";
 
 function applyPlatformClass() {
   const isTauri = "__TAURI_INTERNALS__" in window || "__TAURI__" in window;
@@ -17,6 +18,8 @@ function applyPlatformClass() {
 async function initApp() {
   try {
     applyPlatformClass();
+    // Bubble phase on document, so React's own onClick handlers run first.
+    document.addEventListener("click", (e) => handleExternalLinkClick(e));
     await loadAndApplyTheme();
     watchSystemTheme();
 
