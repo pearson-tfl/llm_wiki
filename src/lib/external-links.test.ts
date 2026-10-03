@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest"
 import { externalUrl, handleExternalLinkClick } from "./external-links"
 
 // Link targets copied from a real wiki vault (the Agent Harness Wiki),
-// as react-markdown hands them to an <a href>.
+// as react-markdown hands them to an <a href>, except where marked.
 describe("externalUrl", () => {
   it.each([
     ["https://12factor.net/", "https://12factor.net/"],
@@ -13,6 +13,7 @@ describe("externalUrl", () => {
       "https://en.wikipedia.org/wiki/Crossover_%28evolutionary_algorithm%29",
     ],
     ["mailto:bigbench@googlegroups.com", "mailto:bigbench@googlegroups.com"],
+    // Made up: the vault sample with its scheme upper-cased.
     ["HTTPS://12factor.net/", "https://12factor.net/"],
   ])("sends %s to the system browser", (href, expected) => {
     expect(externalUrl(href)).toBe(expected)
@@ -20,9 +21,10 @@ describe("externalUrl", () => {
 
   it.each([
     ["#a-stateless-protocol"],
-    ["#Agent%20Harness"],
+    // The vault's [[Offline regression evaluation|…]] after wikilink-transform.ts.
+    ["#Offline%20regression%20evaluation"],
     ["../../../resources/engineering-loop-measurement.md"],
-    ["notes/page.md"],
+    // Made up: schemes the system browser should not be handed.
     ["file:///Users/someone/notes.md"],
     ["javascript:alert(1)"],
     [""],

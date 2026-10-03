@@ -66,7 +66,10 @@ Keep this list current. Merge conflicts can only come from these files.
   the whole document, so it covers the page reader, the file preview, the
   research panel and any link added later; wiki links, in-page anchors and
   relative paths are left to the app. Upstream routes only some links
-  (chat, frontmatter, About) through the opener. Tests in
+  (frontmatter, About) through the opener. Not covered: a relative-path
+  link (`../x.md`) or a protocol-relative one (`//host/x`) still takes the
+  window away; links inside an HTML file's preview frame, and middle-clicks,
+  are not seen by the listener. Tests in
   `src/lib/external-links.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
