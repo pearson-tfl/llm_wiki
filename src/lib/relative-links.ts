@@ -17,7 +17,9 @@ export function isRelativePathHref(href: string | null): href is string {
  * when the project has no such file. Any `?query` or `#section` is dropped.
  */
 export function resolveRelativeLink(href: string, fromDir: string, index: ProjectPathIndex): string | null {
-  const url = new URL(href, `file://${fromDir.replace(/\/*$/, "/")}`)
+  // Each folder name is encoded, so a `#`, `?` or `%` in it stays part of the path.
+  const base = fromDir.replace(/\/*$/, "").split("/").map(encodeURIComponent).join("/")
+  const url = new URL(href, `file://${base}/`)
   let path: string
   try {
     path = decodeURIComponent(url.pathname)

@@ -42,6 +42,7 @@ const index = buildProjectPathIndexFromTree([
   file(`${VAULT}/raw/assets/learn-agent-arch-ext-ai-agent-book-readme/translations-15 languages-informational.svg`),
   // Made up: the vault has no 01-setup.md beside the page that links it.
   file(`${VAULT}/raw/sources/01-setup.md`),
+  // Made up: the vault has no such folder; it stands for the one its link names.
   {
     name: "sections",
     path: `${VAULT}/wiki/sources/sections`,
@@ -65,6 +66,17 @@ describe("resolveRelativeLink", () => {
     expect(resolveRelativeLink("./01-setup.md", `${VAULT}/raw/sources`, index)).toBe(`${VAULT}/raw/sources/01-setup.md`)
     // Made up: the vault's ./06-verify-and-ship.md#… form, pointed at a file the index has.
     expect(resolveRelativeLink("./01-setup.md#install", `${VAULT}/raw/sources`, index)).toBe(`${VAULT}/raw/sources/01-setup.md`)
+  })
+
+  it.each([
+    // Made up: project folders whose names a URL would misread.
+    ["/Users/someone/vault #1"],
+    ["/Users/someone/100%"],
+    ["/Users/someone/a?b"],
+    ["/Users/someone/v%20x"],
+  ])("resolves under a project folder named %s", (root) => {
+    const odd = buildProjectPathIndexFromTree([file(`${root}/raw/sources/01-setup.md`)])
+    expect(resolveRelativeLink("./01-setup.md", `${root}/raw/sources`, odd)).toBe(`${root}/raw/sources/01-setup.md`)
   })
 
   it.each([

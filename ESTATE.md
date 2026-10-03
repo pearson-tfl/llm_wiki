@@ -74,10 +74,12 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/external-links.test.ts`.
 - `src/components/editor/wiki-reader.tsx`, `src/lib/relative-links.ts`,
   `src/i18n/{en,it,ru,zh}.json` – a path link in the page reader
-  (`../x.md`, `./x.md`, `/docs/x`) opens the project file it names in the
-  app's preview, resolved against the linking page's own folder, as the
-  app already does for images. When the project has no such file, an
-  in-app notice names the link (pearson-tfl/llm_wiki#8). Tests in
+  (`../x.md`, `./x.md`) opens the project file it names in the app's
+  preview, resolved against the linking page's own folder, as the app
+  already does for images; a path starting with `/` is read from the
+  disk's root. When the project has no such file, an in-app notice names
+  the link (pearson-tfl/llm_wiki#8). Not covered: in the file preview and
+  the research panel, a path link is stopped with no notice. Tests in
   `src/lib/relative-links.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
