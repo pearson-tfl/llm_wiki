@@ -61,11 +61,23 @@ Keep this list current. Merge conflicts can only come from these files.
   button for it, so a cancelled item could not be removed. Test in
   `src/lib/ingest-queue.test.ts`.
 - `ESTATE.md` – this file.
+- `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
+  project files the `llm-wiki-pm` seat works from (AHR #2941): the domain
+  glossary, a pointer to the estate's coding standards, the decision
+  record and the tracker docs. Upstream has none of them today, so they
+  conflict only if it adds a file of the same name. Upstream's
+  `.gitignore` ignores `docs/`, so a new file there is added with
+  `git add -f`; once tracked, it stays tracked.
+
+`CLAUDE.md` is not on the list because it is not committed: it is a link to
+the estate's project file, `config/projects/llm-wiki.md` in
+Agent-Harness-Reconfig, kept out of git by `.git/info/exclude`.
 
 ## Build
 
-Needs Node 20 or later (built here with 22) and Rust (installed at
-`~/.cargo/bin`, not on the agent PATH).
+Needs Node 20 or later (built here with 22), Rust (installed at
+`~/.cargo/bin`, not on the agent PATH) and protoc, which upstream's README
+lists (`brew install protobuf`; installed at `/opt/homebrew/bin/protoc`).
 
 ```sh
 cd /Users/johnp/Code/llm_wiki
