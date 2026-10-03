@@ -95,7 +95,8 @@
       "emptyDraftError": "Модель вернула пустой черновик."
     },
     "frontmatter": { "origin": "Источник", "more": "Ещё" },
-    "rawMarkdownEditor": "Редактор исходного Markdown"
+    "rawMarkdownEditor": "Редактор исходного Markdown",
+    "pathLinkNotFound": "В этой вики нет файла по адресу {{link}}."
   },
   "research": {
     "title": "Глубокое исследование",

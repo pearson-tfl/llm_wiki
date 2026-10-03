@@ -95,7 +95,8 @@
       "emptyDraftError": "The model returned an empty draft."
     },
     "frontmatter": { "origin": "Origin", "more": "More" },
-    "rawMarkdownEditor": "Raw Markdown editor"
+    "rawMarkdownEditor": "Raw Markdown editor",
+    "pathLinkNotFound": "There is no file at {{link}} in this wiki."
   },
   "research": {
     "title": "Deep Research",

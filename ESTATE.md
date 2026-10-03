@@ -66,11 +66,21 @@ Keep this list current. Merge conflicts can only come from these files.
   the whole document, so it covers the page reader, the file preview, the
   research panel and any link added later; wiki links, in-page anchors and
   relative paths are left to the app. Upstream routes only some links
-  (frontmatter, About) through the opener. Not covered: a relative-path
-  link (`../x.md`) or a protocol-relative one (`//host/x`) still takes the
-  window away; links inside an HTML file's preview frame, and middle-clicks,
-  are not seen by the listener. Tests in
+  (frontmatter, About) through the opener. A protocol-relative link
+  (`//host/x`) is a web link too, opened as https. A path link
+  (`../x.md`) that no component handled is stopped, so the window stays
+  (pearson-tfl/llm_wiki#8). Not covered: links inside an HTML file's
+  preview frame, and middle-clicks, are not seen by the listener. Tests in
   `src/lib/external-links.test.ts`.
+- `src/components/editor/wiki-reader.tsx`, `src/lib/relative-links.ts`,
+  `src/i18n/{en,it,ru,zh}.json` – a path link in the page reader
+  (`../x.md`, `./x.md`) opens the project file it names in the app's
+  preview, resolved against the linking page's own folder, as the app
+  already does for images; a path starting with `/` is read from the
+  disk's root. When the project has no such file, an in-app notice names
+  the link (pearson-tfl/llm_wiki#8). Not covered: in the file preview and
+  the research panel, a path link is stopped with no notice. Tests in
+  `src/lib/relative-links.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

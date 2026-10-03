@@ -15,6 +15,8 @@ describe("externalUrl", () => {
     ["mailto:bigbench@googlegroups.com", "mailto:bigbench@googlegroups.com"],
     // Made up: the vault sample with its scheme upper-cased.
     ["HTTPS://12factor.net/", "https://12factor.net/"],
+    // Made up: the vault has no protocol-relative link.
+    ["//12factor.net/", "https://12factor.net/"],
   ])("sends %s to the system browser", (href, expected) => {
     expect(externalUrl(href)).toBe(expected)
   })
@@ -58,6 +60,14 @@ describe("handleExternalLinkClick", () => {
     const event = clickOn("#a-stateless-protocol")
     handleExternalLinkClick(event as unknown as MouseEvent, open)
     expect(event.preventDefault).not.toHaveBeenCalled()
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it("keeps the window in the app on a path link no component handled", () => {
+    const open = vi.fn()
+    const event = clickOn("../../../resources/engineering-loop-measurement.md")
+    handleExternalLinkClick(event as unknown as MouseEvent, open)
+    expect(event.preventDefault).toHaveBeenCalledOnce()
     expect(open).not.toHaveBeenCalled()
   })
 

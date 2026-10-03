@@ -95,7 +95,8 @@
       "emptyDraftError": "Il modello ha restituito una bozza vuota."
     },
     "frontmatter": { "origin": "Origine", "more": "Altro" },
-    "rawMarkdownEditor": "Editor Markdown grezzo"
+    "rawMarkdownEditor": "Editor Markdown grezzo",
+    "pathLinkNotFound": "Nessun file in {{link}} in questo wiki."
   },
   "research": {
     "title": "Deep Research",

@@ -95,7 +95,8 @@
       "emptyDraftError": "模型返回了空白草稿。"
     },
     "frontmatter": { "origin": "来源", "more": "更多" },
-    "rawMarkdownEditor": "Markdown 源码编辑器"
+    "rawMarkdownEditor": "Markdown 源码编辑器",
+    "pathLinkNotFound": "此知识库中没有位于 {{link}} 的文件。"
   },
   "research": {
     "title": "深度研究",

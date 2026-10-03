@@ -1,4 +1,5 @@
 import { useMemo } from "react"
+import { useTranslation } from "react-i18next"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import remarkMath from "remark-math"
@@ -6,11 +7,13 @@ import rehypeKatex from "rehype-katex"
 import "katex/dist/katex.min.css"
 import { transformImageEmbeds, transformWikilinks } from "@/lib/wikilink-transform"
 import { resolveRelatedSlug } from "@/lib/wiki-page-resolver"
+import { isRelativePathHref, resolveRelativeLink } from "@/lib/relative-links"
 import { resolveMarkdownImageSrc } from "@/lib/markdown-image-resolver"
 import { normalizePath } from "@/lib/path-utils"
 import { detectLanguage } from "@/lib/detect-language"
 import { getHtmlLang, getTextDirection } from "@/lib/language-metadata"
 import { useWikiStore } from "@/stores/wiki-store"
+import { useAppDialog } from "@/stores/app-dialog-store"
 import { MermaidDiagram, unwrapMermaidPre } from "@/components/mermaid-diagram"
 
 interface WikiReaderProps {
@@ -39,9 +42,13 @@ interface WikiReaderProps {
  *
  * Wikilink anchor clicks are intercepted: `#slug` is resolved
  * against the project's wiki tree and routed to the wiki preview,
- * giving the user single-click navigation between pages.
+ * giving the user single-click navigation between pages. A path
+ * link (`../x.md`) opens the project file it names in the same
+ * preview, or a notice when there is none: the window never leaves.
  */
 export function WikiReader({ body, sourceBody, sourceOffset = 0, filePath }: WikiReaderProps) {
+  const { t } = useTranslation()
+  const appDialog = useAppDialog()
   const project = useWikiStore((s) => s.project)
   const projectPathIndex = useWikiStore((s) => s.projectPathIndex)
   const openPathInPreview = useWikiStore((s) => s.openPathInPreview)
@@ -102,6 +109,14 @@ export function WikiReader({ body, sourceBody, sourceOffset = 0, filePath }: Wik
     if (path) openPathInPreview(path)
   }
 
+  function handlePathLinkClick(e: React.MouseEvent<HTMLAnchorElement>, href: string) {
+    e.preventDefault()
+    const fromDir = currentFileDir ?? wikiRoot
+    const path = fromDir ? resolveRelativeLink(href, fromDir, projectPathIndex) : null
+    if (path) openPathInPreview(path)
+    else void appDialog.alert({ message: t("editor.pathLinkNotFound", { link: href }) })
+  }
+
   return (
     <div
       className="prose prose-invert min-w-0 max-w-none"
@@ -122,7 +137,10 @@ export function WikiReader({ body, sourceBody, sourceOffset = 0, filePath }: Wik
             return (
               <a
                 href={h || undefined}
-                onClick={(e) => isWikilink && handleAnchorClick(e, h)}
+                onClick={(e) => {
+                  if (isWikilink) handleAnchorClick(e, h)
+                  else if (isRelativePathHref(h)) handlePathLinkClick(e, h)
+                }}
                 className={
                   isWikilink
                     ? "cursor-pointer text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
