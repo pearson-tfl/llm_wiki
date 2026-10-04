@@ -80,6 +80,13 @@ Keep this list current. Merge conflicts can only come from these files.
   the link (pearson-tfl/llm_wiki#8). Not covered: in the file preview and
   the research panel, a path link is stopped with no notice. Tests in
   `src/lib/relative-links.test.ts`.
+- `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
+  Wiki's 68 `learn-agent-arch-ext-*` sources to their titles
+  (pearson-tfl/llm_wiki#3): the fixed old-to-new list, the script, its
+  tests (`python3 -m unittest discover -s scripts/estate/ext-rename`), and
+  `prove-on-copy.sh`, which runs the app's own startup comparison and
+  change processing on a renamed copy of a vault. Not part of the app;
+  upstream has no `scripts/estate/`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain
