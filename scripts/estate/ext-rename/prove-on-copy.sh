@@ -40,6 +40,8 @@ mkdir -p "$CRATE/dist" "$CRATE/mcp-server/dist" "$CRATE/mcp-server/node_modules"
 rsync -a --delete --exclude target "$REPO/src-tauri/" "$CRATE/src-tauri/"
 cat "$HERE/harness/startup_rescan.rs" >> "$CRATE/src-tauri/src/commands/file_sync.rs"
 cp "$REPO/mcp-server/package.json" "$CRATE/mcp-server/"
+mkdir -p "$CRATE/src/lib"
+cp "$REPO/src/lib/source-watch-defaults.json" "$CRATE/src/lib/"
 echo '<!doctype html>' > "$CRATE/dist/index.html"
 touch "$CRATE/mcp-server/dist/placeholder.js" "$CRATE/mcp-server/node_modules/.placeholder"
 
