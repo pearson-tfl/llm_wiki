@@ -118,5 +118,6 @@ describe.skipIf(!env.EXT_RENAME_VAULT)("app startup processing on a vault copy",
     }
     fs.writeFileSync(env.EXT_RENAME_REPORT as string, JSON.stringify(report, null, 2))
     expect(report.lastError).toBeNull()
-  })
+    // The app walks every wiki page for each move: minutes on a real vault.
+  }, 600_000)
 })
