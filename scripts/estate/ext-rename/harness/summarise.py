@@ -88,6 +88,12 @@ def main(run):
           (proc["enqueueSourceIngest"], proc["enqueueBatch"]) == (base["enqueueSourceIngest"], base["enqueueBatch"]),
           f"{len(proc['enqueueSourceIngest'])} calls vs baseline {len(base['enqueueSourceIngest'])}")
     prove("no file-sync error", proc["lastError"] is None, proc["lastError"])
+    control = load(run / "processing-control.json")
+    control_deleted = sorted(p for call in control["deleteSourceFiles"] for p in call)
+    prove("control, snapshot left unedited: the app deletes exactly the rewritten sources",
+          control_deleted == sorted(f"raw/sources/{ers.PREFIX}{old}.md" for old, new in MAPPING.items()
+                                    if f"{new}.md" in rewritten),
+          f"{len(control_deleted)} deletes, {len(control['migrateSourcePath'])} moves")
     wiki_deleted = [p for call in proc["cleanupDeletedWikiPages"] for p in call]
     print(f"wiki pages the app saw deleted: {len(wiki_deleted)} (baseline {sum(len(c) for c in base['cleanupDeletedWikiPages'])}); "
           f"embeddings removed: {len(proc['removePageEmbedding'])}")

@@ -34,6 +34,11 @@ python3 "$HERE/rename_ext_sources.py" check "$RUN/vault" --full > "$RUN/check-be
 python3 "$HERE/rename_ext_sources.py" apply "$RUN/vault" > "$RUN/apply.json"
 python3 "$HERE/rename_ext_sources.py" check "$RUN/vault" --full > "$RUN/check-after-apply.json"
 cp -R "$RUN/vault/.llm-wiki" "$RUN/stores-after-apply"
+# Control: the same rename with the snapshot left as it was, to show the
+# harness sees the deletes the snapshot edit prevents.
+cp -R "$RUN/baseline" "$RUN/control"
+python3 "$HERE/rename_ext_sources.py" apply "$RUN/control" > /dev/null
+cp "$RUN/baseline/.llm-wiki/file-snapshot.json" "$RUN/control/.llm-wiki/"
 
 # A scratch copy of the app's crate, with the harness test appended.
 mkdir -p "$CRATE/dist" "$CRATE/mcp-server/dist" "$CRATE/mcp-server/node_modules"
@@ -45,7 +50,7 @@ cp "$REPO/src/lib/source-watch-defaults.json" "$CRATE/src/lib/"
 echo '<!doctype html>' > "$CRATE/dist/index.html"
 touch "$CRATE/mcp-server/dist/placeholder.js" "$CRATE/mcp-server/node_modules/.placeholder"
 
-for side in baseline vault; do
+for side in baseline vault control; do
   EXT_RENAME_VAULT="$RUN/$side" EXT_RENAME_TASKS_OUT="$RUN/tasks-$side.json" \
     cargo test --quiet --manifest-path "$CRATE/src-tauri/Cargo.toml" --lib \
     ext_rename_harness -- --ignored > "$RUN/cargo-$side.log" 2>&1
