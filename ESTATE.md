@@ -46,11 +46,13 @@ Keep this list current. Merge conflicts can only come from these files.
   `render_explicit_files`, unchanged. Tests in `runtime.rs`. HTTP API / MCP
   callers on a CLI provider that pass attached files get their text in the
   reply too, when the search finds a page; with no hits they get upstream's
-  "not configured" error. Until v0.6.12 this file also carried upstream PR
+  "not configured" error.
+
+  History: until v0.6.12, `runtime.rs` also carried upstream PR
   nashsu/llm_wiki#727, so that a CLI chat question matching no wiki page did
-  not fail before `claude` started; v0.6.12 fixes that itself (upstream
-  commit ba39c7c, a preflight flag the chat panel sets), #727 was closed
-  unmerged, and the estate now runs upstream's fix.
+  not fail before `claude` started. v0.6.12 fixes that itself (upstream
+  commit ba39c7c: the chat panel sets a preflight flag), #727 was closed
+  unmerged, and the estate runs upstream's fix.
 - `src/components/layout/activity-panel.tsx`, `src/i18n/{en,it,ru,zh}.json` –
   a "Clear finished from queue" link at the bottom of the activity panel,
   under "Clear completed". It removes done, failed and cancelled items from

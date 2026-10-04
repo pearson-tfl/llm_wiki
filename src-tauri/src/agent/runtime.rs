@@ -4181,7 +4181,7 @@ mod tests {
                 ..Default::default()
             })
             .await
-            .expect("retrieval-only turn must succeed for CLI transports");
+            .expect("the chat panel's CLI preflight must succeed with no search hits");
 
         assert!(response.ok);
         assert!(response.references.is_empty());
@@ -4221,25 +4221,38 @@ mod tests {
             None,
         );
 
+        let request = AgentChatRequest {
+            message: "did you read this page".to_string(),
+            session_id: Some("s1".to_string()),
+            mode: AgentMode::Standard,
+            tools: AgentToolOptions {
+                wiki: true,
+                web: false,
+                anytxt: false,
+            },
+            context_files: vec!["wiki/concepts/attached.md".to_string()],
+            allow_empty_retrieval: true,
+            ..Default::default()
+        };
         let response = runtime
-            .run_once(AgentChatRequest {
-                message: "did you read this page".to_string(),
-                session_id: Some("s1".to_string()),
-                mode: AgentMode::Standard,
-                tools: AgentToolOptions {
-                    wiki: true,
-                    web: false,
-                    anytxt: false,
-                },
-                context_files: vec!["wiki/concepts/attached.md".to_string()],
-                allow_empty_retrieval: true,
-                ..Default::default()
-            })
+            .run_once(request.clone())
             .await
-            .expect("retrieval-only turn must succeed for CLI transports");
+            .expect("the chat panel's CLI preflight must succeed with no search hits");
 
         assert!(response.message.contains("User-selected project files:"));
         assert!(response.message.contains("zebracornucopia body text"));
+
+        // HTTP API / MCP callers never set the preflight flag: with no search
+        // hits they get upstream's error, attached files or not (ESTATE.md).
+        let error = runtime
+            .run_once(AgentChatRequest {
+                session_id: Some("s2".to_string()),
+                allow_empty_retrieval: false,
+                ..request
+            })
+            .await
+            .expect_err("a request without the preflight flag keeps upstream's error");
+        assert!(error.contains("Backend Agent LLM is not configured"));
     }
 
     #[tokio::test]
