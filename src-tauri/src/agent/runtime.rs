@@ -1258,27 +1258,16 @@ impl AgentRuntime {
                 }
             }
         } else {
-            // CLI transports (claude-code / codex-cli) deliberately fail
-            // is_usable_for_backend_http(); for them this backend turn is a
-            // retrieval-only pass and the frontend generates the answer by
-            // spawning the local binary. An empty hit list is a normal
-            // outcome there (a brand-new wiki matches nothing), so it must
-            // not be reported as "LLM is not configured" — doing so aborts
-            // the turn before the CLI is ever spawned.
+            let mut answer = answer_without_backend_generator(
+                message,
+                &references,
+                request.allow_empty_retrieval,
+            )?;
+            // Estate fork (pearson-tfl/llm_wiki): the CLI model sees only this
+            // answer, so carry the files the user attached with @.
             let is_cli_transport = self.llm_config.as_ref().is_some_and(|cfg| {
                 matches!(cfg.provider.as_str(), "claude-code" | "codex-cli")
             });
-            if references.is_empty() && !is_cli_transport {
-                return Err(
-                    "Backend Agent LLM is not configured or the selected Chat model is unavailable. Check Settings > Models and try again."
-                        .to_string(),
-                );
-            }
-            // Preserve the retrieval-only API behavior, but never expose
-            // router diagnostics as assistant prose when no generator exists.
-            let mut answer = build_retrieval_answer(message, &references);
-            // Estate fork (pearson-tfl/llm_wiki): the CLI model sees only this
-            // answer, so carry the files the user attached with @.
             if is_cli_transport && !explicit_files.is_empty() {
                 answer.push_str(
                     "\n\nThe user attached these files with @. Use them even if the search above found nothing.\n",
@@ -4027,6 +4016,26 @@ fn build_retrieval_answer(query: &str, references: &[AgentReference]) -> String 
     out
 }
 
+fn answer_without_backend_generator(
+    query: &str,
+    references: &[AgentReference],
+    allow_empty_retrieval: bool,
+) -> Result<String, String> {
+    if references.is_empty() {
+        return if allow_empty_retrieval {
+            Ok(String::new())
+        } else {
+            Err(
+                "Backend Agent LLM is not configured or the selected Chat model is unavailable. Check Settings > Models and try again."
+                    .to_string(),
+            )
+        };
+    }
+    // Preserve the retrieval-only API behavior, but never expose router
+    // diagnostics as assistant prose when no generator exists.
+    Ok(build_retrieval_answer(query, references))
+}
+
 fn mode_label(mode: AgentMode) -> &'static str {
     match mode {
         AgentMode::Fast => "fast",
@@ -4130,12 +4139,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cli_transport_with_no_wiki_hits_returns_retrieval_answer_not_an_error() {
-        // Regression: claude-code / codex-cli deliberately return false from
-        // is_usable_for_backend_http(), so this backend turn is retrieval-only
-        // and the frontend spawns the local binary to generate. A fresh wiki
-        // matches nothing, and that used to abort the turn with
-        // "LLM is not configured" before the CLI was ever spawned.
+    async fn cli_preflight_with_no_wiki_hits_and_no_attachments_returns_empty_answer() {
+        // Estate fork: the @-files addition must leave upstream's empty
+        // retrieval preflight (allow_empty_retrieval) untouched when nothing
+        // is attached.
         let project = temp_project("cli-transport-no-hits");
         let runtime = AgentRuntime::new(
             "project-1",
@@ -4170,6 +4177,7 @@ mod tests {
                     web: false,
                     anytxt: false,
                 },
+                allow_empty_retrieval: true,
                 ..Default::default()
             })
             .await
@@ -4177,8 +4185,7 @@ mod tests {
 
         assert!(response.ok);
         assert!(response.references.is_empty());
-        assert!(!response.message.contains("Chat model is unavailable"));
-        assert!(!response.message.contains("Router intent="));
+        assert_eq!(response.message, "");
     }
 
     #[tokio::test]
@@ -4225,6 +4232,7 @@ mod tests {
                     anytxt: false,
                 },
                 context_files: vec!["wiki/concepts/attached.md".to_string()],
+                allow_empty_retrieval: true,
                 ..Default::default()
             })
             .await
@@ -5895,5 +5903,34 @@ mod tests {
 
         let too_many = vec![valid; MAX_IMAGES_PER_TURN + 1];
         assert!(validate_images(&too_many).is_err());
+    }
+
+    #[test]
+    fn retrieval_only_preflight_allows_an_empty_reference_set() {
+        assert_eq!(
+            answer_without_backend_generator("hello", &[], true).unwrap(),
+            ""
+        );
+    }
+
+    #[test]
+    fn retrieval_preflight_with_references_returns_the_evidence_summary() {
+        let references = vec![AgentReference {
+            title: "Page".to_string(),
+            path: "wiki/page.md".to_string(),
+            kind: "wiki".to_string(),
+            snippet: Some("Relevant evidence".to_string()),
+            score: None,
+            knowledge_context: None,
+        }];
+        let answer = answer_without_backend_generator("question", &references, true).unwrap();
+        assert!(answer.contains("Page (wiki/page.md)"));
+        assert!(answer.contains("Relevant evidence"));
+    }
+
+    #[test]
+    fn normal_backend_requests_still_require_a_generator_or_references() {
+        let error = answer_without_backend_generator("hello", &[], false).unwrap_err();
+        assert!(error.contains("Backend Agent LLM is not configured"));
     }
 }

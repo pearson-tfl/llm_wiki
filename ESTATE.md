@@ -36,24 +36,21 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/components/settings/sections/llm-provider-section.tsx` – the app's
   sign-in hints say `CLAUDE_CONFIG_DIR=~/.claude claude`, not bare `claude`,
   which would sign in the other account.
-- `src/lib/__tests__/claude-cli-transport.test.ts` – the hint test expects
-  that command.
-- `src-tauri/src/agent/runtime.rs` – upstream PR nashsu/llm_wiki#727
-  (unmerged there when taken, 26 Sep 2026), cherry-picked as is: with the
-  Claude Code or Codex CLI provider, a chat question that matches no wiki page
-  no longer fails with "Backend Agent LLM is not configured" before `claude`
-  starts (upstream issues #696, #703, #720). When an upstream release contains
-  #727, take upstream's version of this file. Side effect: HTTP API / MCP
-  callers on a CLI provider now get a "did not find matching wiki pages" reply
-  instead of an error.
+- `src/lib/__tests__/claude-cli-transport.test.ts` – the two hint tests
+  expect that command.
 - `src-tauri/src/agent/runtime.rs`, `src-tauri/src/agent/context.rs` – with
   the Claude Code or Codex CLI provider, pages attached with @ reach the
   model: the chat turn's retrieval answer carries their text, in the same
   form the HTTP providers get. Upstream sends it only to HTTP providers.
   `context.rs` moves that formatting into its own function,
-  `render_explicit_files`, unchanged. Test in `runtime.rs`. HTTP API / MCP
+  `render_explicit_files`, unchanged. Tests in `runtime.rs`. HTTP API / MCP
   callers on a CLI provider that pass attached files get their text in the
-  reply too.
+  reply too, when the search finds a page; with no hits they get upstream's
+  "not configured" error. Until v0.6.12 this file also carried upstream PR
+  nashsu/llm_wiki#727, so that a CLI chat question matching no wiki page did
+  not fail before `claude` started; v0.6.12 fixes that itself (upstream
+  commit ba39c7c, a preflight flag the chat panel sets), #727 was closed
+  unmerged, and the estate now runs upstream's fix.
 - `src/components/layout/activity-panel.tsx`, `src/i18n/{en,it,ru,zh}.json` –
   a "Clear finished from queue" link at the bottom of the activity panel,
   under "Clear completed". It removes done, failed and cancelled items from
@@ -148,6 +145,10 @@ npm ci && npm run typecheck && npm run test:mocks
 (cd src-tauri && cargo test --lib -- claude_cli agent::runtime)
 git push origin estate
 ```
+
+In a fresh checkout or worktree, `cargo test` stops in the build script
+until `mcp-server` is installed and built:
+`npm --prefix mcp-server ci && npm run mcp:build`.
 
 Then Build and Install as above. Record the release, the new commit and the
 test result on the ticket.
