@@ -249,7 +249,12 @@ def plan(vault, mapping):
             continue
         key = rel(vault, path)
         before = path.read_bytes()
-        after = rewrite(before.decode("utf-8", errors="strict"), mapping, pattern, key, problems).encode("utf-8")
+        try:
+            text = before.decode("utf-8")
+        except UnicodeDecodeError as err:
+            problems.append(f"{key} is not UTF-8: {err}")
+            continue
+        after = rewrite(text, mapping, pattern, key, problems).encode("utf-8")
         entry = snapshot["files"].get(key)
         if not isinstance(entry, dict) or entry.get("hash") != md5(before):
             problems.append(f"{key}: the app's snapshot does not record its current content")
@@ -305,22 +310,12 @@ def frontmatter_list(text, key):
     if not text.startswith("---"):
         return []
     end = text.find("\n---", 3)
-    lines = text[3:end if end >= 0 else len(text)].splitlines()
-    for i, line in enumerate(lines):
-        match = re.match(rf"^{key}:\s*(.*)$", line)
-        if not match:
-            continue
-        value = match.group(1).strip()
-        if value.startswith("["):
-            items = re.findall(r'"([^"]*)"|\'([^\']*)\'|([^,\[\]\s][^,\[\]]*)', value)
+    # The vault writes these lists inline, as [a, b]; it has no block lists.
+    for line in text[3:end if end >= 0 else len(text)].splitlines():
+        match = re.match(rf"^{key}:\s*(\[.*)$", line)
+        if match:
+            items = re.findall(r'"([^"]*)"|\'([^\']*)\'|([^,\[\]\s][^,\[\]]*)', match.group(1))
             return [next(x for x in item if x).strip() for item in items if any(item)]
-        block = []
-        for follow in lines[i + 1:]:
-            item = re.match(r"^\s*-\s*(.+)$", follow)
-            if not item:
-                break
-            block.append(item.group(1).strip().strip("\"'"))
-        return block
     return []
 
 
@@ -345,8 +340,9 @@ def check(vault):
     vault = Path(vault)
     pages = wiki_pages(vault)
     page_keys = {wiki_key(p.stem) for p in pages}
-    source_names = {p.name.lower() for p in (vault / "raw/sources").rglob("*") if p.is_file()}
-    source_names |= {rel(vault, p)[len("raw/sources/"):].lower() for p in (vault / "raw/sources").rglob("*") if p.is_file()}
+    source_files = [p for p in (vault / "raw/sources").rglob("*") if p.is_file()]
+    source_names = {p.name.lower() for p in source_files}
+    source_names |= {rel(vault, p)[len("raw/sources/"):].lower() for p in source_files}
     summary_names = {p.name.lower() for p in (vault / "wiki/sources").glob("*.md")}
     raw_sources = sorted(p for p in (vault / "raw/sources").rglob("*.md") if p.is_file())
 
@@ -391,8 +387,12 @@ def api_post(base, route, body, token):
         method="POST",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
-    with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
-        return json.loads(response.read())
+    try:
+        with urllib.request.urlopen(request, timeout=API_TIMEOUT_S) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as err:
+        err.close()
+        raise
 
 
 def page_title(path):
@@ -425,8 +425,6 @@ def embed(vault, mapping, base=API_BASE, token_file=API_TOKEN):
             report["embedded"].append(page)
         except (urllib.error.URLError, OSError, ValueError) as err:
             report["failed"].append(f"{page}: {err}")
-            if isinstance(err, urllib.error.HTTPError):
-                err.close()
     for page in pages[:PROOF_SEARCHES]:
         title = page_title(vault / page)
         try:
@@ -452,7 +450,7 @@ def main(argv=None):
             print(json.dumps(apply(args.vault, load_map(MAP_FILE))))
             return 0
         if args.command == "embed":
-            report = embed(args.vault, load_map(MAP_FILE))
+            report = embed(args.vault, load_map(MAP_FILE), API_BASE, API_TOKEN)
             print(json.dumps(report, indent=2))
             proven = all(s.get("path") and s.get("vectorScore") is not None for s in report["searches"])
             return 0 if not report["failed"] and proven else 1

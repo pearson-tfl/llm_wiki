@@ -70,9 +70,11 @@ def main(run):
     prove("the comparison sees each of the 68 old raw paths deleted and each new one created",
           sorted((t["kind"], t["path"] in old_raw) for t in ours) == sorted([("created", False)] * 68 + [("deleted", True)] * 68),
           len(ours))
-    prove("each pair carries one content hash", all(
-        any(t["hashBefore"] == c.get("hashAfter") for c in ours if c["kind"] == "created")
-        for t in ours if t["kind"] == "deleted"))
+    hash_of = {t["path"]: t.get("hashBefore") if t["kind"] == "deleted" else t.get("hashAfter") for t in ours}
+    unpaired = [f"{ers.PREFIX}{old}" for old, new in MAPPING.items()
+                if not hash_of.get(f"raw/sources/{ers.PREFIX}{old}.md")
+                or hash_of.get(f"raw/sources/{ers.PREFIX}{old}.md") != hash_of.get(f"raw/sources/{new}.md")]
+    prove("each old path and its listed new path carry one content hash", not unpaired, unpaired[:5])
     other_raw = {(t["path"], t["kind"]) for t in tasks if t["path"].startswith("raw/sources/") and t["path"] not in old_raw | new_raw}
     prove("no other raw/sources change beyond the baseline copy's", other_raw <= baseline_tasks, sorted(other_raw - baseline_tasks)[:5])
 

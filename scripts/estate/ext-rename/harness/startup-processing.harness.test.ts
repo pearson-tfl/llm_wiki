@@ -100,6 +100,10 @@ describe.skipIf(!env.EXT_RENAME_VAULT)("app startup processing on a vault copy",
     const { useFileSyncStore } = await import("@/stores/file-sync-store")
 
     const vault = env.EXT_RENAME_VAULT as string
+    // This test writes to the vault it is given: only a prove-on-copy.sh copy.
+    if (!/\/run-[0-9T]+\/(baseline|vault|control)$/.test(vault)) {
+      throw new Error(`not a prove-on-copy.sh copy: ${vault}`)
+    }
     const project = { id: env.EXT_RENAME_PROJECT_ID as string, name: "vault copy", path: vault }
     useWikiStore.getState().setProject(project as never)
     const config = JSON.parse(env.EXT_RENAME_WATCH_CONFIG as string)
@@ -118,6 +122,7 @@ describe.skipIf(!env.EXT_RENAME_VAULT)("app startup processing on a vault copy",
     }
     fs.writeFileSync(env.EXT_RENAME_REPORT as string, JSON.stringify(report, null, 2))
     expect(report.lastError).toBeNull()
-    // The app walks every wiki page for each move: minutes on a real vault.
-  }, 600_000)
+  },
+  // The app walks every wiki page for each move: minutes on a real vault.
+  600_000)
 })

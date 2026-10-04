@@ -5,13 +5,16 @@ lines are copied from the Agent Harness Wiki as it stood on 4 Oct 2026.
 Run: python3 -m unittest discover -s scripts/estate/ext-rename
 """
 
+import contextlib
 import hashlib
 import http.server
+import io
 import json
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import rename_ext_sources as ers
 
@@ -30,6 +33,15 @@ RAW_PLAIN = (
     "> Source: https://github.com/openai/swarm (fetched 2026-09-29 via "
     "learn-agent-architecture links)\n\n# Swarm (experimental, educational)\n"
 )
+# raw/sources/learn-agent-arch-ext-ai-agent-book-readme.md, line 6: a
+# percent-encoded asset link, here pointed at the a2a fixture's folder.
+PERCENT_LINE = (
+    "[![Trending GitHub Project of the Day](../assets/{folder}/"
+    "GitHub%20Trending-Project%20of%20the%20Day-orange.svg)](https://github.com/trending)\n"
+)
+# raw/sources/openclaw-docs-gateway-and-ops--nodes-and-media--node-features.md,
+# line 411: an angle-bracketed link. All 9 such links in the vault are rooted.
+ANGLE_LINE = '- <a id="behavior-(macos)" />[Behavior (macOS)](</nodes/talk/macos-relay#behavior-(macos)>)\n'
 RAW_SPEC = "> Source: https://modelcontextprotocol.io/specification/2026-07-28\n\n# Specification\n"
 RAW_CHANGELOG = (
     "> Source: https://modelcontextprotocol.io/specification/2026-07-28/changelog\n\n# Key Changes\n"
@@ -56,6 +68,10 @@ LOG = (
     f"- Ingested `{P}openai-swarm-readme.md`\n"
     f"- Ingested {P}a2a-readme.md\n"
 )
+
+# SWARM_SUMMARY, EVENT_LEDGER and LOG: wiki/sources/learn-agent-arch-ext-
+# openai-swarm-readme.md, wiki/concepts/event-ledger.md and wiki/log.md, with
+# EVENT_LEDGER adding one line per link form the vault uses.
 
 # .llm-wiki/review.json and ingest-cache.json, one live item each, trimmed.
 REVIEW = [
@@ -227,6 +243,25 @@ class ApplyTests(VaultCase):
         self.assertEqual([], after["prefixed_names"])
         self.assertEqual({"raw": 0, "wiki": 0}, after["files_mentioning_prefix"])
 
+    def test_percent_encoded_asset_link_follows_the_rename_and_resolves(self):
+        source = self.vault / f"raw/sources/{P}a2a-readme.md"
+        source.write_text(RAW_WITH_ASSETS + PERCENT_LINE.format(folder=f"{P}a2a-readme"))
+        asset = self.vault / f"raw/assets/{P}a2a-readme/GitHub Trending-Project of the Day-orange.svg"
+        asset.write_text("<svg/>")
+        self.write_snapshot()
+        self.assertEqual(0, ers.check(self.vault)["broken_relative_links_raw"])
+        ers.apply(self.vault, MAP)
+        text = (self.vault / "raw/sources/agent2agent-a2a-protocol-readme.md").read_text()
+        self.assertIn(PERCENT_LINE.format(folder="agent2agent-a2a-protocol-readme"), text)
+        self.assertEqual(0, ers.check(self.vault)["broken_relative_links_raw"])
+
+    def test_check_skips_a_rooted_angle_link_and_resolves_a_relative_one(self):
+        (self.vault / "raw/sources/other.md").write_text(
+            ANGLE_LINE + "[Swarm](<../assets/swarm/logo.svg>)\n[Self](<other.md>)\n"
+        )
+        report = ers.check(self.vault)
+        self.assertEqual(1, report["broken_relative_links_raw"])
+        self.assertIn("raw/sources/other.md -> ../assets/swarm/logo.svg", report["broken"])
 
     def test_rewrites_review_and_ingest_cache_path_fields_only(self):
         ers.apply(self.vault, MAP)
@@ -302,6 +337,11 @@ class GuardTests(VaultCase):
         self.write_store("review.json", [{**REVIEW[0], "description": f"See {P}a2a-readme.md"}])
         self.assertRefused("outside the fields")
 
+    def test_refuses_a_listed_source_that_is_not_utf8(self):
+        (self.vault / f"raw/sources/{P}openai-swarm-readme.md").write_bytes(RAW_PLAIN.encode() + b"\xff\xfe")
+        self.write_snapshot()
+        self.assertRefused(f"raw/sources/{P}openai-swarm-readme.md is not UTF-8")
+
     def test_refuses_a_listed_source_that_is_missing(self):
         (self.vault / f"raw/sources/{P}a2a-readme.md").unlink()
         self.write_snapshot()
@@ -311,6 +351,8 @@ class GuardTests(VaultCase):
 class StubApi(http.server.BaseHTTPRequestHandler):
     calls = []
     fail_paths = set()
+    fail_search = False
+    find_all = False
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -321,6 +363,12 @@ class StubApi(http.server.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             reply = {"ok": True, "result": {"path": body["path"], "status": "indexed"}}
+        elif StubApi.fail_search:
+            self.send_response(500)
+            self.end_headers()
+            return
+        elif StubApi.find_all:
+            reply = {"results": [{"path": f"wiki/sources/{new}.md", "vectorScore": 0.8} for new in MAP.values()]}
         else:
             hit = "wiki/sources/swarm-readme.md" if "Swarm" in body["query"] else "wiki/x.md"
             reply = {"results": [{"path": hit, "vectorScore": 0.8}]}
@@ -339,6 +387,7 @@ class EmbedTests(VaultCase):
         super().setUp()
         ers.apply(self.vault, MAP)
         StubApi.calls, StubApi.fail_paths = [], set()
+        StubApi.fail_search = StubApi.find_all = False
         # Port 0: the OS picks a free port; the server lives in this process.
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubApi)
         self.port = self.server.server_address[1]
@@ -384,6 +433,66 @@ class EmbedTests(VaultCase):
             self.run_embed()
         self.assertEqual([], StubApi.calls)
 
+    def test_refuses_an_empty_token_file(self):
+        self.token.write_text("\n")
+        with self.assertRaisesRegex(ers.Refusal, "is empty"):
+            self.run_embed()
+        self.assertEqual([], StubApi.calls)
+
+    def test_refuses_a_vault_without_project_json(self):
+        (self.vault / ers.PROJECT).unlink()
+        with self.assertRaisesRegex(ers.Refusal, "project.json"):
+            self.run_embed()
+        self.assertEqual([], StubApi.calls)
+
+    def test_reports_a_search_the_api_turns_away(self):
+        StubApi.fail_search = True
+        report = self.run_embed()
+        self.assertEqual(len(MAP), len(report["searches"]))
+        self.assertTrue(all("HTTP Error 500" in s["error"] for s in report["searches"]))
+
+    def run_main(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ers, "MAP_FILE", self.map_file), \
+                mock.patch.object(ers, "API_BASE", f"http://127.0.0.1:{self.port}/api/v1"), \
+                mock.patch.object(ers, "API_TOKEN", self.token), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ers.main(argv)
+        return code, out.getvalue(), err.getvalue()
+
+    @property
+    def map_file(self):
+        path = Path(self._tmp.name) / "map.tsv"
+        path.write_text("".join(f"{old}\t{new}\n" for old, new in MAP.items()))
+        return path
+
+    def test_main_embed_exits_0_only_when_every_search_finds_its_page(self):
+        StubApi.find_all = True
+        self.assertEqual(0, self.run_main(["embed", str(self.vault)])[0])
+        StubApi.find_all = False
+        self.assertEqual(1, self.run_main(["embed", str(self.vault)])[0])
+
+    def test_main_embed_exits_1_when_a_page_fails(self):
+        StubApi.find_all = True
+        StubApi.fail_paths = {"wiki/sources/swarm-readme.md"}
+        self.assertEqual(1, self.run_main(["embed", str(self.vault)])[0])
+
+    def test_main_reports_a_refusal_on_stderr_and_exits_1(self):
+        self.token.unlink()
+        code, out, err = self.run_main(["embed", str(self.vault)])
+        self.assertEqual((1, ""), (code, out))
+        self.assertIn("cannot read the API token file", err)
+
+    def test_main_check_full_lists_every_broken_link(self):
+        code, out, _ = self.run_main(["check", str(self.vault), "--full"])
+        self.assertEqual(0, code)
+        full = json.loads(out)
+        self.assertEqual([], full["prefixed_names"])
+        self.assertIn("wiki/concepts/event-ledger.md -> [[missing-page]]", full["broken"])
+        brief = json.loads(self.run_main(["check", str(self.vault)])[1])
+        self.assertEqual(0, brief["prefixed_names"])
+        self.assertNotIn("broken", brief)
+
 
 class MapTests(unittest.TestCase):
     def load(self, text):
@@ -403,6 +512,10 @@ class MapTests(unittest.TestCase):
     def test_refuses_a_duplicate_new_name(self):
         with self.assertRaises(ers.Refusal):
             self.load("a\tsame\nb\tsame\n")
+
+    def test_refuses_a_duplicate_old_name(self):
+        with self.assertRaisesRegex(ers.Refusal, "listed twice"):
+            self.load("same\ta\nSAME\tb\n")
 
     def test_refuses_a_new_name_that_carries_the_prefix(self):
         with self.assertRaises(ers.Refusal):
