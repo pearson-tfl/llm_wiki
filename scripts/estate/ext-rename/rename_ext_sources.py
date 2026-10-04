@@ -249,12 +249,7 @@ def plan(vault, mapping):
             continue
         key = rel(vault, path)
         before = path.read_bytes()
-        try:
-            text = before.decode("utf-8")
-        except UnicodeDecodeError as err:
-            problems.append(f"{key} is not UTF-8: {err}")
-            continue
-        after = rewrite(text, mapping, pattern, key, problems).encode("utf-8")
+        after = rewrite(read_text(path), mapping, pattern, key, problems).encode("utf-8")
         entry = snapshot["files"].get(key)
         if not isinstance(entry, dict) or entry.get("hash") != md5(before):
             problems.append(f"{key}: the app's snapshot does not record its current content")
@@ -450,6 +445,7 @@ def main(argv=None):
             print(json.dumps(apply(args.vault, load_map(MAP_FILE))))
             return 0
         if args.command == "embed":
+            # Read here, not bound as embed's defaults, so a test can patch them.
             report = embed(args.vault, load_map(MAP_FILE), API_BASE, API_TOKEN)
             print(json.dumps(report, indent=2))
             proven = all(s.get("path") and s.get("vectorScore") is not None for s in report["searches"])

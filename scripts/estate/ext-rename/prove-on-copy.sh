@@ -2,7 +2,8 @@
 # Phase A proof for pearson-tfl/llm_wiki#3. Copies a vault's raw/, wiki/ and
 # the .llm-wiki stores the rename reads, runs `apply` on the copy, then runs
 # the app's own startup comparison (Rust) and change processing (TypeScript)
-# on an untouched copy and on the renamed copy, and summarises both.
+# on three copies: untouched, renamed, and renamed with the snapshot left
+# unedited (the control). Summarises all three.
 # Reads VAULT only; every write is under the scratch folder.
 #
 #   prove-on-copy.sh VAULT

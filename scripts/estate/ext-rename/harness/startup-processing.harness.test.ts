@@ -7,6 +7,7 @@
 import fs from "node:fs"
 import nodePath from "node:path"
 import { describe, expect, it, vi } from "vitest"
+import { assertCopyVault } from "./copy-vault"
 
 const env = process.env
 
@@ -100,10 +101,7 @@ describe.skipIf(!env.EXT_RENAME_VAULT)("app startup processing on a vault copy",
     const { useFileSyncStore } = await import("@/stores/file-sync-store")
 
     const vault = env.EXT_RENAME_VAULT as string
-    // This test writes to the vault it is given: only a prove-on-copy.sh copy.
-    if (!/\/run-[0-9T]+\/(baseline|vault|control)$/.test(vault)) {
-      throw new Error(`not a prove-on-copy.sh copy: ${vault}`)
-    }
+    assertCopyVault(vault)
     const project = { id: env.EXT_RENAME_PROJECT_ID as string, name: "vault copy", path: vault }
     useWikiStore.getState().setProject(project as never)
     const config = JSON.parse(env.EXT_RENAME_WATCH_CONFIG as string)

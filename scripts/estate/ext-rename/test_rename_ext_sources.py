@@ -71,7 +71,7 @@ LOG = (
 
 # SWARM_SUMMARY, EVENT_LEDGER and LOG: wiki/sources/learn-agent-arch-ext-
 # openai-swarm-readme.md, wiki/concepts/event-ledger.md and wiki/log.md, with
-# EVENT_LEDGER adding one line per link form the vault uses.
+# EVENT_LEDGER adding one line per wikilink and frontmatter form.
 
 # .llm-wiki/review.json and ingest-cache.json, one live item each, trimmed.
 REVIEW = [
@@ -340,7 +340,7 @@ class GuardTests(VaultCase):
     def test_refuses_a_listed_source_that_is_not_utf8(self):
         (self.vault / f"raw/sources/{P}openai-swarm-readme.md").write_bytes(RAW_PLAIN.encode() + b"\xff\xfe")
         self.write_snapshot()
-        self.assertRefused(f"raw/sources/{P}openai-swarm-readme.md is not UTF-8")
+        self.assertRefused(f"cannot read {self.vault}/raw/sources/{P}openai-swarm-readme.md")
 
     def test_refuses_a_listed_source_that_is_missing(self):
         (self.vault / f"raw/sources/{P}a2a-readme.md").unlink()
@@ -453,15 +453,14 @@ class EmbedTests(VaultCase):
 
     def run_main(self, argv):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(ers, "MAP_FILE", self.map_file), \
+        with mock.patch.object(ers, "MAP_FILE", self.write_map_file()), \
                 mock.patch.object(ers, "API_BASE", f"http://127.0.0.1:{self.port}/api/v1"), \
                 mock.patch.object(ers, "API_TOKEN", self.token), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = ers.main(argv)
         return code, out.getvalue(), err.getvalue()
 
-    @property
-    def map_file(self):
+    def write_map_file(self):
         path = Path(self._tmp.name) / "map.tsv"
         path.write_text("".join(f"{old}\t{new}\n" for old, new in MAP.items()))
         return path
