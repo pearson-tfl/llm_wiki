@@ -205,7 +205,10 @@ def rewrite_stores(vault, mapping, pattern, problems):
 
 
 def plan(vault, mapping):
-    """Work out every write; raise Refusal listing every problem found."""
+    """Work out every write; raise Refusal listing every problem found.
+
+    A file it cannot read or decode stops it at once, with that file named.
+    """
     vault = Path(vault)
     problems, renames, writes = [], [], {}
     pattern = mention_pattern(mapping)
