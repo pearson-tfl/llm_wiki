@@ -292,7 +292,13 @@ def apply(vault, mapping):
         moved.get(path, path).write_bytes(data)
     for path, data in stores.items():
         write_json(path, data)
-    return {"renamed": len(renames), "rewritten": len(writes), "stores": len(stores)}
+    raw_rewritten = sorted(moved.get(p, p).name for p in writes if p.parent == vault / "raw/sources")
+    return {
+        "renamed": len(renames),
+        "rewritten": len(writes),
+        "raw_rewritten": raw_rewritten,
+        "stores": sorted(rel(vault, p) for p in stores),
+    }
 
 
 def frontmatter_list(text, key):
