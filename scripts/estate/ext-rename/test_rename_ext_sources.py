@@ -6,8 +6,10 @@ Run: python3 -m unittest discover -s scripts/estate/ext-rename
 """
 
 import hashlib
+import http.server
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -55,6 +57,29 @@ LOG = (
     f"- Ingested {P}a2a-readme.md\n"
 )
 
+# .llm-wiki/review.json and ingest-cache.json, one live item each, trimmed.
+REVIEW = [
+    {
+        "type": "suggestion",
+        "title": "Identify the versioned A2A specification behind the README snapshot",
+        "sourcePath": f"/Users/johnp/Vault/raw/sources/{P}a2a-readme.md",
+        "affectedPages": [f"wiki/sources/{P}a2a-readme.md", "wiki/entities/a2a.md"],
+        "id": "review-54450d9d",
+        "resolved": False,
+    },
+    {"type": "missing-page", "title": "Agent handoffs", "id": "review-2", "resolved": True},
+]
+INGEST_CACHE = {
+    "entries": {
+        f"{P}openai-swarm-readme.md": {
+            "hash": "ab" * 32,
+            "timestamp": 1790722296808,
+            "filesWritten": [f"wiki/sources/{P}openai-swarm-readme.md", "wiki/entities/swarm.md"],
+        },
+        "other.md": {"hash": "cd" * 32, "timestamp": 1, "filesWritten": ["wiki/sources/other.md"]},
+    }
+}
+
 MAP = {
     "a2a-readme": "agent2agent-a2a-protocol-readme",
     "openai-swarm-readme": "swarm-readme",
@@ -93,6 +118,9 @@ class VaultCase(unittest.TestCase):
             path.write_text(text, encoding="utf-8")
         (self.vault / f"wiki/media/{P}openai-swarm-readme").mkdir(parents=True)
         self.write_snapshot()
+        self.write_store("review.json", REVIEW)
+        self.write_store("ingest-cache.json", INGEST_CACHE)
+        self.write_store("project.json", {"id": "proj-1", "createdAt": 1})
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -106,6 +134,12 @@ class VaultCase(unittest.TestCase):
         snap = self.vault / ".llm-wiki/file-snapshot.json"
         snap.parent.mkdir(exist_ok=True)
         snap.write_text(json.dumps({"version": 1, "updatedAt": 1, "files": entries}))
+
+    def write_store(self, name, data):
+        (self.vault / ".llm-wiki" / name).write_text(json.dumps(data, indent=2))
+
+    def store(self, name):
+        return json.loads((self.vault / ".llm-wiki" / name).read_text())
 
     def snapshot(self):
         return json.loads((self.vault / ".llm-wiki/file-snapshot.json").read_text())["files"]
@@ -185,9 +219,28 @@ class ApplyTests(VaultCase):
         ers.apply(self.vault, MAP)
         after = ers.check(self.vault)
         self.assertEqual(1, after["broken_wikilinks"])
-        self.assertEqual(0, after["broken_frontmatter_refs"])
+        # The fixture's related: pages do not exist; the rename adds no break.
+        self.assertEqual(
+            [b.replace(f"{P}openai-swarm-readme", "swarm-readme") for b in before["broken"]],
+            after["broken"],
+        )
         self.assertEqual([], after["prefixed_names"])
         self.assertEqual({"raw": 0, "wiki": 0}, after["files_mentioning_prefix"])
+
+
+    def test_rewrites_review_and_ingest_cache_path_fields_only(self):
+        ers.apply(self.vault, MAP)
+        review = self.store("review.json")
+        self.assertEqual(f"/Users/johnp/Vault/raw/sources/agent2agent-a2a-protocol-readme.md", review[0]["sourcePath"])
+        self.assertEqual(["wiki/sources/agent2agent-a2a-protocol-readme.md", "wiki/entities/a2a.md"], review[0]["affectedPages"])
+        self.assertEqual(REVIEW[1], review[1])
+        self.assertEqual(REVIEW[0]["title"], review[0]["title"])
+        cache = self.store("ingest-cache.json")["entries"]
+        # The key stays: the app moves it when it pairs the move.
+        entry = cache[f"{P}openai-swarm-readme.md"]
+        self.assertEqual(["wiki/sources/swarm-readme.md", "wiki/entities/swarm.md"], entry["filesWritten"])
+        self.assertEqual(INGEST_CACHE["entries"][f"{P}openai-swarm-readme.md"]["hash"], entry["hash"])
+        self.assertEqual(INGEST_CACHE["entries"]["other.md"], cache["other.md"])
 
 
 class GuardTests(VaultCase):
@@ -237,10 +290,99 @@ class GuardTests(VaultCase):
         (self.vault / ".llm-wiki/file-snapshot.json").write_text("{not json")
         self.assertRefused("file-snapshot.json")
 
+    def test_refuses_an_unreadable_review_store(self):
+        (self.vault / ".llm-wiki/review.json").write_text("[{")
+        self.assertRefused("review.json")
+
+    def test_refuses_a_missing_ingest_cache(self):
+        (self.vault / ".llm-wiki/ingest-cache.json").unlink()
+        self.assertRefused("ingest-cache.json")
+
+    def test_refuses_an_old_name_outside_the_ruled_store_fields(self):
+        self.write_store("review.json", [{**REVIEW[0], "description": f"See {P}a2a-readme.md"}])
+        self.assertRefused("outside the fields")
+
     def test_refuses_a_listed_source_that_is_missing(self):
         (self.vault / f"raw/sources/{P}a2a-readme.md").unlink()
         self.write_snapshot()
         self.assertRefused(f"raw/sources/{P}a2a-readme.md is missing")
+
+
+class StubApi(http.server.BaseHTTPRequestHandler):
+    calls = []
+    fail_paths = set()
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        StubApi.calls.append((self.path, self.headers["Authorization"], body))
+        if self.path.endswith("/pages/embed"):
+            if body["path"] in StubApi.fail_paths:
+                self.send_response(503)
+                self.end_headers()
+                return
+            reply = {"ok": True, "result": {"path": body["path"], "status": "indexed"}}
+        else:
+            hit = "wiki/sources/swarm-readme.md" if "Swarm" in body["query"] else "wiki/x.md"
+            reply = {"results": [{"path": hit, "vectorScore": 0.8}]}
+        data = json.dumps(reply).encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class EmbedTests(VaultCase):
+    def setUp(self):
+        super().setUp()
+        ers.apply(self.vault, MAP)
+        StubApi.calls, StubApi.fail_paths = [], set()
+        # Port 0: the OS picks a free port; the server lives in this process.
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), StubApi)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.thread.join)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.token = Path(self._tmp.name) / "api-token"
+        self.token.write_text("secret-token\n")
+
+    def run_embed(self):
+        return ers.embed(self.vault, MAP, base=f"http://127.0.0.1:{self.port}/api/v1", token_file=self.token)
+
+    def test_embeds_each_renamed_page_once_with_the_token(self):
+        report = self.run_embed()
+        embeds = [c for c in StubApi.calls if c[0].endswith("/pages/embed")]
+        self.assertEqual(
+            [f"wiki/sources/{new}.md" for new in MAP.values()], [c[2]["path"] for c in embeds]
+        )
+        self.assertEqual({"/api/v1/projects/proj-1/pages/embed"}, {c[0] for c in embeds})
+        self.assertEqual({"Bearer secret-token"}, {c[1] for c in embeds})
+        self.assertEqual([], report["failed"])
+        self.assertNotIn("secret-token", json.dumps(report))
+
+    def test_reports_a_page_the_api_turns_away(self):
+        StubApi.fail_paths = {"wiki/sources/swarm-readme.md"}
+        report = self.run_embed()
+        self.assertEqual(1, len(report["failed"]))
+        self.assertIn("swarm-readme.md: HTTP Error 503", report["failed"][0])
+
+    def test_searches_titles_and_reports_where_each_page_is_found(self):
+        report = self.run_embed()
+        swarm = next(s for s in report["searches"] if s["title"].startswith("Swarm"))
+        self.assertEqual("wiki/sources/swarm-readme.md", swarm["path"])
+        self.assertEqual(0.8, swarm["vectorScore"])
+        other = next(s for s in report["searches"] if not s["title"].startswith("Swarm"))
+        self.assertIsNone(other["path"])
+
+    def test_refuses_a_missing_token_file(self):
+        self.token.unlink()
+        with self.assertRaises(ers.Refusal):
+            self.run_embed()
+        self.assertEqual([], StubApi.calls)
 
 
 class MapTests(unittest.TestCase):
