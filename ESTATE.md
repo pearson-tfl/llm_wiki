@@ -176,7 +176,11 @@ Keep this list current. Merge conflicts can only come from these files.
   restore cut off at 30 seconds files a review item whose Retry, on the
   Review screen, opens the project's merge queue again. A merge run whose
   last save lands after a project switch leaves the "a merge is running"
-  flag and the ingest wait to the project now open (#48). Upstream edits
+  flag and the ingest wait to the project now open (#48). A restore cut
+  off after the user has opened another project files no review item, so
+  a Retry on the screen always belongs to the project open; and a Retry
+  that waits behind another restore does nothing if that restore opened
+  the queue (#52). Upstream edits
   to the dedup queue, the dedup merge, the ingest queue, the Maintenance
   screen, the Review screen or project open in `App.tsx` need re-checking
   against this.
