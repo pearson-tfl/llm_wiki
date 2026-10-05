@@ -701,6 +701,102 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
   })
 })
 
+describe("dedup-queue — overlapping project switches (#39)", () => {
+  const FILE_A = `${TEST_PATH}/.llm-wiki/dedup-queue.json`
+  const FILE_B = `${TEST_PATH_B}/.llm-wiki/dedup-queue.json`
+  let files: Map<string, string>
+
+  /** A queue file holding one pending hand-queued merge. */
+  function queueFileWith(projectId: string, slugs: string[]): string {
+    return JSON.stringify([{
+      id: `saved-${slugs.join("-")}`,
+      projectId,
+      group: makeGroup(slugs),
+      canonicalSlug: slugs[0],
+      status: "pending",
+      addedAt: 1,
+      error: null,
+      retryCount: 0,
+    }])
+  }
+
+  /** Hold the next queue write until the returned deferred resolves. */
+  function holdNextWrite(): Deferred<void> {
+    const held = createDeferred<void>()
+    mockWriteFile.mockImplementationOnce(async (path: string, content: string) => {
+      await held.promise
+      files.set(path, content)
+    })
+    return held
+  }
+
+  beforeEach(() => {
+    files = new Map()
+    mockReadFile.mockImplementation(async (path: string) => {
+      const content = files.get(path)
+      if (content === undefined) throw new Error("ENOENT")
+      return content
+    })
+    mockWriteFile.mockImplementation(async (path: string, content: string) => {
+      files.set(path, content)
+    })
+    mockExecuteMerge.mockImplementation(() => new Promise(() => {}))
+  })
+
+  it("a second switch made while the first one saves keeps the next project's restored merges", async () => {
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+
+    const save = holdNextWrite()
+    const firstPause = pauseQueue()
+    const secondPause = pauseQueue()
+    const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+    await flushMicrotasks(20)
+    save.resolve()
+    await Promise.all([firstPause, secondPause, restoreB])
+
+    expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+    // The next save in project B still carries the restored merge.
+    await enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")
+    expect(files.get(FILE_B)).toContain('"c"')
+    expect(files.get(FILE_A)).toContain('"a"')
+  })
+
+  it("reopening a project while its switch saves reads the queue file once the save lands", async () => {
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+
+    const save = holdNextWrite()
+    const paused = pauseQueue()
+    const reopened = restoreQueue(TEST_ID, TEST_PATH)
+    await flushMicrotasks(20)
+    save.resolve()
+    await Promise.all([paused, reopened])
+
+    expect(getQueue().map((t) => t.group.slugs)).toEqual([["a", "b"]])
+    await enqueueMerge(TEST_ID, makeGroup(["e", "f"]), "e")
+    expect(files.get(FILE_A)).toContain('"a"')
+  })
+
+  it("a switch made while a project's queue file is read saves that project's merges, not an empty queue", async () => {
+    await pauseQueue()
+    files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+    const read = createDeferred<void>()
+    mockReadFile.mockImplementationOnce(async (path: string) => {
+      await read.promise
+      return files.get(path)!
+    })
+
+    const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+    const paused = pauseQueue()
+    await flushMicrotasks(20)
+    read.resolve()
+    await Promise.all([restoreB, paused])
+
+    expect(getQueue()).toHaveLength(0)
+    expect(files.get(FILE_B)).toContain('"c"')
+  })
+})
+
 describe("dedup-queue — outcomes a scheduled run waits for", () => {
   const merged = {
     canonicalContent: "",
