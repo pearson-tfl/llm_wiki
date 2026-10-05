@@ -179,11 +179,13 @@ Keep this list current. Merge conflicts can only come from these files.
   after a project switch leaves the "a merge is running" flag and the
   ingest wait to the project now open (#48). A restore cut off after the
   user has opened another project files no review item, so a Retry on the
-  screen always belongs to the project open; and a Retry that waits
-  behind another restore does nothing if that restore opened the queue
-  (#52). Upstream edits to the dedup queue, the dedup merge, the ingest
-  queue, the Maintenance screen, the Review screen or project open in
-  `App.tsx` need re-checking against this.
+  screen always belongs to the project open. A Retry that waits behind
+  another restore does nothing if that restore opened the queue; if that
+  restore was cut off too, the notice it filed stays, and its own Retry
+  runs it. The notice goes only once no restore is left cut off (#52).
+  Upstream edits to the dedup queue, the dedup merge, the ingest queue,
+  the Maintenance screen, the Review screen or project open in `App.tsx`
+  need re-checking against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`,
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and

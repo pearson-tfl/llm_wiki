@@ -457,12 +457,17 @@ export function restoreQueue(
  * Run again the restore last cut off by its time limit, unless a restore
  * has opened a project's queue since, checked when its turn comes (#52).
  * Like any restore, it does nothing once its project is no longer the one
- * being opened.
+ * being opened. The time-out notice goes once no restore is left cut off.
  */
 export async function retryTimedOutRestore(): Promise<void> {
   const cutOff = timedOutRestore
   if (cutOff) {
     await restoreWhile(cutOff, () => timedOutRestore === cutOff && cutOff.stillOpening())
+  }
+  // The restore this retry waited behind may have been cut off too and
+  // filed the notice again, for its own Retry (#52).
+  if (!timedOutRestore) {
+    useReviewStore.getState().dismissItem(reviewIdFor(RESTORE_TIMEOUT_NOTICE))
   }
 }
 
@@ -491,11 +496,16 @@ async function restoreWhile(
   }
 }
 
+/** Every time-out notice has this type and title, so one id. */
+const RESTORE_TIMEOUT_NOTICE = {
+  type: "confirm" as const,
+  title: "Duplicate merge queue did not open",
+}
+
 /** Tell the user, in the review queue, that the merge queue did not open. */
 function recordRestoreTimeout(): void {
   const item = {
-    type: "confirm" as const,
-    title: "Duplicate merge queue did not open",
+    ...RESTORE_TIMEOUT_NOTICE,
     description: `Opening this project's duplicate merge queue took over ${SWITCH_STEP_TIMEOUT_MS / 1000} seconds and was stopped. Until it opens, no duplicate merge runs in this project. Retry to open it again; reopening the project also opens it.`,
     options: [{ label: "Retry", action: RETRY_RESTORE_ACTION }],
   }
