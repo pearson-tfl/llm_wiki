@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
-import { waitFor } from "@/test-helpers/deferred"
+import { createDeferred, waitFor } from "@/test-helpers/deferred"
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
 const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0 }))
@@ -144,5 +144,119 @@ describe("scheduled maintenance tick – when it acts", () => {
     expect(due?.skipReason).toBeNull()
     expect(mockDetect).toHaveBeenCalledOnce()
     expect((await loadScheduledMaintenanceConfig(tmp.path)).lastRun).toBe(T0 + 24 * HOUR)
+  })
+})
+
+describe("scheduled maintenance tick – skips, with the reason recorded", () => {
+  it("skips while the ingest queue has pending items, and again while one is processing", async () => {
+    await setConfig(null)
+
+    ingestSummary.pending = 1
+    const pending = await runMaintenanceTick(project, { now: () => T0 })
+    ingestSummary.pending = 0
+    ingestSummary.processing = 1
+    const processing = await runMaintenanceTick(project, { now: () => T0 + 1 })
+
+    expect(pending?.skipReason).toBe("ingest-busy")
+    expect(processing?.skipReason).toBe("ingest-busy")
+    expect(mockDetect).not.toHaveBeenCalled()
+    expect((await runRecords()).map((r) => r.skipReason)).toEqual(["ingest-busy", "ingest-busy"])
+    // A skip does not count as a run: the job stays due.
+    expect((await loadScheduledMaintenanceConfig(tmp.path)).lastRun).toBeNull()
+  })
+
+  it("skips while a previous tick is still running", async () => {
+    await setConfig(null)
+    const held = createDeferred<DuplicateGroup[]>()
+    mockDetect.mockReturnValueOnce(held.promise)
+
+    const first = runMaintenanceTick(project, { now: () => T0 })
+    await waitFor(() => mockDetect.mock.calls.length === 1)
+    const second = await runMaintenanceTick(project, { now: () => T0 + 1 })
+    held.resolve([])
+    await first
+
+    expect(second?.skipReason).toBe("previous-tick-running")
+    expect(mockDetect).toHaveBeenCalledOnce()
+    expect((await runRecords()).map((r) => r.skipReason)).toEqual(["previous-tick-running", null])
+  })
+
+  it("skips when no usable model is configured", async () => {
+    await setConfig(null)
+    useWikiStore.getState().setLlmConfig({
+      ...useWikiStore.getState().llmConfig,
+      provider: "openai",
+      apiKey: "",
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.skipReason).toBe("no-model")
+    expect(mockDetect).not.toHaveBeenCalled()
+    expect((await runRecords()).map((r) => r.skipReason)).toEqual(["no-model"])
+  })
+})
+
+describe("scheduled maintenance tick – duplicate scan", () => {
+  /** Fake merge at the runner boundary: on the real disk, keep the
+   *  canonical page and delete the merged-away ones, as executeMerge does. */
+  function mergeOnDisk(failSlugs: string[] = []) {
+    mockMerge.mockImplementation(async (pp, g, canonicalSlug) => {
+      if (g.slugs.some((s) => failSlugs.includes(s))) throw new Error("merge model failed")
+      for (const slug of g.slugs) {
+        if (slug !== canonicalSlug) await realFs.deleteFile(`${pp}/wiki/concepts/${slug}.md`)
+      }
+      return {
+        canonicalPath: `wiki/concepts/${canonicalSlug}.md`,
+        canonicalContent: "",
+        rewrites: [],
+        pagesToDelete: [],
+        backup: [],
+      }
+    })
+  }
+
+  it("merges each high-confidence group with the deterministic canonical page, with no resume call", async () => {
+    await setConfig(null)
+    // Most sources wins.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["a.md", "b.md"]))
+    // Equal sources: earliest created date wins.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook-new.md`, page("Hook", "2026-10-01", ["c.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook-old.md`, page("Hooks", "2026-09-15", ["d.md"]))
+    // Equal sources and dates: first in the group wins.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/lane-b.md`, page("Lane", "2026-10-02", ["e.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/lane-a.md`, page("Lanes", "2026-10-02", ["f.md"]))
+    // One whose merge fails every retry.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/seat-one.md`, page("Seat", "2026-10-02", ["g.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/seat-two.md`, page("Seats", "2026-10-03", ["h.md"]))
+    mockDetect.mockResolvedValue([
+      group(["agent-loop", "agent-loops"], "high"),
+      group(["hook-new", "hook-old"], "high"),
+      group(["lane-b", "lane-a"], "high"),
+      group(["seat-one", "seat-two"], "high"),
+    ])
+    mergeOnDisk(["seat-one"])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    const merged = new Map<string, string>()
+    for (const [, g, canonical] of mockMerge.mock.calls) merged.set(g.slugs.join(","), canonical)
+    expect(Object.fromEntries(merged)).toEqual({
+      "agent-loop,agent-loops": "agent-loops",
+      "hook-new,hook-old": "hook-old",
+      "lane-b,lane-a": "lane-b",
+      "seat-one,seat-two": "seat-one",
+    })
+    expect(record).toMatchObject({
+      groupsFound: { high: 4, medium: 0, low: 0 },
+      mergesEnqueued: 4,
+      mergesDone: 3,
+      mergesFailed: 1,
+    })
+    expect(await realFs.fileExists(`${tmp.path}/wiki/concepts/agent-loop.md`)).toBe(false)
+    expect(await realFs.fileExists(`${tmp.path}/wiki/concepts/agent-loops.md`)).toBe(true)
+    // Only the failed merge is left on the queue.
+    expect(getQueue().map((t) => [t.canonicalSlug, t.status])).toEqual([["seat-one", "failed"]])
   })
 })
