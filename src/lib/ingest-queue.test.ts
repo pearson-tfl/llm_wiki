@@ -820,6 +820,29 @@ describe("ingest-queue — clearQueueState", () => {
     await flushMicrotasks(5)
     expect(mockSweep).not.toHaveBeenCalled()
   })
+
+  it("settles only once a queue save already under way has landed", async () => {
+    mockAutoIngest.mockImplementation(() => new Promise(() => {}))
+    const processingSave = createDeferred()
+    mockWriteFile.mockImplementation(async (_path, contents) => {
+      if (contents.includes('"processing"')) await processingSave.promise
+    })
+    await enqueueIngest(TEST_ID, "a.md")
+    await waitFor(() =>
+      mockWriteFile.mock.calls.some(([, contents]) => contents.includes('"processing"')),
+    )
+
+    let cleared = false
+    const clearing = clearQueueState().then(() => {
+      cleared = true
+    })
+    await flushMicrotasks(5)
+    expect(cleared).toBe(false)
+
+    processingSave.resolve()
+    await clearing
+    expect(cleared).toBe(true)
+  })
 })
 
 describe("ingest-queue — restoreQueue", () => {

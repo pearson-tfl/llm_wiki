@@ -134,7 +134,7 @@ Keep this list current. Merge conflicts can only come from these files.
   Ingest and a duplicate merge never write at once (#24): the merge queue
   starts no merge while ingest is active – a source processing, or pending
   in a queue that is neither paused nor waiting on model settings
-  (`isIngestActive`, the only change to `ingest-queue.ts`) – and checks
+  (`isIngestActive`, the only change #24 made to `ingest-queue.ts`) – and checks
   again every 5 seconds, so it carries on with no click; a running merge
   holds the project write lock every ingest write takes, from its first
   read to its last write. A merge reply that is empty, has no readable
@@ -293,6 +293,14 @@ Keep this list current. Merge conflicts can only come from these files.
   stops with the request in place, stays due, and redoes on the next run any
   hub it had already rebuilt. An unreadable request is left in place and the
   run records why. Tests in `src/lib/scheduled-maintenance.test.ts`.
+- `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
+  the test-only `clearQueueState()` cannot stop an ingest queue save that
+  is already writing, so it hands back a promise that settles once that
+  save has landed. The real-file tests await it before they write or read
+  the queue file, so a late save no longer empties the file under a
+  restore (pearson-tfl/llm_wiki#58). Production switches projects through
+  `pauseQueue()`, which already waits for every save. Tests in
+  `src/lib/ingest-queue.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

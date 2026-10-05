@@ -75,7 +75,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  clearQueueState()
+  await clearQueueState()
   await tmp.cleanup()
 })
 
@@ -165,7 +165,7 @@ describe("ingest-queue persistence — restore round-trip", () => {
     })
 
     // Simulate app restart: wipe in-memory, restore from disk
-    clearQueueState()
+    await clearQueueState()
     expect(getQueue()).toHaveLength(0)
 
     await restoreQueue(TEST_ID_A, tmp.path)
@@ -250,7 +250,7 @@ describe("ingest-queue persistence — restore round-trip", () => {
     expect(onDisk[0].sourcePath).toBe("raw/sources/注意力.pdf")
     expect(onDisk[0].folderContext).toBe("研究 > 深度学习")
 
-    clearQueueState()
+    await clearQueueState()
     await writeFileRaw(
       `${tmp.path}/.llm-wiki/ingest-queue.json`,
       JSON.stringify(onDisk, null, 2),
