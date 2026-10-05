@@ -150,7 +150,10 @@ Keep this list current. Merge conflicts can only come from these files.
   failed task. A merge cancelled or cut short by a project switch while
   the model replies writes nothing (#29): the client ends a cancelled
   request as done with the text so far, so the merge checks its cancel
-  signal before the reply. Upstream edits to the dedup queue, the dedup
+  signal before the reply. A cancel starts the next merge at once; the
+  cancelled merge's run, when it ends, leaves the queue alone and files
+  no review item, so the next merge can still be cancelled and no third
+  starts beside it (#33). Upstream edits to the dedup queue, the dedup
   merge, the ingest queue, the Maintenance screen or project open in
   `App.tsx` need re-checking against this. Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,

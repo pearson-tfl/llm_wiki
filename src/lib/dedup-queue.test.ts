@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
-import { createDeferred, flushMicrotasks } from "@/test-helpers/deferred"
+import { createDeferred, flushMicrotasks, type Deferred } from "@/test-helpers/deferred"
 
 vi.mock("./dedup-runner", () => ({
   executeMerge: vi.fn(),
@@ -42,11 +42,19 @@ import { executeMerge } from "./dedup-runner"
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { __resetProjectLocksForTesting } from "./project-mutex"
-import type { DuplicateGroup } from "./dedup"
+import type { DuplicateGroup, MergeResult } from "./dedup"
 
 const mockExecuteMerge = vi.mocked(executeMerge)
 const mockReadFile = vi.mocked(readFile)
 const mockWriteFile = vi.mocked(writeFile)
+
+const EMPTY_MERGE: MergeResult = {
+  canonicalContent: "",
+  canonicalPath: "",
+  rewrites: [],
+  pagesToDelete: [],
+  backup: [],
+}
 
 function makeGroup(slugs: string[]): DuplicateGroup {
   return { slugs, confidence: "high", reason: "test" }
@@ -257,6 +265,77 @@ describe("dedup-queue — cancel / delete", () => {
     await cancelTask(id)
     expect(receivedSignal?.aborted).toBe(true)
     expect(getQueue().find((t) => t.id === id)).toBeUndefined()
+  })
+
+  // #33: the cancelled merge's run ends only after the next has started.
+  it.each([
+    ["fails", (d: Deferred<MergeResult>) => d.reject(new Error("Duplicate merge cancelled before the model's reply finished"))],
+    ["finishes its writes", (d: Deferred<MergeResult>) => d.resolve(EMPTY_MERGE)],
+  ])("after a cancelled merge %s late, the next can be cancelled and no third starts while it runs", async (label, endCancelledRun) => {
+    const signals: AbortSignal[] = []
+    const runs: Deferred<MergeResult>[] = []
+    mockExecuteMerge.mockImplementation(async (_pp, _g, _slug, _llm, opts) => {
+      signals.push(opts!.signal!)
+      const d = createDeferred<MergeResult>()
+      runs.push(d)
+      return d.promise
+    })
+    const versionBefore = useWikiStore.getState().dataVersion
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    const second = await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c")
+    const third = await enqueueMerge(TEST_ID, makeGroup(["e", "f"]), "e")
+    await flushMicrotasks(5)
+
+    // The next merge starts at once, and waits for the project lock the
+    // cancelled one still holds.
+    await cancelTask(first)
+    await flushMicrotasks(20)
+    expect(getQueue().find((t) => t.id === second)?.status).toBe("processing")
+
+    endCancelledRun(runs[0])
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([
+      [second, "processing"],
+      [third, "pending"],
+    ])
+    // Pages a cancelled merge finished writing still reach the wiki tree.
+    if (label === "finishes its writes") {
+      expect(useWikiStore.getState().dataVersion).toBe(versionBefore + 1)
+    }
+
+    await cancelTask(second)
+    expect(signals[1].aborted).toBe(true)
+    runs[1].reject(new Error("Duplicate merge cancelled before the model's reply finished"))
+    await flushMicrotasks(20)
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(3)
+    expect(mockExecuteMerge.mock.calls[2][1].slugs).toEqual(["e", "f"])
+  })
+
+  it("a merge cancelled while it saves its processing state never runs (#33)", async () => {
+    mockExecuteMerge.mockResolvedValue(EMPTY_MERGE)
+    const save = createDeferred<void>()
+    let held = false
+    mockWriteFile.mockImplementation(async (_path, content) => {
+      if (!held && content.includes('"processing"')) {
+        held = true
+        await save.promise
+      }
+    })
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c")
+    await flushMicrotasks(5)
+    expect(held).toBe(true)
+
+    await cancelTask(first)
+    await flushMicrotasks(20)
+    save.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["c", "d"]])
   })
 })
 
