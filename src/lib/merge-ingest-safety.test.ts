@@ -29,6 +29,8 @@ const model = vi.hoisted(() => ({
   mergeReply: null as null | (() => Promise<string>),
   // The client's report that the merge reply stopped at the output cap.
   mergeCutOff: false,
+  // Runs once the merge reply has been handed to the client.
+  afterMergeReply: null as null | (() => void),
   ingestCalls: 0,
   ingestReplies: [] as (() => Promise<string>)[],
 }))
@@ -48,6 +50,7 @@ vi.mock("./llm-client", () => ({
     }
     cb.onToken(reply)
     cb.onDone(cutOff ? { finishReason: "length", truncated: true } : undefined)
+    if (system.includes("Merge them into a single coherent wiki page")) model.afterMergeReply?.()
   }),
 }))
 
@@ -156,6 +159,7 @@ beforeEach(async () => {
   model.mergeCalls = 0
   model.mergeReply = null
   model.mergeCutOff = false
+  model.afterMergeReply = null
   model.ingestCalls = 0
   model.ingestReplies = []
 
@@ -320,6 +324,27 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     expect(useReviewStore.getState().items).toEqual([])
     expect(await read("wiki/concepts/attention.md")).toBe(before)
     expect(await fileExists(`${tmp.path}/wiki/concepts/transformer-attention.md`)).toBe(true)
+  })
+
+  it("files no rejection for a merge cancelled after its reply arrived, before the page check (#33)", async () => {
+    const log = vi.spyOn(console, "log")
+    model.mergeReply = reply("---\ntype: concept\n")
+    let taskId = ""
+    // The cancel lands one step after the reply passed its cancel check,
+    // so the page check, not the cancel check, refuses the reply.
+    model.afterMergeReply = () => queueMicrotask(() => void dedupQueue.cancelTask(taskId))
+    const before = await snapshotMergePages()
+
+    taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention", { scheduled: true })
+    expect(await dedupQueue.waitForTask(taskId)).toBe("cancelled")
+    await flushIO(20)
+
+    const logged = log.mock.calls.flat().join("\n")
+    expect(logged).toContain("[Dedup Queue] Cancelled: attention,transformer-attention — Merge reply rejected")
+    expect(useReviewStore.getState().items).toEqual([])
+    expect(dedupQueue.getQueue()).toEqual([])
+    await expectNothingWritten(before)
+    log.mockRestore()
   })
 
   it("rejects a reply cut off at the output cap, though it keeps over 70% of the longest page (#29)", async () => {

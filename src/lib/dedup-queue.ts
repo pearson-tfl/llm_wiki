@@ -448,8 +448,15 @@ async function processNext(projectId: string): Promise<void> {
 
   processing = true
   next.status = "processing"
+  // The run owns this controller from here: a cancel or project switch
+  // aborts it and takes over the queue state, so a run whose signal
+  // fired touches none of it – the next merge may already be running
+  // (#33).
+  const controller = new AbortController()
+  currentAbortController = controller
+  const signal = controller.signal
   await saveQueue(pp)
-  if (currentProjectId !== projectId) return
+  if (currentProjectId !== projectId || signal.aborted) return
 
   const llmConfig = getTaskLlmConfig("ingest")
 
@@ -466,9 +473,6 @@ async function processNext(projectId: string): Promise<void> {
     `[Dedup Queue] Processing: merge ${next.group.slugs.join(",")} → ${next.canonicalSlug}`,
   )
 
-  currentAbortController = new AbortController()
-
-  const signal = currentAbortController.signal
   try {
     // The merge holds the project write lock from its first read to its
     // last write, so an ingest that reaches its write meanwhile waits for
@@ -480,6 +484,10 @@ async function processNext(projectId: string): Promise<void> {
       return true
     })
     if (currentProjectId !== projectId) return
+    // Tell the rest of the app the wiki tree changed, even if a cancel
+    // landed while the merge wrote.
+    if (merged) useWikiStore.getState().bumpDataVersion()
+    if (signal.aborted) return
     if (!merged) {
       currentAbortController = null
       next.status = "pending"
@@ -494,14 +502,18 @@ async function processNext(projectId: string): Promise<void> {
     queue = queue.filter((t) => t.id !== next.id)
     notifyScheduledOutcome(next, "done")
     await saveQueue(pp)
-    // Tell the rest of the app the wiki tree changed.
-    useWikiStore.getState().bumpDataVersion()
 
     console.log(`[Dedup Queue] Done: ${next.group.slugs.join(",")}`)
   } catch (err) {
     if (currentProjectId !== projectId) return
-    currentAbortController = null
     const message = err instanceof Error ? err.message : String(err)
+    // Even a reply the page check refused files no review item once
+    // cancelled.
+    if (signal.aborted) {
+      console.log(`[Dedup Queue] Cancelled: ${next.group.slugs.join(",")} — ${message}`)
+      return
+    }
+    currentAbortController = null
     next.retryCount++
     next.error = message
 
