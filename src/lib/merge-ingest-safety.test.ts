@@ -27,6 +27,8 @@ vi.mock("@/lib/project-identity", () => ({
 const model = vi.hoisted(() => ({
   mergeCalls: 0,
   mergeReply: null as null | (() => Promise<string>),
+  // The client's report that the merge reply stopped at the output cap.
+  mergeCutOff: false,
   ingestCalls: 0,
   ingestReplies: [] as (() => Promise<string>)[],
 }))
@@ -34,16 +36,18 @@ vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages: { role: string; content: string }[], cb) => {
     const system = messages[0]?.content ?? ""
     let reply = ""
+    let cutOff = false
     if (system.includes("Merge them into a single coherent wiki page")) {
       model.mergeCalls += 1
       reply = model.mergeReply ? await model.mergeReply() : ""
+      cutOff = model.mergeCutOff
     } else {
       model.ingestCalls += 1
       const next = model.ingestReplies.shift()
       reply = next ? await next() : ""
     }
     cb.onToken(reply)
-    cb.onDone()
+    cb.onDone(cutOff ? { finishReason: "length", truncated: true } : undefined)
   }),
 }))
 
@@ -119,6 +123,21 @@ async function read(rel: string): Promise<string> {
   return readFileRaw(`${tmp.path}/${rel}`)
 }
 
+const MERGE_PAGES = ["wiki/index.md", "wiki/concepts/attention.md", "wiki/concepts/transformer-attention.md"]
+
+async function snapshotMergePages(): Promise<Map<string, string>> {
+  const before = new Map<string, string>()
+  for (const rel of MERGE_PAGES) before.set(rel, await read(rel))
+  return before
+}
+
+/** Every merge page is as it was, and no backup folder was written. */
+async function expectNothingWritten(before: Map<string, string>): Promise<void> {
+  for (const [rel, content] of before) expect(await read(rel)).toBe(content)
+  const history = await fs.readdir(`${tmp.path}/.llm-wiki/page-history`).catch(() => [])
+  expect(history).toEqual([])
+}
+
 async function bothQueuesIdle(): Promise<boolean> {
   return dedupQueue.getQueue().length === 0 && ingestQueue.getQueue().length === 0
 }
@@ -136,6 +155,7 @@ beforeEach(async () => {
 
   model.mergeCalls = 0
   model.mergeReply = null
+  model.mergeCutOff = false
   model.ingestCalls = 0
   model.ingestReplies = []
 
@@ -300,5 +320,63 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     expect(useReviewStore.getState().items).toEqual([])
     expect(await read("wiki/concepts/attention.md")).toBe(before)
     expect(await fileExists(`${tmp.path}/wiki/concepts/transformer-attention.md`)).toBe(true)
+  })
+
+  it("rejects a reply cut off at the output cap, though it keeps over 70% of the longest page (#29)", async () => {
+    model.mergeReply = reply(MERGED)
+    model.mergeCutOff = true
+    const before = await snapshotMergePages()
+
+    const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention", { scheduled: true })
+    expect(await dedupQueue.waitForTask(taskId)).toBe("rejected")
+
+    await expectNothingWritten(before)
+    await flushIO(20)
+    expect(model.mergeCalls).toBe(1)
+
+    const [task] = dedupQueue.getQueue()
+    expect(task.status).toBe("failed")
+    expect(task.error).toMatch(/Merge reply rejected: the model's reply was cut off at the 16384-token output cap/)
+    expect(useReviewStore.getState().items.map((i) => i.description)).toEqual([
+      expect.stringContaining(task.error!),
+    ])
+  })
+
+  it("writes nothing for a merge cancelled mid-reply whose partial reply would pass the check, and logs why (#29)", async () => {
+    const log = vi.spyOn(console, "log")
+    const mergeReply = createDeferred<string>()
+    model.mergeReply = held(mergeReply)
+    const before = await snapshotMergePages()
+
+    const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
+    await waitFor(() => model.mergeCalls === 1)
+    await dedupQueue.cancelTask(taskId)
+    // The client ends a cancelled request as done, with the text so far.
+    mergeReply.resolve(MERGED)
+    await flushIO(20)
+
+    await expectNothingWritten(before)
+    expect(dedupQueue.getQueue()).toEqual([])
+    expect(useReviewStore.getState().items).toEqual([])
+    expect(log.mock.calls.flat().join("\n")).toContain(
+      "Duplicate merge cancelled before the model's reply finished",
+    )
+    log.mockRestore()
+  })
+
+  it("writes nothing for a merge interrupted by a project switch mid-reply, and keeps it pending (#29)", async () => {
+    const mergeReply = createDeferred<string>()
+    model.mergeReply = held(mergeReply)
+    const before = await snapshotMergePages()
+
+    await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
+    await waitFor(() => model.mergeCalls === 1)
+    await dedupQueue.pauseQueue()
+    mergeReply.resolve(MERGED)
+    await flushIO(20)
+
+    await expectNothingWritten(before)
+    await dedupQueue.restoreQueue(PROJECT_ID, tmp.path)
+    expect(dedupQueue.getQueue().map((t) => [t.status, t.error])).toEqual([["pending", null]])
   })
 })

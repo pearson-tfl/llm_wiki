@@ -15,7 +15,8 @@
  * (pause / restore on project switch), same persistence file shape,
  * same retry-up-to-3 policy, same registry-based path resolution so
  * a relocated project still finds its tasks. A merge reply that fails
- * its check is not retried.
+ * its check is not retried automatically; enqueueing the group again
+ * (the next scheduled scan does) resets the failed task.
  *
  * Merges and ingest never write at once (#24): no merge starts while
  * ingest is active, and a running merge holds the project write lock
@@ -508,8 +509,7 @@ async function processNext(projectId: string): Promise<void> {
       // Final: an automatic retry would re-spend the model on the same
       // group with no one watching. A retry by hand starts it again.
       next.status = "failed"
-      // A cancelled task has left the queue: its cut-off reply is no news.
-      if (queue.includes(next)) recordRejection(next, message)
+      recordRejection(next, message)
       notifyScheduledOutcome(next, "rejected")
       console.log(`[Dedup Queue] Rejected: ${next.group.slugs.join(",")} — ${message}`)
     } else if (next.retryCount >= MAX_RETRIES) {

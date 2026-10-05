@@ -53,6 +53,7 @@ import {
   detectDuplicateGroups,
   extractEntitySummary,
   mergeDuplicateGroup,
+  MergeReplyRejectedError,
   rewriteIndexMd,
   type DedupLlmCall,
   type DuplicateGroup,
@@ -72,13 +73,20 @@ import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
  * rewritten page), and silently sharing one cap risks truncating a
  * merged page on disk. Forcing each caller to state its budget makes
  * that choice explicit.
+ *
+ * `completeReplyOnly` is for the merge, whose reply is written to disk
+ * (#29): a reply cut off at the cap is rejected, and a reply whose
+ * signal fired throws, since the client ends a cancelled request as
+ * done with whatever text had arrived. Detection keeps a cut-off reply.
  */
 export function buildDedupLlmCall(
   llmConfig: LlmConfig,
   maxTokens: number,
+  options: { completeReplyOnly?: boolean } = {},
 ): DedupLlmCall {
   return async (systemPrompt, userMessage, signal) => {
     let result = ""
+    let cutOff = false
     let streamError: Error | null = null
     await new Promise<void>((resolve) => {
       streamChat(
@@ -91,7 +99,10 @@ export function buildDedupLlmCall(
           onToken: (t) => {
             result += t
           },
-          onDone: () => resolve(),
+          onDone: (completion) => {
+            cutOff = completion?.truncated === true
+            resolve()
+          },
           onError: (err) => {
             streamError = err
             resolve()
@@ -107,7 +118,15 @@ export function buildDedupLlmCall(
         resolve()
       })
     })
+    if (options.completeReplyOnly && signal?.aborted) {
+      throw new Error("Duplicate merge cancelled before the model's reply finished")
+    }
     if (streamError) throw streamError
+    if (options.completeReplyOnly && cutOff) {
+      throw new MergeReplyRejectedError(
+        `the model's reply was cut off at the ${maxTokens}-token output cap`,
+      )
+    }
     return result
   }
 }
@@ -430,7 +449,7 @@ export async function executeMerge(
   // Merge rewrites a COMPLETE page that gets written to disk, so it gets
   // the generous merge budget — never the small detection cap, which
   // would truncate the canonical content.
-  const llm = buildDedupLlmCall(llmConfig, DEDUP_MERGE_MAX_TOKENS)
+  const llm = buildDedupLlmCall(llmConfig, DEDUP_MERGE_MAX_TOKENS, { completeReplyOnly: true })
   const result = await mergeDuplicateGroup(
     {
       group: groupPages,
