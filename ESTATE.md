@@ -82,7 +82,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/relative-links.test.ts`.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/App.tsx`,
-  `src/components/settings/sections/maintenance-section.tsx` – a scheduled
+  `src/components/settings/sections/maintenance-section.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – a scheduled
   maintenance job per wiki project runs the duplicate scan with no click
   (pearson-tfl/llm_wiki#18, from #16). On by default, every 24 hours,
   switchable and adjustable in Settings > Maintenance; the setting sits in
