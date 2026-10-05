@@ -93,7 +93,10 @@ Keep this list current. Merge conflicts can only come from these files.
   busy, a previous run is still going, or no model is set. High-confidence
   groups go onto the existing merge queue, into the page with the most
   sources, then the earliest created date, then the first listed; a group
-  holding a pair marked "not duplicates" is never merged. The queue runs
+  holding a pair marked "not duplicates" is never merged, and a
+  not-duplicates list that cannot be read merges nothing. Before each
+  merge the run re-reads the ingest queue and the switch, and stops
+  merging if either changed during the scan. The queue runs
   those merges with no resume click, after a restart too; hand-queued
   merges restored from disk still wait for it. Other groups are saved to
   `.llm-wiki/dedup-pending-groups.json`, which the Maintenance screen shows

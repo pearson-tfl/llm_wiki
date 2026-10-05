@@ -936,7 +936,7 @@
         },
         "dedup": {
           "title": "Individua entità / concetti duplicati",
-          "description": "Chiede all'LLM di analizzare tutte le pagine di entità / concetti e di raggruppare quelle che probabilmente si riferiscono allo stesso argomento con nomi diversi (lingue diverse, plurale o singolare, sigla o forma estesa). Confermi ogni gruppo prima dell'unione. Le unioni vengono messe in coda ed eseguite una alla volta, così i riferimenti incrociati restano coerenti.",
+          "description": "Chiede all'LLM di analizzare tutte le pagine di entità / concetti e di raggruppare quelle che probabilmente si riferiscono allo stesso argomento con nomi diversi (lingue diverse, plurale o singolare, sigla o forma estesa). In una ricerca avviata qui confermi ogni gruppo prima dell'unione; la ricerca pianificata unisce da sola i gruppi ad alta confidenza. Le unioni vengono messe in coda ed eseguite una alla volta, così i riferimenti incrociati restano coerenti.",
           "scanButton": "Cerca duplicati",
           "scheduleEnabled": "Esegui la ricerca dei duplicati a intervalli regolari",
           "scheduleHint": "I gruppi ad alta confidenza vengono uniti senza clic, con backup come in un'unione manuale. Gli altri gruppi restano qui per una tua decisione.",

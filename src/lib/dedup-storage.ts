@@ -21,24 +21,34 @@ const FILE_NAME = ".llm-wiki/dedup-not-duplicates.json"
 const PENDING_GROUPS_FILE = ".llm-wiki/dedup-pending-groups.json"
 
 export async function loadNotDuplicates(projectPath: string): Promise<string[][]> {
-  const pp = normalizePath(projectPath)
-  const filePath = `${pp}/${FILE_NAME}`
   try {
-    if (!(await fileExists(filePath))) return []
+    return await readNotDuplicates(projectPath)
   } catch {
     return []
   }
+}
+
+/**
+ * Like loadNotDuplicates, but a list that exists and cannot be read or
+ * parsed throws instead of reading as empty. The scheduled job merges
+ * with no click, so it must not take a broken list for "no pairs".
+ */
+export async function readNotDuplicates(projectPath: string): Promise<string[][]> {
+  const filePath = `${normalizePath(projectPath)}/${FILE_NAME}`
+  if (!(await fileExists(filePath))) return []
+  let parsed: unknown
   try {
-    const content = await readFile(filePath)
-    const parsed = JSON.parse(content)
-    if (!Array.isArray(parsed)) return []
-    return parsed.filter(
-      (g): g is string[] =>
-        Array.isArray(g) && g.every((s) => typeof s === "string"),
-    )
-  } catch {
-    return []
+    parsed = JSON.parse(await readFile(filePath))
+  } catch (err) {
+    throw new Error(`Cannot read the not-duplicates list ${FILE_NAME}: ${err}`)
   }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Cannot read the not-duplicates list ${FILE_NAME}: not a list`)
+  }
+  return parsed.filter(
+    (g): g is string[] =>
+      Array.isArray(g) && g.every((s) => typeof s === "string"),
+  )
 }
 
 export async function saveNotDuplicates(

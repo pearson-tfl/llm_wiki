@@ -3,7 +3,7 @@
  * that runs the existing duplicate scan with no click. Started and stopped
  * the same way as scheduled import, for the open project only.
  */
-import { listDirectory, readFile, writeFile } from "@/commands/fs"
+import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import {
   loadScheduledMaintenanceConfig,
@@ -19,17 +19,22 @@ import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
 import { enqueueMerge, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
   holdsNotDuplicate,
-  loadNotDuplicates,
+  readNotDuplicates,
   savePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { parseSources } from "@/lib/sources-merge"
 import type { DuplicateGroup } from "@/lib/dedup"
+import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode, WikiProject } from "@/types/wiki"
 
 const RUN_RECORD_PATH = ".llm-wiki/maintenance-runs.jsonl"
 
-export type MaintenanceSkipReason = "ingest-busy" | "previous-tick-running" | "no-model"
+export type MaintenanceSkipReason =
+  | "ingest-busy"
+  | "previous-tick-running"
+  | "no-model"
+  | "switched-off"
 
 /** How often the timer checks whether the job is due. The interval in
  *  the setting is hours; this only bounds how late a due run starts. */
@@ -37,6 +42,9 @@ const CHECK_INTERVAL_MS = 10 * 60 * 1000
 
 let tickRunning = false
 let checkTimer: ReturnType<typeof setInterval> | null = null
+/** Run-record appends, one at a time, so a skip written while a run is
+ *  finishing cannot overwrite the run's own record. */
+let recordWrites: Promise<unknown> = Promise.resolve()
 
 export interface MaintenanceRunRecord {
   startedAt: string
@@ -45,6 +53,8 @@ export interface MaintenanceRunRecord {
   groupsFound?: { high: number; medium: number; low: number }
   mergesEnqueued?: number
   mergesDone?: number
+  /** Merges that failed every retry; cancelled or interrupted ones are
+   *  neither done nor failed. */
   mergesFailed?: number
   error?: string
 }
@@ -69,16 +79,9 @@ export async function runMaintenanceTick(
   if (!isMaintenanceDue(config, startedAt)) return null
 
   const llmConfig = getTaskLlmConfig("ingest")
-  const ingest = getIngestQueueSummary()
   // No await between this check and setting the flag, so two ticks can
   // never both pass it.
-  const skipReason: MaintenanceSkipReason | null = tickRunning
-    ? "previous-tick-running"
-    : ingest.pending + ingest.processing > 0
-      ? "ingest-busy"
-      : !hasUsableLlm(llmConfig)
-        ? "no-model"
-        : null
+  const skipReason = startBlocker(llmConfig)
   if (skipReason) {
     // A skip is not a run: lastRun stays put, so the job stays due.
     return appendRunRecord(pp, {
@@ -101,7 +104,7 @@ export async function runMaintenanceTick(
       medium: groups.filter((g) => g.confidence === "medium").length,
       low: groups.filter((g) => g.confidence === "low").length,
     }
-    const notDuplicates = await loadNotDuplicates(pp)
+    const notDuplicates = await readNotDuplicates(pp)
     // Only high-confidence groups merge with no click. A group holding a
     // pair marked "not duplicates" is left for a decision by hand.
     const toMerge = groups.filter(
@@ -111,6 +114,12 @@ export async function runMaintenanceTick(
 
     const outcomes: Promise<DedupTaskOutcome>[] = []
     for (const group of toMerge) {
+      // The scan took a while: re-read what gates a merge before each one.
+      const withheld = await mergeBlocker(pp)
+      if (withheld) {
+        record.skipReason = withheld
+        break
+      }
       const canonical = await chooseCanonicalSlug(pp, group)
       const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
       outcomes.push(waitForTask(taskId))
@@ -118,7 +127,7 @@ export async function runMaintenanceTick(
     record.mergesEnqueued = outcomes.length
     const settled = await Promise.all(outcomes)
     record.mergesDone = settled.filter((o) => o === "done").length
-    record.mergesFailed = settled.length - record.mergesDone
+    record.mergesFailed = settled.filter((o) => o === "failed").length
     // Close review items whose pages the merges removed.
     if (record.mergesDone > 0) await sweepResolvedReviews(pp)
 
@@ -136,6 +145,23 @@ export async function runMaintenanceTick(
   await saveScheduledMaintenanceConfig(pp, { ...current, lastRun: startedAt })
   record.finishedAt = new Date(clock.now()).toISOString()
   return appendRunRecord(pp, record)
+}
+
+function ingestBusy(): boolean {
+  const ingest = getIngestQueueSummary()
+  return ingest.pending + ingest.processing > 0
+}
+
+function startBlocker(llmConfig: LlmConfig): MaintenanceSkipReason | null {
+  if (tickRunning) return "previous-tick-running"
+  if (ingestBusy()) return "ingest-busy"
+  if (!hasUsableLlm(llmConfig)) return "no-model"
+  return null
+}
+
+async function mergeBlocker(pp: string): Promise<MaintenanceSkipReason | null> {
+  if (!(await loadScheduledMaintenanceConfig(pp)).enabled) return "switched-off"
+  return ingestBusy() ? "ingest-busy" : null
 }
 
 /** Start the job for the opened project: an overdue run starts now. */
@@ -158,19 +184,20 @@ export function stopScheduledMaintenance(): void {
   }
 }
 
-async function appendRunRecord(
+function appendRunRecord(
   pp: string,
   record: MaintenanceRunRecord,
 ): Promise<MaintenanceRunRecord> {
   const path = `${pp}/${RUN_RECORD_PATH}`
-  let existing = ""
-  try {
-    existing = await readFile(path)
-  } catch {
-    // first run: no record file yet
-  }
-  await writeFile(path, `${existing}${JSON.stringify(record)}\n`)
-  return record
+  const write = recordWrites.then(async () => {
+    // A file that exists but cannot be read fails the append rather than
+    // being rewritten from empty.
+    const existing = (await fileExists(path)) ? await readFile(path) : ""
+    await writeFile(path, `${existing}${JSON.stringify(record)}\n`)
+    return record
+  })
+  recordWrites = write.catch(() => undefined)
+  return write
 }
 
 /**

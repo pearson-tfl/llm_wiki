@@ -501,11 +501,15 @@ function App() {
       // queue is this project's.
       import("@/lib/dedup-queue").then(({ restoreQueue }) =>
         restoreQueue(proj.id, proj.path)
+      ).catch((err) =>
+        console.error("Failed to restore dedup queue:", err)
       ).then(async () => {
+        // Started even when the restore failed: a run then records the
+        // failed enqueue in its run record.
         const { startScheduledMaintenance } = await import("@/lib/scheduled-maintenance")
         if (isCurrentProject(proj)) startScheduledMaintenance(proj)
       }).catch((err) =>
-        console.error("Failed to restore dedup queue:", err)
+        console.error("Failed to start scheduled maintenance:", err)
       )
       // Start project source watch if enabled
       import("@/lib/project-file-sync").then(async ({

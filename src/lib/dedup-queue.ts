@@ -8,7 +8,8 @@
  *     half the rewrites silently disappear.
  *   - LLM calls take seconds; the user wants to queue several merges
  *     and walk away. The queue must survive app close so an
- *     interrupted merge resumes on next launch.
+ *     interrupted merge resumes on next launch – after a resume click
+ *     for a hand-queued merge, at once for a scheduled one.
  *
  * Mirrors `ingest-queue.ts` almost line-for-line: same lifecycle
  * (pause / restore on project switch), same persistence file shape,
@@ -60,7 +61,7 @@ let currentAbortController: AbortController | null = null
 let outcomeWaiters = new Map<string, (outcome: DedupTaskOutcome) => void>()
 let settledOutcomes = new Map<string, DedupTaskOutcome>()
 
-function settle(task: DedupTask, outcome: DedupTaskOutcome): void {
+function notifyScheduledOutcome(task: DedupTask, outcome: DedupTaskOutcome): void {
   if (!task.scheduled) return
   const waiter = outcomeWaiters.get(task.id)
   if (waiter) {
@@ -71,7 +72,8 @@ function settle(task: DedupTask, outcome: DedupTaskOutcome): void {
   }
 }
 
-function interruptWaiters(): void {
+/** Resolve every waiting run as interrupted and forget unclaimed outcomes. */
+function interruptScheduledWaiters(): void {
   for (const waiter of outcomeWaiters.values()) waiter("interrupted")
   outcomeWaiters = new Map()
   settledOutcomes = new Map()
@@ -239,7 +241,7 @@ export async function cancelTask(taskId: string): Promise<void> {
 
   restoredPausedTaskIds.delete(taskId)
   queue = queue.filter((t) => t.id !== taskId)
-  settle(task, "cancelled")
+  notifyScheduledOutcome(task, "cancelled")
   await saveQueue(currentProjectPath)
   processNext(currentProjectId)
 }
@@ -277,7 +279,7 @@ export function clearQueueState(): void {
   }
   queue = []
   restoredPausedTaskIds.clear()
-  interruptWaiters()
+  interruptScheduledWaiters()
   processing = false
   currentProjectId = ""
   currentProjectPath = ""
@@ -310,7 +312,7 @@ export async function pauseQueue(): Promise<void> {
 
   queue = []
   restoredPausedTaskIds.clear()
-  interruptWaiters()
+  interruptScheduledWaiters()
   currentProjectId = ""
   currentProjectPath = ""
 }
@@ -391,7 +393,7 @@ async function processNext(projectId: string): Promise<void> {
   if (!pp) {
     next.status = "failed"
     next.error = "Project not found in registry (was it deleted?)"
-    settle(next, "failed")
+    notifyScheduledOutcome(next, "failed")
     await saveQueue(currentProjectPath)
     processNext(projectId)
     return
@@ -408,7 +410,7 @@ async function processNext(projectId: string): Promise<void> {
     next.status = "failed"
     next.error = "LLM not configured — set API key in Settings"
     processing = false
-    settle(next, "failed")
+    notifyScheduledOutcome(next, "failed")
     await saveQueue(pp)
     return
   }
@@ -428,7 +430,7 @@ async function processNext(projectId: string): Promise<void> {
     currentAbortController = null
     restoredPausedTaskIds.delete(next.id)
     queue = queue.filter((t) => t.id !== next.id)
-    settle(next, "done")
+    notifyScheduledOutcome(next, "done")
     await saveQueue(pp)
     // Tell the rest of the app the wiki tree changed.
     useWikiStore.getState().bumpDataVersion()
@@ -443,7 +445,7 @@ async function processNext(projectId: string): Promise<void> {
 
     if (next.retryCount >= MAX_RETRIES) {
       next.status = "failed"
-      settle(next, "failed")
+      notifyScheduledOutcome(next, "failed")
       console.log(
         `[Dedup Queue] Failed (${next.retryCount}x): ${next.group.slugs.join(",")} — ${message}`,
       )

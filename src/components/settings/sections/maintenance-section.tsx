@@ -553,7 +553,7 @@ export function MaintenanceSection() {
         <p className="text-xs leading-relaxed text-muted-foreground">
           {t("settings.sections.maintenance.dedup.description", {
             defaultValue:
-              "Asks the LLM to scan all entity / concept pages and group ones that likely refer to the same topic under different names (English vs Chinese, plural vs singular, abbreviation vs full form). You confirm each group before merging. Merges are queued and run one at a time so cross-references stay consistent.",
+              "Asks the LLM to scan all entity / concept pages and group ones that likely refer to the same topic under different names (English vs Chinese, plural vs singular, abbreviation vs full form). On a scan you run here, you confirm each group before merging; the scheduled scan merges high-confidence groups itself. Merges are queued and run one at a time so cross-references stay consistent.",
           })}
         </p>
 

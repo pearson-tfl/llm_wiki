@@ -266,6 +266,27 @@ describe("scheduled maintenance tick – duplicate scan", () => {
   })
 })
 
+describe("scheduled maintenance tick – canonical page edge cases", () => {
+  it("ranks a page with no page on disk, no sources or no created date below a dated page, in any wiki folder", async () => {
+    await setConfig(null)
+    // Live front matter carries a non-empty related list and nested folders.
+    const dated = page("Codex Bridge", "2026-10-03", ["x.md"]).replace("related: []", "related: [openclaw, agent-client-protocol]")
+    const undated = page("Codex-Bridge", "2026-10-01", ["y.md"]).replace(/^created: .*\n/m, "")
+    const noSources = page("Codex Bridges", "2026-01-01", []).replace(/^sources: .*\n/m, "")
+    await writeFileRaw(`${tmp.path}/wiki/entities/tools/codex-bridge.md`, dated)
+    await writeFileRaw(`${tmp.path}/wiki/entities/codex-bridge-x.md`, undated)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/codex-bridges.md`, noSources)
+    mockDetect.mockResolvedValue([
+      group(["missing-page", "codex-bridges", "codex-bridge-x", "codex-bridge"], "high"),
+    ])
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["codex-bridge"])
+  })
+})
+
 describe("scheduled maintenance tick – groups it does not merge", () => {
   it("saves medium- and low-confidence groups for the Maintenance screen and merges none of them", async () => {
     await setConfig(null)
@@ -447,5 +468,51 @@ describe("scheduled maintenance timer", () => {
 
     expect(mockDetect).not.toHaveBeenCalled()
     expect(await realFs.fileExists(`${tmp.path}/.llm-wiki/maintenance-runs.jsonl`)).toBe(false)
+  })
+})
+
+describe("scheduled maintenance tick – state that changes during the scan", () => {
+  beforeEach(async () => {
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["a.md", "b.md"]))
+  })
+
+  it("withholds merges when an ingest starts while the scan runs", async () => {
+    await setConfig(null)
+    mockDetect.mockImplementation(async () => {
+      ingestSummary.pending = 1
+      return [group(["agent-loop", "agent-loops"], "high")]
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(getQueue()).toHaveLength(0)
+    expect(record).toMatchObject({ skipReason: "ingest-busy", mergesEnqueued: 0 })
+  })
+
+  it("withholds merges when the job is switched off while the scan runs", async () => {
+    await setConfig(null)
+    mockDetect.mockImplementation(async () => {
+      await saveScheduledMaintenanceConfig(tmp.path, { enabled: false, intervalHours: 24, lastRun: null })
+      return [group(["agent-loop", "agent-loops"], "high")]
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(record).toMatchObject({ skipReason: "switched-off", mergesEnqueued: 0 })
+  })
+
+  it("merges nothing when the not-duplicates list cannot be read", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/.llm-wiki/dedup-not-duplicates.json`, "[[\"agent-loop\", \"agent-loo")
+    mockDetect.mockResolvedValue([group(["agent-loop", "agent-loops"], "high")])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(getQueue()).toHaveLength(0)
+    expect(record?.error).toMatch(/not-duplicates/)
   })
 })
