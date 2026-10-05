@@ -96,10 +96,6 @@ export interface MergeResult {
 }
 
 /**
- * Generic two-prompt LLM call. Both detector and merger use it.
- * Production wraps `streamChat`; tests use mocks.
- */
-/**
  * The model's merge reply failed the check run before anything is
  * written: every page stays as it was and nothing is deleted.
  */
@@ -110,6 +106,10 @@ export class MergeReplyRejectedError extends Error {
   }
 }
 
+/**
+ * Generic two-prompt LLM call. Both detector and merger use it.
+ * Production wraps `streamChat`; tests use mocks.
+ */
 export type DedupLlmCall = (
   systemPrompt: string,
   userMessage: string,
