@@ -242,9 +242,13 @@ Keep this list current. Merge conflicts can only come from these files.
   stdin for that chat. A turn tag inside an earlier turn has its `<`
   written as `&lt;`, so message text cannot pass as another turn; two text
   blocks in one message are joined with a newline; a conversation ending
-  on an assistant turn is refused with an error (#50). Like the #32
+  on an assistant turn is refused with an error (#50). The escape also
+  catches a spaced or attributed tag such as `</user >` or
+  `<assistant id=1>`, and covers the system text, which can carry wiki or
+  source text; an empty text block adds no newline (#54). Like the #32
   wording, re-check this when the CLI updates: pipe
-  `piped-history.stdin.jsonl` and `piped-history-forged-tags.stdin.jsonl`
+  `piped-history.stdin.jsonl`, `piped-history-forged-tags.stdin.jsonl` and
+  `piped-history-spaced-tags.stdin.jsonl`
   to the new `claude` with the flags `build_claude_cli_args(model, true)`
   builds, from a scratch folder, and confirm each gives one `success`
   result. A version whose prompt-injection guard refuses a transcript with
