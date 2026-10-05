@@ -1270,6 +1270,30 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
     })
 
+    it("a retry whose turn comes after the restore it waited behind was cut off too leaves that restore's notice, and a retry that opens the queue clears it", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOff = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOff).toBeInstanceOf(SwitchStepTimeoutError)
+
+      // The user reopens project B, whose read hangs too, then clicks Retry.
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const reopened = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await flushMicrotasks(20)
+      const retried = retryTimedOutRestore()
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await reopened).toBeInstanceOf(SwitchStepTimeoutError)
+      await retried
+
+      expect(retryNotices().filter((item) => !item.resolved)).toHaveLength(1)
+
+      await retryTimedOutRestore()
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+      expect(retryNotices()).toHaveLength(0)
+    })
+
     it("a merge stopped because no model is set leaves no cancel handle for the next pause to abort", async () => {
       useWikiStore.getState().setLlmConfig({
         ...useWikiStore.getState().llmConfig,
