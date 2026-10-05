@@ -280,6 +280,14 @@ Keep this list current. Merge conflicts can only come from these files.
   stops with the request in place, stays due, and redoes on the next run any
   hub it had already rebuilt. An unreadable request is left in place and the
   run records why. Tests in `src/lib/scheduled-maintenance.test.ts`.
+- `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
+  the test-only `clearQueueState()` cannot stop an ingest queue save that
+  is already writing, so it hands back a promise that settles once that
+  save has landed. The real-file tests await it before they write or read
+  the queue file, so a late save no longer empties the file under a
+  restore (pearson-tfl/llm_wiki#58). Production switches projects through
+  `pauseQueue()`, which already waits for every save. Tests in
+  `src/lib/ingest-queue.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

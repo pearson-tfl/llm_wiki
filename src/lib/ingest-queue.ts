@@ -79,6 +79,7 @@ interface QueueWriteRequest {
 const pendingActiveQueueWrites: QueueWriteRequest[] = []
 let activeQueueWriteRunning = false
 let activeQueueWriteEpoch = 0
+let activeQueueWrite: Promise<void> = Promise.resolve()
 
 function resetQueueAccounting(): void {
   completedSinceIdle = 0
@@ -120,8 +121,13 @@ async function drainActiveQueueWrites(): Promise<void> {
   if (!request) return
   const epoch = activeQueueWriteEpoch
   activeQueueWriteRunning = true
+  const write = writeFile(request.path, request.snapshot)
+  activeQueueWrite = write.then(
+    () => {},
+    () => {},
+  )
   try {
-    await writeFile(request.path, request.snapshot)
+    await write
   } catch {
     // Queue persistence is best-effort; the in-memory queue remains authoritative.
   } finally {
@@ -769,8 +775,13 @@ export function getQueueSummary(): {
  * that want a clean slate between cases. **Production code should use
  * `pauseQueue()` on project switch**, which flushes pending state to
  * disk before clearing memory.
+ *
+ * Queued saves are dropped, but a save already writing cannot be stopped.
+ * The returned promise settles once that save has landed; a test that
+ * writes or reads the queue file after clearing awaits it first.
  */
-export function clearQueueState(): void {
+export function clearQueueState(): Promise<void> {
+  const landed = activeQueueWrite
   queueEpoch += 1
   clearUsageLimitAutoResume()
   for (const run of activeRuns.values()) {
@@ -796,6 +807,7 @@ export function clearQueueState(): void {
   for (const request of pendingActiveQueueWrites.splice(0)) request.resolve()
   commitCoordinator = new IngestCommitCoordinator()
   workerLimit = 1
+  return landed
 }
 
 /**
