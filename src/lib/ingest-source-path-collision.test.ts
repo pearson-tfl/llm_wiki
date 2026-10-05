@@ -28,10 +28,16 @@ vi.mock("./llm-client", () => ({
     const systemPrompt = String(messages?.[0]?.content ?? "")
     const userPrompt = String(messages?.[1]?.content ?? "")
 
-    if (systemPrompt.startsWith("You are merging two versions")) {
+    if (systemPrompt.startsWith("You are merging source-backed material")) {
       mergeRequestCount++
-      const incoming = userPrompt.split("## Newly generated version")[1]?.split("---")[2]
-      cb.onToken(incoming?.trim() || "---\ntitle: merged\n---\n\n# merged")
+      // Real merge user message: previous page, separator, additional page,
+      // separator, closing instruction. Answer with the additional page
+      // followed by the previous page's body, as a faithful merge would.
+      const [previous = "", additional = ""] = userPrompt.split(/\n\n---\n\n## Additional material[^\n]*\n\n/)
+      const existing = previous.replace(/^## Previously collected material[^\n]*\n\n/, "")
+      const incoming = additional.split("\n\n---\n\nNow output the merged file")[0]
+      const existingBody = existing.replace(/^---\n[\s\S]*?\n---\n/, "")
+      cb.onToken(`${incoming.trim()}\n\n${existingBody.trim()}\n`)
       cb.onDone()
       return
     }

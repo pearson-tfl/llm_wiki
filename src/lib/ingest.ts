@@ -65,6 +65,21 @@ const CONSERVATIVE_CHARS_PER_OUTPUT_TOKEN = 4
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
 const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
 const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
+// Existing pages offered to generation: at most this many pages, from this
+// many search hits per topic, within this share of the context page budget.
+const CANDIDATE_MAX_PAGES = 12
+const CANDIDATE_MAX_TOPICS = 20
+const CANDIDATE_HITS_PER_TOPIC = 3
+// A topics-section line longer than this is prose, not a name.
+const CANDIDATE_TOPIC_MAX_CHARS = 120
+const CANDIDATE_BLOCK_PAGE_BUDGET_SHARE = 0.3
+// Below this much room a further page is not worth offering.
+const CANDIDATE_MIN_PAGE_CHARS = 1_000
+// Embedding endpoints reject long inputs; the whole-analysis fallback
+// query is cut to this length.
+const CANDIDATE_FALLBACK_QUERY_MAX = 2_000
+// An exact title-path match outranks any similarity score.
+const EXACT_PATH_SCORE = Number.POSITIVE_INFINITY
 
 export class NonRetryableIngestError extends Error {
   readonly nonRetryable = true
@@ -686,8 +701,9 @@ export function buildDeterministicIngestLog(
   existing: string,
   sourceIdentity: string,
   date = currentWikiDate(),
+  details: readonly string[] = [],
 ): string {
-  const entry = `## [${date}] ingest | ${sourceIdentity}`
+  const entry = [`## [${date}] ingest | ${sourceIdentity}`, ...(details.length > 0 ? ["", ...details] : [])].join("\n")
   return existing.trim()
     ? `${existing.trimEnd()}\n\n${entry}\n`
     : `# Wiki Log\n\n${entry}\n`
@@ -1042,7 +1058,10 @@ async function autoIngestImpl(
     }
   }
 
-  const stableContextLength = schema.length + purpose.length + index.length + overview.length
+  // The existing-page block is chosen after analysis, so its cap is reserved
+  // here: a source that would not fit beside it goes to the chunked path.
+  const stableContextLength = schema.length + purpose.length + index.length + overview.length +
+    candidateBlockCap(llmConfig.maxContextSize)
   const sourceBudget = computeIngestSourceBudget(llmConfig.maxContextSize, stableContextLength)
   let sourceContext = enrichedSourceContent
   let precomputedAnalysis = ""
@@ -1117,6 +1136,16 @@ async function autoIngestImpl(
     throw new Error(analysisActivity.detail || "Analysis stream failed")
   }
 
+  // ── Step 1.5: Existing pages on this source's topics ──────────
+  activity.updateItem(activityId, { detail: "Finding existing pages on this source's topics..." })
+  const candidates = await selectExistingPageCandidates(
+    pp,
+    analysis,
+    sourceSummaryPath,
+    llmConfig.maxContextSize,
+  )
+  throwIfIngestAborted(signal, activityId)
+
   // ── Step 2: Generation ────────────────────────────────────────
   // LLM takes the analysis as context and produces wiki files + review items
   activity.updateItem(activityId, { detail: "Step 2/2: Generating wiki pages..." })
@@ -1142,7 +1171,7 @@ async function autoIngestImpl(
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+        { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath, candidates.pages) },
         {
           role: "user",
           content: [
@@ -1285,6 +1314,8 @@ async function autoIngestImpl(
   ])
   const writeWarnings = writeResult.warnings
   const hardFailures = writeResult.hardFailures
+  const createdPaths = [...writeResult.createdPaths]
+  const updatedPaths = [...writeResult.updatedPaths]
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
     writeResult.truncatedPaths.filter((path) =>
       !writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))
@@ -1378,6 +1409,8 @@ async function autoIngestImpl(
         }
         writeWarnings.push(...repairResult.warnings)
         hardFailures.push(...repairResult.hardFailures)
+        createdPaths.push(...repairResult.createdPaths)
+        updatedPaths.push(...repairResult.updatedPaths)
         const recoveredPathKeys = new Set(recoveredPaths.map(normalizePath))
         unrecoveredTruncatedPaths = unrecoveredTruncatedPaths.filter((path) =>
           !recoveredPathKeys.has(normalizePath(path))
@@ -1406,13 +1439,19 @@ async function autoIngestImpl(
   // block, write a deterministic entry instead of starting another LLM turn.
   // This keeps multi-file imports at two generation stages per source and
   // prevents a slow provider from making the queue appear stuck in "repair".
-  if (!writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md") && !signal?.aborted) {
+  // Either way the entry ends with the existing-page counts.
+  if (!signal?.aborted) {
     try {
       const logPath = `${pp}/wiki/log.md`
       const existingLog = await tryReadFile(logPath)
-      await writeFile(logPath, buildDeterministicIngestLog(existingLog, sourceIdentity))
-      writtenPaths.push("wiki/log.md")
-      onFileWritten?.("wiki/log.md")
+      const details = formatCandidateLogDetails(candidates, createdPaths, updatedPaths)
+      if (writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md")) {
+        await writeFile(logPath, `${existingLog.trimEnd()}\n\n${details.join("\n")}\n`)
+      } else {
+        await writeFile(logPath, buildDeterministicIngestLog(existingLog, sourceIdentity, undefined, details))
+        writtenPaths.push("wiki/log.md")
+        onFileWritten?.("wiki/log.md")
+      }
     } catch (err) {
       writeWarnings.push(
         `Deterministic log update failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -2028,6 +2067,8 @@ async function writeFileBlocks(
   warnings: string[]
   hardFailures: string[]
   truncatedPaths: string[]
+  createdPaths: string[]
+  updatedPaths: string[]
 }> {
   const { blocks, warnings: parseWarnings, truncatedPaths } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
@@ -2045,6 +2086,9 @@ async function writeFileBlocks(
   // be written, so the next re-ingest goes through the full pipeline
   // instead of replaying the partial result forever.
   const hardFailures: string[] = []
+  // Content pages written over an existing page, and pages that did not exist.
+  const createdPaths: string[] = []
+  const updatedPaths: string[] = []
   const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
 
   const targetLang = useWikiStore.getState().outputLanguage
@@ -2196,6 +2240,8 @@ async function writeFileBlocks(
         // remove legacy/generated paths that may already be stored on disk.
         const toWrite = canonicalizeSourcesField(merged, sourceFileName)
         await writeFile(fullPath, toWrite)
+        if (existing) updatedPaths.push(relativePath)
+        else createdPaths.push(relativePath)
       }
       writtenPaths.push(relativePath)
       completedInputPaths.push(rawRelativePath)
@@ -2214,6 +2260,8 @@ async function writeFileBlocks(
     warnings,
     hardFailures,
     truncatedPaths,
+    createdPaths,
+    updatedPaths,
   }
 }
 
@@ -2373,6 +2421,9 @@ export function buildAnalysisPrompt(
     "- What should be emphasized vs. de-emphasized?",
     "- Any open questions worth flagging for the user?",
     "",
+    "## Topics",
+    "End your analysis with this section, after every other section: each entity and concept named above, one name per line, with no bullets, numbering or other text. Use the exact title of an existing wiki page when one covers the topic.",
+    "",
     "Be thorough but concise. Focus on what's genuinely important.",
     "",
     "If a folder context is provided, use it as a hint for categorization — the folder structure often reflects the user's organizational intent (e.g., 'papers/energy' suggests the file is an energy-related paper).",
@@ -2381,7 +2432,7 @@ export function buildAnalysisPrompt(
       ? `## Project Schema (page types available — map source content to schema-defined types when it fits)\n${schema}`
       : "",
     purpose ? `## Wiki Purpose (for context)\n${purpose}` : "",
-    index ? `## Current Wiki Index (for checking existing content)\n${index}` : "",
+    index ? `## Current Wiki Index (${PARTIAL_INDEX_LABEL})\n${index}` : "",
   ].filter(Boolean).join("\n")
 }
 
@@ -2396,6 +2447,7 @@ export function buildGenerationPrompt(
   overview?: string,
   sourceContent: string = "",
   sourceSummaryPath?: string,
+  existingPages: readonly ExistingPage[] = [],
 ): string {
   // Use original filename (without extension) as the source summary page name
   const sourceBaseName = sourceFileName.replace(/\.[^.]+$/, "")
@@ -2516,9 +2568,20 @@ export function buildGenerationPrompt(
     "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
-    index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
-    overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
+    index ? `## Current Wiki Index (${PARTIAL_INDEX_LABEL})\n${index}` : "",
+    overview ? `## Current Overview (read-only; the application maintains it)\n${overview}` : "",
     "",
+    existingPages.length > 0
+      ? [
+          "## Existing Pages for This Source (update these in place)",
+          "These existing wiki pages cover topics in this source. Each is shown with its exact path and current text.",
+          "- To add this source's material to one of them, write a FILE block with that page's exact path. Keep its existing content and add the new material; the application merges your FILE block into the page on disk.",
+          "- Create a new page only for a topic that none of these pages covers.",
+          "",
+          ...existingPages.map((page) => `<existing-page path="${page.path}">\n${page.content}\n</existing-page>`),
+          "",
+        ].join("\n")
+      : "",
     // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
     "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
     "",
@@ -2743,6 +2806,154 @@ export function computeIngestSourceBudget(
   const available = maxCtx - responseReserve - stableReserve - instructionReserve
   const upper = Math.min(LONG_SOURCE_MAX_SINGLE_PASS_BUDGET, Math.max(LONG_SOURCE_MIN_BUDGET, Math.floor(maxCtx * 0.6)))
   return clampNumber(Math.floor(available), LONG_SOURCE_MIN_BUDGET, upper)
+}
+
+const PARTIAL_INDEX_LABEL =
+  "a partial, read-only list of recently updated pages; the wiki has more pages than it shows"
+
+export interface ExistingPage {
+  path: string
+  content: string
+}
+
+interface ExistingPageCandidates {
+  pages: ExistingPage[]
+  /** Log lines naming each candidate check that did not run, and why. */
+  skipped: string[]
+}
+
+function candidateBlockCap(maxContextSize: number | undefined): number {
+  return Math.floor(computeContextBudget(maxContextSize).pageBudget * CANDIDATE_BLOCK_PAGE_BUDGET_SHARE)
+}
+
+/**
+ * The analysis's last `Topics` section: one name per line, ended by a heading
+ * or by a prose line (a sentence, or longer than any name). Tolerates a bold
+ * heading, list markers, bold names, blank lines and an intro line ending in
+ * a colon, which models add despite the instruction.
+ */
+function parseAnalysisTopics(analysis: string): string[] {
+  const lines = analysis.split("\n")
+  let start = -1
+  lines.forEach((line, position) => {
+    if (/^(?:#{2,4}\s*Topics|\*\*Topics:?\*\*):?$/i.test(line.trim())) start = position
+  })
+  if (start < 0) return []
+  const topics = new Map<string, string>()
+  for (const line of lines.slice(start + 1)) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.endsWith(":")) continue
+    if (/^#{1,6}\s/.test(trimmed) || /[.!?]$/.test(trimmed) || trimmed.length > CANDIDATE_TOPIC_MAX_CHARS) break
+    const topic = trimmed
+      .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
+      .replace(/^\*\*(.+)\*\*$/, "$1")
+      .trim()
+    if (topic && !topics.has(topic.toLowerCase())) topics.set(topic.toLowerCase(), topic)
+  }
+  return [...topics.values()].slice(0, CANDIDATE_MAX_TOPICS)
+}
+
+function isCandidatePagePath(relativePath: string, sourceSummaryPath: string): boolean {
+  if (!isSafeIngestPath(relativePath) || !relativePath.endsWith(".md")) return false
+  if (AGGREGATE_WIKI_PATHS.includes(relativePath as (typeof AGGREGATE_WIKI_PATHS)[number])) return false
+  return !relativePath.startsWith("wiki/sources/") || relativePath === sourceSummaryPath
+}
+
+/** Wiki pages keyed by file-name slug, for the exact title-path check. */
+async function wikiPagesBySlug(projectPath: string): Promise<Map<string, string[]>> {
+  const bySlug = new Map<string, string[]>()
+  const walk = (nodes: readonly FileNode[]) => {
+    for (const node of nodes) {
+      if (node.is_dir) {
+        walk(node.children ?? [])
+      } else if (node.name.endsWith(".md")) {
+        const relativePath = normalizePath(node.path).slice(projectPath.length + 1)
+        const slug = node.name.replace(/\.md$/, "").toLowerCase()
+        bySlug.set(slug, [...(bySlug.get(slug) ?? []), relativePath])
+      }
+    }
+  }
+  walk(await listDirectory(`${projectPath}/wiki`))
+  return bySlug
+}
+
+/**
+ * Existing wiki pages on the analysed source's topics: an embedding search
+ * per topic plus a page at each topic's title-derived file name, ranked by
+ * best score and cut to the candidate budget. Never throws for a search
+ * failure; it reports why the search was skipped instead.
+ */
+async function selectExistingPageCandidates(
+  projectPath: string,
+  analysis: string,
+  sourceSummaryPath: string,
+  maxContextSize: number | undefined,
+): Promise<ExistingPageCandidates> {
+  const topics = parseAnalysisTopics(analysis)
+  const scores = new Map<string, number>()
+  const offer = (relativePath: string, score: number) => {
+    if (!isCandidatePagePath(relativePath, sourceSummaryPath)) return
+    scores.set(relativePath, Math.max(scores.get(relativePath) ?? Number.NEGATIVE_INFINITY, score))
+  }
+
+  const skipped: string[] = []
+  if (topics.length > 0) {
+    try {
+      const bySlug = await wikiPagesBySlug(projectPath)
+      for (const topic of topics) {
+        for (const relativePath of bySlug.get(makeQuerySlug(topic)) ?? []) offer(relativePath, EXACT_PATH_SCORE)
+      }
+    } catch (err) {
+      skipped.push(`Exact-path check skipped: wiki listing failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const embCfg = useWikiStore.getState().embeddingConfig
+  if (!embCfg.enabled || !embCfg.model) {
+    skipped.push("Existing-page search skipped: embeddings are off")
+  } else {
+    const queries = topics.length > 0 ? topics : [analysis.trim().slice(0, CANDIDATE_FALLBACK_QUERY_MAX)]
+    try {
+      const { searchByEmbedding, getLastEmbeddingError } = await import("@/lib/embedding")
+      for (const query of queries.filter(Boolean)) {
+        const hits = await searchByEmbedding(projectPath, query, embCfg, CANDIDATE_HITS_PER_TOPIC)
+        // searchByEmbedding answers a failed embedding fetch with no hits.
+        const fetchError = hits.length === 0 ? getLastEmbeddingError() : null
+        if (fetchError) throw new Error(fetchError)
+        for (const hit of hits) offer(`wiki/${hit.id}.md`, hit.score)
+      }
+    } catch (err) {
+      skipped.push(`Existing-page search skipped: search failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  const { maxPageSize } = computeContextBudget(maxContextSize)
+  let room = candidateBlockCap(maxContextSize)
+  const pages: ExistingPage[] = []
+  const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([relativePath]) => relativePath)
+  for (const relativePath of ranked) {
+    if (pages.length >= CANDIDATE_MAX_PAGES || room < CANDIDATE_MIN_PAGE_CHARS) break
+    const content = (await tryReadFile(`${projectPath}/${relativePath}`)).trim()
+    if (!content) continue
+    const page = { path: relativePath, content: trimLongText(content, Math.min(maxPageSize, room)) }
+    pages.push(page)
+    room -= page.content.length
+  }
+  return { pages, skipped }
+}
+
+/** Log lines for one ingest: candidate and write counts, then skipped checks. */
+function formatCandidateLogDetails(
+  candidates: ExistingPageCandidates,
+  createdPaths: readonly string[],
+  updatedPaths: readonly string[],
+): string[] {
+  const created = new Set(createdPaths.map(normalizePath))
+  const updated = new Set(updatedPaths.map(normalizePath).filter((path) => !created.has(path)))
+  return [
+    `- Existing pages offered: ${candidates.pages.length}. Existing pages updated: ${updated.size}. Pages created: ${created.size}.`,
+    ...candidates.skipped.map((line) => `- ${line}.`),
+  ]
 }
 
 export function computeIngestGenerationMaxTokens(maxContextSize: number | undefined): number {
@@ -3079,6 +3290,7 @@ export function buildChunkAnalysisSystemPrompt(
     "Entity handling rules:",
     ...LONG_SOURCE_ENTITY_RULES.map((rule) => `- ${rule}`),
     "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
+    "Begin the digest with a `### Topics` list, followed by a blank line: each entity and concept in the digest, one name per line, with no bullets, numbering or other text. It comes first so that trimming a long digest never cuts it.",
     "",
     "Stable project context follows. It changes rarely and should be treated as background:",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
