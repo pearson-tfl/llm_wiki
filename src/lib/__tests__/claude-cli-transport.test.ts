@@ -38,7 +38,7 @@ import {
 } from "../claude-cli-transport"
 import { buildDedupLlmCall } from "../dedup-runner"
 import { MergeReplyRejectedError } from "../dedup"
-import { useWikiStore } from "@/stores/wiki-store"
+import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -425,7 +425,8 @@ describe("streamClaudeCodeCli", () => {
 // Stdout recorded from claude 2.1.289 run with the app's flags on
 // claude-opus-5-5 (#32). The two limit-hit runs went through a relay that
 // cut the request's output cap to 40 tokens: the first request only
-// (resumed), or every request (exhausted).
+// (resumed), or every request (exhausted). All three ran isolated
+// (`"tools":[]` on the init event).
 const CLI_CONFIG = {
   provider: "claude-code" as const,
   apiKey: "",
@@ -433,6 +434,7 @@ const CLI_CONFIG = {
   ollamaUrl: "",
   customEndpoint: "",
   maxContextSize: 1000000,
+  localCliIsolation: true,
 }
 
 /** Feed a recorded stdout to the CLI the caller just spawned, then its exit. */
@@ -456,10 +458,11 @@ async function replayClaudeCliStdout(
   fixture: string,
   exitCode: number,
   edit?: (line: string) => string,
+  config: LlmConfig = CLI_CONFIG,
 ) {
   const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
   const stream = streamClaudeCodeCli(
-    CLI_CONFIG,
+    config,
     [{ role: "user", content: "Write a paragraph about rivers." }],
     callbacks,
   )
@@ -500,6 +503,40 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
     const rejection = await merge.catch((err: unknown) => err)
     expect(rejection).toBeInstanceOf(MergeReplyRejectedError)
     expect((rejection as Error).message).toBe("Merge reply rejected: the model's reply was cut off at its output limit")
+  })
+
+  // A CLI update that rewords its resume turn (#37).
+  const rewordResume = (line: string) =>
+    line.replace("Output token limit hit. Resume directly", "Reply too long; carry on directly")
+
+  it("flags a resumed reply cut off when the CLI rewords its resume turn (#37)", async () => {
+    const callbacks = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0, rewordResume)
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
+  })
+
+  it("flags a resumed reply cut off from the result's turn count alone, when isolated (#37)", async () => {
+    const callbacks = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0, (line) =>
+      rewordResume(line).replace('"isSynthetic":true', '"isSynthetic":false'))
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
+  })
+
+  it("flags a resumed reply cut off from its synthetic user turn alone, when isolated (#37)", async () => {
+    const callbacks = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0, (line) =>
+      rewordResume(line).replace('"num_turns":2', '"num_turns":1'))
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
+  })
+
+  it("reads only the resume wording when not isolated, where tool turns are normal (#37)", async () => {
+    const notIsolated = { ...CLI_CONFIG, localCliIsolation: false }
+    const reworded = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0, rewordResume, notIsolated)
+    expect(reworded.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
+
+    tauriMocks.invoke.mockClear()
+    const asRecorded = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0, undefined, notIsolated)
+    expect(asRecorded.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
   })
 
   it("fails a reply whose resumes ran out, as the CLI exits 1", async () => {

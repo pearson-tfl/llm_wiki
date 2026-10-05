@@ -173,9 +173,13 @@ Keep this list current. Merge conflicts can only come from these files.
   app asks for. At that
   limit it does not end the reply: it adds a user turn of its own ("Output
   token limit hit. Resume directly …") and resumes, up to three times. The
-  transport matches that wording as Claude Code 2.1.289 writes it: re-check
-  it when the CLI updates, since a reworded turn would go unflagged. The
-  transport flags a reply during which the CLI did so as cut off, even
+  transport matches that wording as Claude Code 2.1.289 writes it. With
+  local CLI isolation on, the CLI has no tools and takes a second turn only
+  to resume, so the transport also flags a user turn the CLI marks
+  synthetic, or a `result` event counting more than one turn, whatever the
+  wording (#37). Isolation is off by default; with it off the wording is
+  the only signal, so re-check it when the CLI updates, since a reworded
+  turn would go unflagged there. The transport flags a reply during which the CLI did so as cut off, even
   when a resume finished it, since the join between the turns is
   unchecked, and passes on the CLI's stop reason (`stop_reason` on the
   `result` event, `end_turn` on a normal reply). A reply whose resumes
