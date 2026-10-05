@@ -300,8 +300,8 @@ export function clearQueueState(): void {
 }
 
 /**
- * Project-switch handshake: flush the active project's queue to disk
- * (reverting any in-flight task to pending so it gets re-tried on
+ * Project-switch handshake: stop the active project's queue, flush it to
+ * disk (reverting any in-flight task to pending so it gets re-tried on
  * resume), then clear in-memory state.
  */
 export async function pauseQueue(): Promise<void> {

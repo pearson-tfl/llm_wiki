@@ -677,6 +677,28 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
 
     expect(mockExecuteMerge).toHaveBeenCalledOnce()
   })
+
+  it("a merge whose project lookup ends while a project switch saves the queue neither starts nor saves (#35)", async () => {
+    const lookup = createDeferred<void>()
+    registryHold = lookup.promise
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await flushMicrotasks(5)
+
+    const save = createDeferred<void>()
+    mockWriteFile.mockImplementationOnce(() => save.promise)
+    const writesBefore = mockWriteFile.mock.calls.length
+    const paused = pauseQueue()
+    lookup.resolve()
+    await flushMicrotasks(20)
+    save.resolve()
+    await paused
+
+    expect(mockExecuteMerge).not.toHaveBeenCalled()
+    // Only the switch's own save, with the task left pending.
+    const writes = mockWriteFile.mock.calls.slice(writesBefore)
+    expect(writes).toHaveLength(1)
+    expect(writes[0][1]).toContain('"pending"')
+  })
 })
 
 describe("dedup-queue — outcomes a scheduled run waits for", () => {
