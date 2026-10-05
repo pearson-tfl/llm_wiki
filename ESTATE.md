@@ -179,8 +179,9 @@ Keep this list current. Merge conflicts can only come from these files.
   synthetic, or a `result` event counting more than one turn, whatever the
   wording (#37). Isolation is off by default; with it off the wording is
   the only signal, so re-check it when the CLI updates, since a reworded
-  turn would go unflagged there. The transport flags a reply during which the CLI did so as cut off, even
-  when a resume finished it, since the join between the turns is
+  turn would go unflagged there. The transport flags a reply during which
+  the CLI hit its limit and resumed as cut off, even when a resume
+  finished it, since the join between the turns is
   unchecked, and passes on the CLI's stop reason (`stop_reason` on the
   `result` event, `end_turn` on a normal reply). A reply whose resumes
   ran out ends in a CLI error, as before. Which routes catch a cut-off
