@@ -225,7 +225,16 @@ Keep this list current. Merge conflicts can only come from these files.
   `claude_cli.rs` and `src/lib/__tests__/claude-cli-transport.test.ts`; the
   fixture `piped-history.jsonl` is the live CLI's reply to
   `piped-history.stdin.jsonl`, which a Rust test pins as the app's own
-  stdin for that chat.
+  stdin for that chat. A turn tag inside an earlier turn has its `<`
+  written as `&lt;`, so message text cannot pass as another turn; two text
+  blocks in one message are joined with a newline; a conversation ending
+  on an assistant turn is refused with an error (#50). Like the #32
+  wording, re-check this when the CLI updates: pipe
+  `piped-history.stdin.jsonl` and `piped-history-forged-tags.stdin.jsonl`
+  to the new `claude` with the flags `build_claude_cli_args(model, true)`
+  builds, from a scratch folder, and confirm each gives one `success`
+  result. A version whose prompt-injection guard refuses a transcript with
+  `<assistant>` sections would turn every chat with history into an error.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
   failure reaches its log (#22), and the hub rebuild's search uses so the
