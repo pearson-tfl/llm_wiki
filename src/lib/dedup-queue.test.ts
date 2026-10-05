@@ -269,9 +269,11 @@ describe("dedup-queue — cancel / delete", () => {
 
   // #33: the cancelled merge's run ends only after the next has started.
   it.each([
-    ["fails", (d: Deferred<MergeResult>) => d.reject(new Error("Duplicate merge cancelled before the model's reply finished"))],
-    ["finishes its writes", (d: Deferred<MergeResult>) => d.resolve(EMPTY_MERGE)],
-  ])("after a cancelled merge %s late, the next can be cancelled and no third starts while it runs", async (label, endCancelledRun) => {
+    // The last column: data-version bumps, since pages a cancelled merge
+    // finished writing still reach the wiki tree.
+    ["fails", (d: Deferred<MergeResult>) => d.reject(new Error("Duplicate merge cancelled before the model's reply finished")), 0],
+    ["finishes its writes", (d: Deferred<MergeResult>) => d.resolve(EMPTY_MERGE), 1],
+  ])("after a cancelled merge %s late, the next can be cancelled and no third starts while it runs", async (_label, endCancelledRun, bumps) => {
     const signals: AbortSignal[] = []
     const runs: Deferred<MergeResult>[] = []
     mockExecuteMerge.mockImplementation(async (_pp, _g, _slug, _llm, opts) => {
@@ -301,10 +303,7 @@ describe("dedup-queue — cancel / delete", () => {
       [second, "processing"],
       [third, "pending"],
     ])
-    // Pages a cancelled merge finished writing still reach the wiki tree.
-    if (label === "finishes its writes") {
-      expect(useWikiStore.getState().dataVersion).toBe(versionBefore + 1)
-    }
+    expect(useWikiStore.getState().dataVersion).toBe(versionBefore + bumps)
 
     await cancelTask(second)
     expect(signals[1].aborted).toBe(true)
