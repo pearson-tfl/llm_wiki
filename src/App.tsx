@@ -4,14 +4,13 @@ import { invoke } from "@tauri-apps/api/core"
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as isAutostartEnabled } from "@tauri-apps/plugin-autostart"
 import i18n from "@/i18n"
 import { useWikiStore } from "@/stores/wiki-store"
-import { useReviewStore } from "@/stores/review-store"
 import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { BASE_FONT_SIZE_PX, useZoomStore } from "@/stores/zoom-store"
 import { openProject } from "@/commands/fs"
 import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchAllProjects, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
-import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
-import { setupAutoSave } from "@/lib/auto-save"
+import { loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
+import { setupAutoSave, loadSavedReviewItems } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
 import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
 import { useGlobalShortcut } from "@/hooks/use-global-shortcut"
@@ -77,10 +76,12 @@ function App() {
 
   async function hydrateProjectSideStores(proj: WikiProject): Promise<void> {
     try {
-      const savedReview = await loadReviewItems(proj.path)
+      // The review auto-save writes nothing for this project until these
+      // load, so a merge-queue time-out notice filed first is not saved
+      // over them, and they load beside it (#62).
       const { dismissStaleRestoreNotice } = await import("@/lib/dedup-queue")
-      if (savedReview.length > 0 && isCurrentProject(proj)) {
-        useReviewStore.getState().setItems(savedReview)
+      const loaded = await loadSavedReviewItems(proj.path, () => isCurrentProject(proj))
+      if (loaded) {
         // A merge-queue time-out notice saved before this reopen goes if
         // the queue has opened since (#59).
         dismissStaleRestoreNotice(proj.id)

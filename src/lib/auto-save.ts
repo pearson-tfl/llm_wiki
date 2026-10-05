@@ -2,7 +2,7 @@ import { useReviewStore } from "@/stores/review-store"
 import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
-import { saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences } from "./persist"
+import { loadReviewItems, saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences } from "./persist"
 
 let reviewTimer: ReturnType<typeof setTimeout> | null = null
 let lintTimer: ReturnType<typeof setTimeout> | null = null
@@ -15,6 +15,12 @@ let chatTimer: ReturnType<typeof setTimeout> | null = null
 // review / deep-research items. The switch flow flushes real data to disk via
 // flushAndSuspendAutoSave() first, then resumes once the new project loads.
 let suspended = false
+
+// The project whose saved review items have loaded. Project open resumes
+// auto-save before it reads them, so until then the review store holds only
+// what arrived since the switch (a merge-queue time-out notice, say), and
+// saving that would write it alone over the project's review.json (#62).
+let reviewLoadedFor: string | null = null
 
 function clearTimers(): void {
   if (reviewTimer) { clearTimeout(reviewTimer); reviewTimer = null }
@@ -30,13 +36,15 @@ function clearTimers(): void {
 export async function flushAndSuspendAutoSave(): Promise<void> {
   suspended = true
   clearTimers()
+  const reviewLoaded = reviewLoadedFor
+  reviewLoadedFor = null
   const projectPath = useWikiStore.getState().project?.path
   if (!projectPath) return
   const review = useReviewStore.getState().items
   const lint = useLintStore.getState().items
   const chat = useChatStore.getState()
   await Promise.allSettled([
-    saveReviewItems(projectPath, review),
+    reviewLoaded === projectPath ? saveReviewItems(projectPath, review) : Promise.resolve(),
     saveLintItems(projectPath, lint),
     saveChatPreferences(projectPath, {
       useWebSearch: chat.useWebSearch,
@@ -80,11 +88,35 @@ export async function runWithSuspendedAutoSave<T>(
   }
 }
 
+/**
+ * Load a project's saved review items into the review store and let the
+ * review auto-save write for that project from then on. Items that arrived
+ * while the file was loading are newer than it, so they are kept, replacing
+ * a saved item with the same id. Returns whether the store took the saved
+ * items; it does nothing once `stillCurrent` says the project has changed,
+ * or while a switch has auto-save suspended, since the switch's own open
+ * loads them again, even for the same project.
+ */
+export async function loadSavedReviewItems(
+  projectPath: string,
+  stillCurrent: () => boolean,
+): Promise<boolean> {
+  const saved = await loadReviewItems(projectPath)
+  if (suspended || !stillCurrent()) return false
+  reviewLoadedFor = projectPath
+  if (saved.length === 0) return false
+  const { items, setItems } = useReviewStore.getState()
+  const arrived = new Set(items.map((item) => item.id))
+  setItems([...saved.filter((item) => !arrived.has(item.id)), ...items])
+  return true
+}
+
 export function setupAutoSave(): void {
   // Auto-save review items (debounced 1s)
   useReviewStore.subscribe((state) => {
     if (suspended) return
     const projectPath = useWikiStore.getState().project?.path
+    if (projectPath !== reviewLoadedFor) return
     if (reviewTimer) clearTimeout(reviewTimer)
     reviewTimer = setTimeout(() => {
       if (projectPath) {

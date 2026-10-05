@@ -12,20 +12,22 @@
  */
 import { describe, it, expect, beforeEach, vi } from "vitest"
 
-const { saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences } = vi.hoisted(() => ({
+const { loadReviewItems, saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences } = vi.hoisted(() => ({
+  loadReviewItems: vi.fn().mockResolvedValue([]),
   saveReviewItems: vi.fn().mockResolvedValue(undefined),
   saveLintItems: vi.fn().mockResolvedValue(undefined),
   saveChatHistory: vi.fn().mockResolvedValue(undefined),
   saveChatPreferences: vi.fn().mockResolvedValue(undefined),
 }))
 
-vi.mock("./persist", () => ({ saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences }))
+vi.mock("./persist", () => ({ loadReviewItems, saveReviewItems, saveLintItems, saveChatHistory, saveChatPreferences }))
 
 import {
   setupAutoSave,
   flushAndSuspendAutoSave,
   resumeAutoSave,
   runWithSuspendedAutoSave,
+  loadSavedReviewItems,
 } from "./auto-save"
 import { useReviewStore } from "@/stores/review-store"
 import { useLintStore } from "@/stores/lint-store"
@@ -37,13 +39,24 @@ function setProjectPath(path: string | null): void {
   useWikiStore.setState({ project: path ? ({ id: "p", name: "p", path } as never) : null })
 }
 
+/** Set the project and load its saved review items, as project open does,
+ *  so the review auto-save writes for it (#62). */
+async function openProject(path: string): Promise<void> {
+  setProjectPath(path)
+  await loadSavedReviewItems(path, () => true)
+}
+
 function review(id: string): ReviewItem {
   return { id, type: "missing-page", title: id, description: "", options: [], resolved: false, createdAt: 0 }
 }
 
 let registered = false
 
-beforeEach(() => {
+beforeEach(async () => {
+  // A flush with no project open clears which project's review items have
+  // loaded, without writing.
+  setProjectPath(null)
+  await flushAndSuspendAutoSave()
   saveReviewItems.mockClear()
   saveLintItems.mockClear()
   saveChatHistory.mockClear()
@@ -62,7 +75,7 @@ beforeEach(() => {
 
 describe("auto-save project-switch guard", () => {
   it("flushes current review state to the outgoing project before suspend", async () => {
-    setProjectPath("/proj/A")
+    await openProject("/proj/A")
     useReviewStore.setState({ items: [review("a1"), review("a2")] })
 
     await flushAndSuspendAutoSave()
@@ -71,7 +84,7 @@ describe("auto-save project-switch guard", () => {
   })
 
   it("does NOT persist the empty store after suspend (the data-loss bug)", async () => {
-    setProjectPath("/proj/A")
+    await openProject("/proj/A")
     useReviewStore.setState({ items: [review("a1")] })
 
     await flushAndSuspendAutoSave()
@@ -87,10 +100,11 @@ describe("auto-save project-switch guard", () => {
     expect(saveLintItems).not.toHaveBeenCalled()
   })
 
-  it("resumes persisting after resumeAutoSave", () => {
+  it("resumes persisting after resumeAutoSave", async () => {
     setProjectPath("/proj/B")
     flushAndSuspendAutoSave()
     resumeAutoSave()
+    await openProject("/proj/B")
 
     useReviewStore.setState({ items: [review("b1")] })
     vi.runAllTimers()
@@ -99,7 +113,7 @@ describe("auto-save project-switch guard", () => {
   })
 
   it("runs the failure cleanup before resuming auto-save", async () => {
-    setProjectPath("/proj/A")
+    await openProject("/proj/A")
     useReviewStore.setState({ items: [review("a1")] })
 
     await expect(runWithSuspendedAutoSave(
@@ -133,8 +147,33 @@ describe("auto-save project-switch guard", () => {
     expect(saveChatPreferences).not.toHaveBeenCalled()
   })
 
-  it("skips chat flush while streaming", async () => {
+  it("a review load that lands after its project changed neither fills the store nor lets the review auto-save write", async () => {
     setProjectPath("/proj/A")
+    loadReviewItems.mockResolvedValueOnce([review("a1")])
+
+    expect(await loadSavedReviewItems("/proj/A", () => false)).toBe(false)
+    expect(useReviewStore.getState().items).toEqual([])
+
+    useReviewStore.setState({ items: [review("a2")] })
+    vi.runAllTimers()
+    expect(saveReviewItems).not.toHaveBeenCalled()
+  })
+
+  it("a review load keeps the items that arrived while it read, over a saved item with the same id", async () => {
+    setProjectPath("/proj/A")
+    loadReviewItems.mockResolvedValueOnce([{ ...review("n1"), resolved: true }, review("a1")])
+    useReviewStore.setState({ items: [review("n1")] })
+
+    expect(await loadSavedReviewItems("/proj/A", () => true)).toBe(true)
+
+    expect(useReviewStore.getState().items.map(({ title, resolved }) => ({ title, resolved }))).toEqual([
+      { title: "a1", resolved: false },
+      { title: "n1", resolved: false },
+    ])
+  })
+
+  it("skips chat flush while streaming", async () => {
+    await openProject("/proj/A")
     useChatStore.setState({ isStreaming: true })
 
     await flushAndSuspendAutoSave()
