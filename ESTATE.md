@@ -111,6 +111,7 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`,
   `src/lib/ingest-queue.ts`, `src/App.tsx`,
   `src/components/settings/sections/maintenance-section.tsx`,
+  `src/components/review/review-view.tsx`,
   `src/i18n/{en,it,ru,zh}.json` – a scheduled
   maintenance job per wiki project runs the duplicate scan with no click
   (pearson-tfl/llm_wiki#18, from #16). On by default, every 24 hours,
@@ -169,9 +170,16 @@ Keep this list current. Merge conflicts can only come from these files.
   or write settling later changes nothing in memory. A restore first
   stops the open project's merge and saves its queue, and `App.tsx`
   skips the restore, before it is called and again once its turn comes,
-  when another project has been opened since (#43). Upstream edits to
-  the dedup queue, the dedup merge, the ingest queue, the Maintenance
-  screen or project open in `App.tsx` need re-checking against this.
+  when another project has been opened since (#43). A queue save that
+  lands after a newer save to the same file is overwritten again with
+  the newer one, so a finished merge does not come back as pending. A
+  restore cut off at 30 seconds files a review item whose Retry, on the
+  Review screen, opens the project's merge queue again. A merge run whose
+  last save lands after a project switch leaves the "a merge is running"
+  flag and the ingest wait to the project now open (#48). Upstream edits
+  to the dedup queue, the dedup merge, the ingest queue, the Maintenance
+  screen, the Review screen or project open in `App.tsx` need re-checking
+  against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`,
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and

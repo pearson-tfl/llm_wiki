@@ -32,7 +32,7 @@ import { executeMerge } from "@/lib/dedup-runner"
 import { MergeReplyRejectedError, type DuplicateGroup } from "@/lib/dedup"
 import { withProjectLock } from "@/lib/project-mutex"
 import { isIngestActive } from "@/lib/ingest-queue"
-import { useReviewStore } from "@/stores/review-store"
+import { reviewIdFor, useReviewStore } from "@/stores/review-store"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -77,13 +77,25 @@ let settledOutcomes = new Map<string, DedupTaskOutcome>()
  *  save has landed (#39). */
 let switchStepInFlight: Promise<void> | null = null
 
-/** A pause or restore is at most one queue-file read and one write, which
- *  take milliseconds; a step still running after this has hung (#43). */
+/** A pause is one queue-file write, and a restore at most two writes and a
+ *  read, which take milliseconds; a step still running after this has hung
+ *  (#43). */
 export const SWITCH_STEP_TIMEOUT_MS = 30_000
 
 export class SwitchStepTimeoutError extends Error {
   name = "SwitchStepTimeoutError"
 }
+
+/** The review option that retries a restore cut off by its time limit. */
+export const RETRY_RESTORE_ACTION = "retry-dedup-queue-restore"
+
+/** The restore last cut off by its time limit, until a restore opens a
+ *  project's queue (#48). */
+let timedOutRestore: {
+  projectId: string
+  projectPath: string
+  stillOpening: () => boolean
+} | null = null
 
 /**
  * Run a pause or restore once the one in flight has finished. One step
@@ -168,16 +180,36 @@ function queueFilePath(projectPath: string): string {
   return `${normalizePath(projectPath)}/.llm-wiki/dedup-queue.json`
 }
 
+/** Saves are stamped in the order they are made. A write that hangs can
+ *  land after a later one, so each queue file keeps the newest save that
+ *  has landed, to put back over an older one (#48). */
+let lastSaveStamp = 0
+let newestLandedSaves = new Map<string, { stamp: number; text: string }>()
+
 async function saveQueue(
   projectPath: string,
   tasks: readonly DedupTask[] = queue,
 ): Promise<void> {
   try {
     const toSave = tasks.filter((t) => t.status !== "done")
-    await writeFile(queueFilePath(projectPath), JSON.stringify(toSave, null, 2))
+    await writeNewestSave(
+      queueFilePath(projectPath),
+      ++lastSaveStamp,
+      JSON.stringify(toSave, null, 2),
+    )
   } catch {
     // non-critical
   }
+}
+
+async function writeNewestSave(path: string, stamp: number, text: string): Promise<void> {
+  await writeFile(path, text)
+  const newest = newestLandedSaves.get(path)
+  if (newest && newest.stamp > stamp) {
+    await writeNewestSave(path, newest.stamp, newest.text)
+    return
+  }
+  newestLandedSaves.set(path, { stamp, text })
 }
 
 async function loadQueue(
@@ -356,6 +388,8 @@ export function clearQueueState(): void {
   currentProjectPath = ""
   currentAbortController = null
   switchStepInFlight = null
+  timedOutRestore = null
+  newestLandedSaves = new Map()
 }
 
 /**
@@ -409,17 +443,49 @@ function stopActiveQueue(): void {
  * longer the one being opened (#43). A project still open is paused
  * first: its merge stopped and its queue saved.
  */
-export function restoreQueue(
+export async function restoreQueue(
   projectId: string,
   projectPath: string,
   stillOpening: () => boolean = () => true,
 ): Promise<void> {
-  return oneSwitchStepAtATime(async (abandoned) => {
-    if (!stillOpening()) return
-    await pauseActiveQueue()
-    if (abandoned.aborted || !stillOpening()) return
-    await loadProjectQueue(projectId, projectPath, abandoned)
-  })
+  try {
+    await oneSwitchStepAtATime(async (abandoned) => {
+      if (!stillOpening()) return
+      await pauseActiveQueue()
+      if (abandoned.aborted || !stillOpening()) return
+      await loadProjectQueue(projectId, projectPath, abandoned)
+      if (!abandoned.aborted) timedOutRestore = null
+    })
+  } catch (err) {
+    if (err instanceof SwitchStepTimeoutError) {
+      timedOutRestore = { projectId, projectPath, stillOpening }
+      recordRestoreTimeout()
+    }
+    throw err
+  }
+}
+
+/**
+ * Run again the restore last cut off by its time limit, unless a restore
+ * has opened a project's queue since. Like any restore, it does nothing
+ * once its project is no longer the one being opened.
+ */
+export async function retryTimedOutRestore(): Promise<void> {
+  const cutOff = timedOutRestore
+  if (cutOff) await restoreQueue(cutOff.projectId, cutOff.projectPath, cutOff.stillOpening)
+}
+
+/** Tell the user, in the review queue, that the merge queue did not open. */
+function recordRestoreTimeout(): void {
+  const item = {
+    type: "confirm" as const,
+    title: "Duplicate merge queue did not open",
+    description: `Opening this project's duplicate merge queue took over ${SWITCH_STEP_TIMEOUT_MS / 1000} seconds and was stopped. Until it opens, no duplicate merge runs in this project. Retry to open it again; reopening the project also opens it.`,
+    options: [{ label: "Retry", action: RETRY_RESTORE_ACTION }],
+  }
+  // A resolved notice from an earlier time-out would hide this one.
+  useReviewStore.getState().dismissItem(reviewIdFor(item))
+  useReviewStore.getState().addItem(item)
 }
 
 async function loadProjectQueue(
@@ -582,11 +648,11 @@ async function processNext(projectId: string): Promise<void> {
       next.status = "pending"
       processing = false
       await saveQueue(pp)
-      waitForIngestIdle(projectId)
+      // A switch during the save stopped this project's ingest wait (#48).
+      if (currentProjectId === projectId) waitForIngestIdle(projectId)
       return
     }
 
-    currentAbortController = null
     restoredPausedTaskIds.delete(next.id)
     queue = queue.filter((t) => t.id !== next.id)
     notifyScheduledOutcome(next, "done")
@@ -602,7 +668,6 @@ async function processNext(projectId: string): Promise<void> {
       console.log(`[Dedup Queue] Cancelled: ${next.group.slugs.join(",")} — ${message}`)
       return
     }
-    currentAbortController = null
     next.retryCount++
     next.error = message
 
@@ -628,6 +693,10 @@ async function processNext(projectId: string): Promise<void> {
     await saveQueue(pp)
   }
 
+  // A switch during the save above aborted this run and took the queue
+  // over: the merge running now may be the next one's (#48).
+  if (signal.aborted) return
+  currentAbortController = null
   processing = false
   processNext(projectId)
 }

@@ -31,6 +31,12 @@ vi.mock("@/lib/project-identity", () => ({
   loadRegistry: vi.fn(),
 }))
 
+/** The real ingest-active check unless a test sets its replies. */
+vi.mock("@/lib/ingest-queue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/ingest-queue")>()
+  return { ...actual, isIngestActive: vi.fn(actual.isIngestActive) }
+})
+
 import {
   enqueueMerge,
   cancelTask,
@@ -44,8 +50,12 @@ import {
   waitForTask,
   SWITCH_STEP_TIMEOUT_MS,
   SwitchStepTimeoutError,
+  RETRY_RESTORE_ACTION,
+  retryTimedOutRestore,
 } from "./dedup-queue"
 import { executeMerge } from "./dedup-runner"
+import { isIngestActive } from "@/lib/ingest-queue"
+import { useReviewStore } from "@/stores/review-store"
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { __resetProjectLocksForTesting } from "./project-mutex"
@@ -54,6 +64,7 @@ import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "
 const mockExecuteMerge = vi.mocked(executeMerge)
 const mockReadFile = vi.mocked(readFile)
 const mockWriteFile = vi.mocked(writeFile)
+const mockIsIngestActive = vi.mocked(isIngestActive)
 
 const EMPTY_MERGE: MergeResult = {
   canonicalContent: "",
@@ -999,6 +1010,177 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       expect(files.get(FILE_A)).toContain('"a"')
       expect(getQueue()).toHaveLength(0)
       await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    })
+  })
+
+  describe("follow-ups from the #43 gate (#48)", () => {
+    /** How often a merge held back by ingest checks again, in the queue. */
+    const INGEST_IDLE_CHECK_MS = 5_000
+    let consoleError: ReturnType<typeof vi.spyOn>
+    const realIsIngestActive = mockIsIngestActive.getMockImplementation()!
+
+    /** Hold the `n`th queue write from now (1 is the next) until the
+     *  returned deferred resolves. */
+    function holdWrite(n: number): Deferred<void> {
+      const held = createDeferred<void>()
+      let seen = 0
+      mockWriteFile.mockImplementation(async (path: string, content: string) => {
+        if (++seen === n) await held.promise
+        files.set(path, content)
+      })
+      return held
+    }
+
+    /** A queue file holding one pending scheduled merge, which runs once
+     *  its project opens. */
+    function scheduledQueueFileWith(projectId: string, slugs: string[]): string {
+      const [task] = JSON.parse(queueFileWith(projectId, slugs))
+      return JSON.stringify([{ ...task, scheduled: true }])
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+      useReviewStore.setState({ items: [] })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      consoleError.mockRestore()
+      mockIsIngestActive.mockReset()
+      mockIsIngestActive.mockImplementation(realIsIngestActive)
+    })
+
+    it("a merge refused for ingest whose save lands after a switch leaves no ingest wait that stalls the next project's merge", async () => {
+      files.set(FILE_B, scheduledQueueFileWith(TEST_ID_B, ["c", "d"]))
+      // Ingest is idle when the merge is picked, and active once it holds
+      // the write lock.
+      mockIsIngestActive.mockReturnValueOnce(false).mockReturnValue(true)
+      // The enqueue's save, the processing state's, then the refused merge's.
+      const save = holdWrite(3)
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+
+      await pauseQueue()
+      save.resolve()
+      await flushMicrotasks(20)
+      await restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await flushMicrotasks(20)
+      mockIsIngestActive.mockReturnValue(false)
+      await vi.advanceTimersByTimeAsync(INGEST_IDLE_CHECK_MS)
+      await flushMicrotasks(20)
+
+      expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+      expect(mockExecuteMerge.mock.calls[0][1].slugs).toEqual(["c", "d"])
+    })
+
+    it("a pause's save that lands after its time limit leaves the reopened project's newer save on disk", async () => {
+      // The first run ends when the pause cancels it, freeing the write lock.
+      mockExecuteMerge.mockImplementationOnce((_pp, _group, _slug, _cfg, options) =>
+        new Promise((_, reject) => {
+          options!.signal!.addEventListener("abort", () => reject(new Error("cancelled")))
+        })
+      )
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a", { scheduled: true })
+      await flushMicrotasks(20)
+      const lateSave = holdNextWrite()
+      const paused = pauseQueue().catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await paused).toBeInstanceOf(SwitchStepTimeoutError)
+
+      // Reopened, the project runs its scheduled merge to the end.
+      mockExecuteMerge.mockResolvedValue(EMPTY_MERGE)
+      await restoreQueue(TEST_ID, TEST_PATH)
+      await flushMicrotasks(20)
+      expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+      expect(JSON.parse(files.get(FILE_A)!)).toEqual([])
+
+      lateSave.resolve()
+      await flushMicrotasks(20)
+      // The finished merge does not come back as pending.
+      expect(JSON.parse(files.get(FILE_A)!)).toEqual([])
+    })
+
+    it("a restore cut off by its time limit files a review item whose retry opens the project's merge queue", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await restoreB).toBeInstanceOf(SwitchStepTimeoutError)
+
+      const notices = useReviewStore.getState().items.filter((item) =>
+        item.options.some((option) => option.action === RETRY_RESTORE_ACTION)
+      )
+      expect(notices).toHaveLength(1)
+      expect(notices[0].resolved).toBe(false)
+
+      await retryTimedOutRestore()
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+    })
+
+    it("a retry made after the project's merge queue has opened leaves its running merge alone", async () => {
+      await pauseQueue()
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await restoreB).toBeInstanceOf(SwitchStepTimeoutError)
+      await restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await enqueueMerge(TEST_ID_B, makeGroup(["c", "d"]), "c")
+      await flushMicrotasks(20)
+      const signal = mockExecuteMerge.mock.calls[0][4]!.signal!
+
+      await retryTimedOutRestore()
+
+      expect(signal.aborted).toBe(false)
+    })
+
+    it("a merge whose last save lands after a switch leaves the next project's merge marked running", async () => {
+      files.set(FILE_B, scheduledQueueFileWith(TEST_ID_B, ["c", "d"]))
+      const merge = createDeferred<MergeResult>()
+      mockExecuteMerge.mockImplementationOnce(() => merge.promise)
+      // The enqueue's save, the processing state's, then the finished merge's.
+      const save = holdWrite(3)
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      merge.resolve(EMPTY_MERGE)
+      await flushMicrotasks(20)
+
+      await restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await flushMicrotasks(20)
+      expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+      save.resolve()
+      await flushMicrotasks(20)
+      await enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")
+      await flushMicrotasks(20)
+
+      // Project B's merge is still running, so the new one waits.
+      expect(getQueue().filter((t) => t.status === "processing")).toHaveLength(1)
+    })
+
+    it("a merge whose last save lands after its project is reopened leaves the reopened project's merge marked running", async () => {
+      const merge = createDeferred<MergeResult>()
+      mockExecuteMerge.mockImplementationOnce(() => merge.promise)
+      // The two enqueues' saves, the processing state's, then the finished
+      // merge's.
+      const save = holdWrite(4)
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      await enqueueMerge(TEST_ID, makeGroup(["g", "h"]), "g", { scheduled: true })
+      await flushMicrotasks(20)
+      merge.resolve(EMPTY_MERGE)
+      await flushMicrotasks(20)
+
+      // Reopened, the project runs its scheduled merge.
+      await restoreQueue(TEST_ID, TEST_PATH)
+      await flushMicrotasks(20)
+      expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+      save.resolve()
+      await flushMicrotasks(20)
+      await enqueueMerge(TEST_ID, makeGroup(["e", "f"]), "e")
+      await flushMicrotasks(20)
+
+      expect(getQueue().filter((t) => t.status === "processing")).toHaveLength(1)
     })
   })
 })

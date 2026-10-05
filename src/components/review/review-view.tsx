@@ -26,6 +26,7 @@ import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import { useResearchStore } from "@/stores/research-store"
 import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
+import { RETRY_RESTORE_ACTION, retryTimedOutRestore } from "@/lib/dedup-queue"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -111,6 +112,21 @@ export function ReviewView() {
         )
       } else {
         resolveItem(id, action)
+      }
+      return
+    }
+
+    // The duplicate merge queue did not open in time: open it again (#48).
+    if (action === RETRY_RESTORE_ACTION) {
+      try {
+        setReviewWorking(id, true)
+        setReviewError(id, null)
+        await retryTimedOutRestore()
+        dismissItem(id)
+      } catch (err) {
+        setReviewError(id, err)
+      } finally {
+        setReviewWorking(id, false)
       }
       return
     }
@@ -313,7 +329,7 @@ export function ReviewView() {
     } else {
       resolveItem(id, action)
     }
-  }, [appDialog, project, items, resolveItem, setReviewError, setReviewWorking, t])
+  }, [appDialog, project, items, resolveItem, dismissItem, setReviewError, setReviewWorking, t])
 
   const pending = items.filter((i) => !i.resolved)
   const resolved = items.filter((i) => i.resolved)
