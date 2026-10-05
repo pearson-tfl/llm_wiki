@@ -107,16 +107,25 @@ const OUTPUT_LIMIT_RESUME_PROMPT = "Output token limit hit."
  * `result` event's stop reason, and whether the CLI hit its output limit.
  * At the limit the CLI does not end the reply at `max_tokens`: it adds a
  * synthetic user turn and resumes, so the reply is stitched from turns.
+ * An isolated CLI has no tools, so it takes a second turn only to resume:
+ * there a synthetic user turn or `num_turns` over 1 flags the reply
+ * whatever the resume turn's wording (#37).
  */
-function readClaudeCodeStop(rawLine: string): { stopReason?: string; outputLimitHit: boolean } {
+function readClaudeCodeStop(
+  rawLine: string,
+  isolated: boolean,
+): { stopReason?: string; outputLimitHit: boolean } {
   try {
     const value = JSON.parse(rawLine.trim()) as unknown
     if (!value || typeof value !== "object") return { outputLimitHit: false }
     const event = value as Record<string, unknown>
-    if (event.type === "result" && typeof event.stop_reason === "string") {
-      return { stopReason: event.stop_reason, outputLimitHit: event.stop_reason === "max_tokens" }
+    if (event.type === "result") {
+      const stopReason = typeof event.stop_reason === "string" ? event.stop_reason : undefined
+      const resumed = isolated && typeof event.num_turns === "number" && event.num_turns > 1
+      return { stopReason, outputLimitHit: stopReason === "max_tokens" || resumed }
     }
     if (event.type === "user" && event.isSynthetic === true) {
+      if (isolated) return { outputLimitHit: true }
       const content = (event.message as Record<string, unknown> | undefined)?.content
       const text = Array.isArray(content)
         ? content.map((c) => (c as Record<string, unknown>)?.text).filter((t) => typeof t === "string").join("")
@@ -240,6 +249,7 @@ export async function streamClaudeCodeCli(
 
   const streamId = crypto.randomUUID()
   const parse = createClaudeCodeStreamParser()
+  const isolateLocalConfig = config.localCliIsolation === true
 
   let unlistenData: UnlistenFn | undefined
   let unlistenDone: UnlistenFn | undefined
@@ -302,7 +312,7 @@ export async function streamClaudeCodeCli(
     unlistenData = await listen<string>(`claude-cli:${streamId}`, (event) => {
       const eventError = extractClaudeCodeStructuredError(event.payload)
       if (eventError) structuredError = eventError
-      const stop = readClaudeCodeStop(event.payload)
+      const stop = readClaudeCodeStop(event.payload, isolateLocalConfig)
       stopReason = stop.stopReason ?? stopReason
       outputLimitHit ||= stop.outputLimitHit
       const token = parse(event.payload)
@@ -360,7 +370,7 @@ export async function streamClaudeCodeCli(
       streamId,
       model: config.model,
       messages,
-      isolateLocalConfig: config.localCliIsolation === true,
+      isolateLocalConfig,
       workingDirectory,
     }
     await invoke("claude_cli_spawn", payload)
