@@ -134,7 +134,7 @@ Keep this list current. Merge conflicts can only come from these files.
   Ingest and a duplicate merge never write at once (#24): the merge queue
   starts no merge while ingest is active – a source processing, or pending
   in a queue that is neither paused nor waiting on model settings
-  (`isIngestActive`, the only change to `ingest-queue.ts`) – and checks
+  (`isIngestActive`, the only change #24 made to `ingest-queue.ts`) – and checks
   again every 5 seconds, so it carries on with no click; a running merge
   holds the project write lock every ingest write takes, from its first
   read to its last write. A merge reply that is empty, has no readable

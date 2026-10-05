@@ -121,12 +121,12 @@ async function drainActiveQueueWrites(): Promise<void> {
   if (!request) return
   const epoch = activeQueueWriteEpoch
   activeQueueWriteRunning = true
-  const write = writeFile(request.path, request.snapshot)
-  activeQueueWrite = write.then(
-    () => {},
-    () => {},
-  )
   try {
+    const write = writeFile(request.path, request.snapshot)
+    activeQueueWrite = write.then(
+      () => {},
+      () => {},
+    )
     await write
   } catch {
     // Queue persistence is best-effort; the in-memory queue remains authoritative.
