@@ -262,7 +262,8 @@ fn build_claude_stdin(messages: &[ClaudeMessage]) -> Result<String, String> {
     // flag, because --system-prompt / --append-system-prompt availability
     // varies across claude CLI versions. Inlining works on every version.
     // Its turn tags are escaped like an earlier turn's: a system message can
-    // carry wiki or source text, as the interactive ingest chat's does (#54).
+    // carry wiki or source text, as ingest's analysis and generation prompts
+    // do (#54).
     let system_preamble: String = messages
         .iter()
         .filter(|m| m.role == "system")
