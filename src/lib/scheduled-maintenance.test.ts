@@ -812,6 +812,24 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(record?.error).toMatch(/hub-rebuild request/)
   })
 
+  it("keeps a hub that changed on disk during the model call, and records it as failed", async () => {
+    await writeRequest([HUB])
+    const ingested = `${HUB_PAGE}\nA paragraph an ingest added while the model was working.\n`
+    mockModel.mockImplementation(async () => {
+      await writeFileRaw(`${tmp.path}/${HUB}`, ingested)
+      return rewrite("More.")
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(ingested)
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: "the page changed during the rebuild" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
   it("does not start the rebuild when an ingest started during the duplicate scan", async () => {
     await writeRequest([HUB])
     mockDetect.mockImplementation(async () => {

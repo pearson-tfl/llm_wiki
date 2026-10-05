@@ -143,6 +143,9 @@ async function rebuildHub(
     // The model call took a while: re-read what gates a write.
     const after = await blocker()
     if (after) return { withheld: after }
+    // An ingest that started and finished during the model call is not
+    // seen by the gates; its write must not be lost to a stale read.
+    if ((await readFile(hubPath)) !== current) return failed("the page changed during the rebuild")
 
     const linked = linkedSlugs(proposed.body)
     const sources = summaries

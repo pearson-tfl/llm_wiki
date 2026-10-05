@@ -142,9 +142,11 @@ Keep this list current. Merge conflicts can only come from these files.
   then moved to `.llm-wiki/hub-rebuild-archive/<time>.json` with each hub's
   result. The run's line in `maintenance-runs.jsonl` lists the hubs rebuilt
   and rejected. The ingest queue and the switch are re-read before each hub
-  and before each write; if either changed, the run stops with the request
-  in place, stays due, and redoes on the next run any hub it had already
-  rebuilt. An unreadable request is left in place and the run records why.
+  and before each write; a hub whose page changed on disk during its model
+  call fails and is kept as it is. If the queue or switch changed, the run
+  stops with the request in place, stays due, and redoes on the next run
+  any hub it had already rebuilt. An unreadable request is left in place
+  and the run records why.
   Tests in `src/lib/scheduled-maintenance.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
