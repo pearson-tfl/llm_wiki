@@ -288,6 +288,8 @@ describe("autoIngest offers existing pages before generation", () => {
     ["a bold heading with a colon and bold names", "**Topics:**\n**Agent Harness Engineering**\nOpenClaw Gateway", ["Agent Harness Engineering", "OpenClaw Gateway"]],
     ["blank lines before the list and a duplicate", "## Topics\n\nAgent Harness Engineering\nagent harness engineering\nOpenClaw Gateway", ["Agent Harness Engineering", "OpenClaw Gateway"]],
     ["prose after a blank line", "## Topics\nAgent Harness Engineering\n\nThat is all.", ["Agent Harness Engineering"]],
+    ["blank lines between names and an intro line", "## Topics\nHere are the topics:\n\n- Agent Harness Engineering\n\n- OpenClaw Gateway\n", ["Agent Harness Engineering", "OpenClaw Gateway"]],
+    ["a long line after the names", `## Topics\nAgent Harness Engineering\n${"word ".repeat(30)}`, ["Agent Harness Engineering"]],
     ["a heading after the list", "## Topics\nAgent Harness Engineering\n## Notes\nNot a topic", ["Agent Harness Engineering"]],
     ["the last of two topics sections", "## Topics\nOld Topic\n\n## Topics\nOpenClaw Gateway", ["OpenClaw Gateway"]],
     ["more than twenty topics", `## Topics\n${Array.from({ length: 25 }, (_, i) => `Topic ${i}`).join("\n")}`, Array.from({ length: 20 }, (_, i) => `Topic ${i}`)],

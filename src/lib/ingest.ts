@@ -70,6 +70,8 @@ const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"
 const CANDIDATE_MAX_PAGES = 12
 const CANDIDATE_MAX_TOPICS = 20
 const CANDIDATE_HITS_PER_TOPIC = 3
+// A topics-section line longer than this is prose, not a name.
+const CANDIDATE_TOPIC_MAX_CHARS = 120
 const CANDIDATE_BLOCK_PAGE_BUDGET_SHARE = 0.3
 // Below this much room a further page is not worth offering.
 const CANDIDATE_MIN_PAGE_CHARS = 1_000
@@ -2826,8 +2828,9 @@ function candidateBlockCap(maxContextSize: number | undefined): number {
 
 /**
  * The analysis's last `Topics` section: one name per line, ended by a heading
- * or by a blank line after the first name. Tolerates a bold heading, list
- * markers and bold names, which models add despite the instruction.
+ * or by a prose line (a sentence, or longer than any name). Tolerates a bold
+ * heading, list markers, bold names, blank lines and an intro line ending in
+ * a colon, which models add despite the instruction.
  */
 function parseAnalysisTopics(analysis: string): string[] {
   const lines = analysis.split("\n")
@@ -2839,11 +2842,8 @@ function parseAnalysisTopics(analysis: string): string[] {
   const topics = new Map<string, string>()
   for (const line of lines.slice(start + 1)) {
     const trimmed = line.trim()
-    if (!trimmed) {
-      if (topics.size > 0) break
-      continue
-    }
-    if (/^#{1,6}\s/.test(trimmed)) break
+    if (!trimmed || trimmed.endsWith(":")) continue
+    if (/^#{1,6}\s/.test(trimmed) || /[.!?]$/.test(trimmed) || trimmed.length > CANDIDATE_TOPIC_MAX_CHARS) break
     const topic = trimmed
       .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
       .replace(/^\*\*(.+)\*\*$/, "$1")

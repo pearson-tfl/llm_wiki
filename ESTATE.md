@@ -81,8 +81,8 @@ Keep this list current. Merge conflicts can only come from these files.
   the research panel, a path link is stopped with no notice. Tests in
   `src/lib/relative-links.test.ts`.
 - `src/lib/ingest.ts` – ingest grows existing pages (pearson-tfl/llm_wiki#17,
-  fix 1 of #16). The analysis, and each long-source digest, ends with a
-  topics list. Before generation, ingest searches the wiki by meaning once
+  fix 1 of #16). The analysis ends with a topics list, and each
+  long-source digest begins with one, so trimming a long digest keeps it. Before generation, ingest searches the wiki by meaning once
   per topic and adds any page whose file name matches a topic's title. It
   gives generation up to 12 of those pages, with their exact paths and
   text, inside a block capped at a share of the context page budget. The
@@ -91,7 +91,7 @@ Keep this list current. Merge conflicts can only come from these files.
   update a listed page by its exact path. The index is labelled a partial,
   read-only list of recent pages and the overview read-only. Each ingest's
   `wiki/log.md` entry ends with pages offered, updated and created, and why
-  the search was skipped when it was. `ingest.ts` is a large upstream file
+  the embedding search or the exact-path check was skipped when one was. `ingest.ts` is a large upstream file
   that changes in most releases: re-check these changes at the next
   upstream merge. Tests in `src/lib/ingest-candidates.test.ts` and
   `src/lib/ingest.prompt.test.ts`. `src/lib/ingest-source-path-collision.test.ts`

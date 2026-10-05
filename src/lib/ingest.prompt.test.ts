@@ -335,7 +335,7 @@ describe("existing-page prompts", () => {
     expect(prompt).toContain("one name per line, with no bullets, numbering or other text")
   })
 
-  it("asks each long-source digest to end with a topics list", () => {
+  it("asks each long-source digest to begin with a topics list", () => {
     const prompt = buildChunkAnalysisSystemPrompt("", "", "", "")
     expect(prompt).toContain("Begin the digest with a `### Topics` list, followed by a blank line")
     expect(prompt).toContain("one name per line")
