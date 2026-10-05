@@ -69,6 +69,7 @@ import {
   pauseProcessing,
   resumeProcessing,
   isQueuePaused,
+  isIngestActive,
   setIngestWorkerLimit,
   getIngestWorkerLimit,
 } from "./ingest-queue"
@@ -1363,6 +1364,52 @@ describe("ingest-queue — pause/resume processing", () => {
 })
 
 // ── cleanupWrittenFiles — centralized page cascade ─────────────────
+// Estate fork (#24): the duplicate-merge queue starts no merge while this
+// holds, so a queue that will start nothing must not hold merges back.
+describe("ingest-queue — isIngestActive", () => {
+  it("holds while a run is in flight and clears when it finishes", async () => {
+    expect(isIngestActive()).toBe(false)
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "a.md")
+    await flushMicrotasks(10)
+    expect(getQueue()[0].status).toBe("processing")
+    expect(isIngestActive()).toBe(true)
+
+    run.resolve(["wiki/sources/a.md"])
+    await waitFor(() => getQueue().length === 0)
+    expect(isIngestActive()).toBe(false)
+  })
+
+  it("does not hold for a task pending in a paused queue, and holds once resumed", async () => {
+    mockAutoIngest.mockImplementation(() => new Promise(() => {}))
+    pauseProcessing()
+    await enqueueIngest(TEST_ID, "a.md")
+    expect(getQueue()[0].status).toBe("pending")
+    expect(isIngestActive()).toBe(false)
+
+    resumeProcessing()
+    expect(isIngestActive()).toBe(true)
+  })
+
+  it("does not hold for a task pending on missing model settings", async () => {
+    useWikiStore.getState().setLlmConfig({
+      provider: "openai",
+      apiKey: "",
+      model: "",
+      ollamaUrl: "",
+      customEndpoint: "",
+      maxContextSize: 128000,
+    })
+    await enqueueIngest(TEST_ID, "a.md")
+    await flushMicrotasks(10)
+    expect(getQueue()[0].status).toBe("pending")
+    expect(getQueueSummary().blockedOnLlmConfig).toBe(true)
+    expect(isIngestActive()).toBe(false)
+  })
+})
+
 describe("cleanupWrittenFiles — page cascade", () => {
   it("deletes each file AND drops its embedding chunks (relative paths)", async () => {
     const { deleteFile } = await import("@/commands/fs")

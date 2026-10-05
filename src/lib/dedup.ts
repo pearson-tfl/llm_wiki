@@ -18,7 +18,8 @@
  *      thing. Returns parsed JSON groups with reason + confidence.
  *      The LLM call is injected so unit tests don't hit a model.
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
- *      canonical slug, merge bodies (LLM call), union frontmatter
+ *      canonical slug, merge bodies (LLM call, its reply checked as
+ *      the page merge checks one), union frontmatter
  *      array fields (deterministic), rewrite every wikilink /
  *      `related:` reference / index.md entry across the wiki, and
  *      package up a result the caller writes to disk + backs up.
@@ -346,7 +347,8 @@ const FIELDS_TO_UNION = ["sources", "tags", "related"] as const
 
 /**
  * Compute everything needed to merge a confirmed duplicate group:
- *   - LLM call to produce the merged canonical body
+ *   - LLM call to produce the merged canonical body, rejected with
+ *     MergeReplyRejectedError when it fails the page merge's guard
  *   - Deterministic frontmatter union (sources, tags, related)
  *   - Canonical slug enforcement on title path
  *   - Cross-reference rewrites across every other wiki page

@@ -283,4 +283,22 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     expect(items[0].title).toContain("attention, transformer-attention")
     expect(items[0].description).toContain(task.error)
   })
+
+  it("files no rejection for a merge cancelled while the model replied", async () => {
+    const mergeReply = createDeferred<string>()
+    model.mergeReply = held(mergeReply)
+    const before = await read("wiki/concepts/attention.md")
+
+    const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
+    await waitFor(() => model.mergeCalls === 1)
+    await dedupQueue.cancelTask(taskId)
+    // A cancelled request ends with whatever text had arrived.
+    mergeReply.resolve("---\ntype: concept\n")
+    await flushIO(20)
+
+    expect(dedupQueue.getQueue()).toEqual([])
+    expect(useReviewStore.getState().items).toEqual([])
+    expect(await read("wiki/concepts/attention.md")).toBe(before)
+    expect(await fileExists(`${tmp.path}/wiki/concepts/transformer-attention.md`)).toBe(true)
+  })
 })

@@ -14,7 +14,12 @@
  * Mirrors `ingest-queue.ts` almost line-for-line: same lifecycle
  * (pause / restore on project switch), same persistence file shape,
  * same retry-up-to-3 policy, same registry-based path resolution so
- * a relocated project still finds its tasks.
+ * a relocated project still finds its tasks. A merge reply that fails
+ * its check is not retried.
+ *
+ * Merges and ingest never write at once (#24): no merge starts while
+ * ingest is active, and a running merge holds the project write lock
+ * that every ingest write takes.
  */
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -503,7 +508,8 @@ async function processNext(projectId: string): Promise<void> {
       // Final: an automatic retry would re-spend the model on the same
       // group with no one watching. A retry by hand starts it again.
       next.status = "failed"
-      recordRejection(next, message)
+      // A cancelled task has left the queue: its cut-off reply is no news.
+      if (queue.includes(next)) recordRejection(next, message)
       notifyScheduledOutcome(next, "rejected")
       console.log(`[Dedup Queue] Rejected: ${next.group.slugs.join(",")} — ${message}`)
     } else if (next.retryCount >= MAX_RETRIES) {
