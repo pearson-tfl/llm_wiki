@@ -79,13 +79,14 @@ let switchStepInFlight: Promise<void> | null = null
 
 /** Run a pause or restore once the one in flight has finished, in call order. */
 async function oneSwitchStepAtATime(step: () => Promise<void>): Promise<void> {
-  while (switchStepInFlight) await switchStepInFlight
+  // A step that failed is its own caller's error, not the next step's.
+  while (switchStepInFlight) await switchStepInFlight.catch(() => {})
   const run = step()
   switchStepInFlight = run
   try {
     await run
   } finally {
-    switchStepInFlight = null
+    if (switchStepInFlight === run) switchStepInFlight = null
   }
 }
 

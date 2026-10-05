@@ -795,6 +795,30 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
     expect(getQueue()).toHaveLength(0)
     expect(files.get(FILE_B)).toContain('"c"')
   })
+
+  it("a restore that throws still lets the switch queued behind it run", async () => {
+    await pauseQueue()
+    files.set(FILE_B, queueFileWith("another-project", ["c", "d"]))
+    const read = createDeferred<void>()
+    mockReadFile.mockImplementationOnce(async (path: string) => {
+      await read.promise
+      return files.get(path)!
+    })
+    // The restore warns that it dropped the other project's task.
+    const warn = vi.spyOn(console, "warn").mockImplementationOnce(() => {
+      throw new Error("boom")
+    })
+
+    const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+    const paused = pauseQueue()
+    read.resolve()
+
+    await expect(restoreB).rejects.toThrow("boom")
+    await expect(paused).resolves.toBeUndefined()
+    // The pause ran: project B is no longer active.
+    await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    warn.mockRestore()
+  })
 })
 
 describe("dedup-queue — outcomes a scheduled run waits for", () => {
