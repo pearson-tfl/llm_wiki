@@ -42,15 +42,12 @@ import {
   getQueue,
   restoreQueue,
 } from "@/lib/dedup-queue"
-import { addNotDuplicate } from "@/lib/dedup-storage"
+import { addNotDuplicate, loadPendingDuplicateGroups } from "@/lib/dedup-storage"
 import {
   loadScheduledMaintenanceConfig,
   saveScheduledMaintenanceConfig,
 } from "@/lib/project-store"
-import {
-  loadPendingDuplicateGroups,
-  runMaintenanceTick,
-} from "./scheduled-maintenance"
+import { runMaintenanceTick } from "./scheduled-maintenance"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import type { DuplicateGroup } from "./dedup"
@@ -258,5 +255,41 @@ describe("scheduled maintenance tick – duplicate scan", () => {
     expect(await realFs.fileExists(`${tmp.path}/wiki/concepts/agent-loops.md`)).toBe(true)
     // Only the failed merge is left on the queue.
     expect(getQueue().map((t) => [t.canonicalSlug, t.status])).toEqual([["seat-one", "failed"]])
+  })
+})
+
+describe("scheduled maintenance tick – groups it does not merge", () => {
+  it("saves medium- and low-confidence groups for the Maintenance screen and merges none of them", async () => {
+    await setConfig(null)
+    const medium = group(["pstack", "p-stack"], "medium")
+    const low = group(["seat", "lane"], "low")
+    mockDetect.mockResolvedValue([medium, low])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(getQueue()).toHaveLength(0)
+    expect(record).toMatchObject({
+      groupsFound: { high: 0, medium: 1, low: 1 },
+      mergesEnqueued: 0,
+    })
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([medium, low])
+  })
+
+  it("never enqueues a high-confidence group holding a pair marked not duplicates", async () => {
+    await setConfig(null)
+    await addNotDuplicate(tmp.path, ["harness", "harnesses"])
+    // The detector drops an exact match itself; a larger group that still
+    // holds the pair is the tick's to refuse.
+    const holdsPair = group(["harness", "harnesses", "agent-harness"], "high")
+    mockDetect.mockResolvedValue([holdsPair])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(getQueue()).toHaveLength(0)
+    expect(record?.mergesEnqueued).toBe(0)
+    // Kept for a decision by hand instead.
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([holdsPair])
   })
 })

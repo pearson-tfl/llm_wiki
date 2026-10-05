@@ -13,8 +13,12 @@
  */
 import { readFile, writeFile, fileExists } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
+import type { DuplicateGroup } from "@/lib/dedup"
 
 const FILE_NAME = ".llm-wiki/dedup-not-duplicates.json"
+/** Groups the scheduled scan found but did not merge, kept for the
+ *  Maintenance screen's manual actions. */
+const PENDING_GROUPS_FILE = ".llm-wiki/dedup-pending-groups.json"
 
 export async function loadNotDuplicates(projectPath: string): Promise<string[][]> {
   const pp = normalizePath(projectPath)
@@ -61,6 +65,42 @@ export async function addNotDuplicate(
   }
   list.push([...slugs].sort())
   await saveNotDuplicates(projectPath, list)
+}
+
+/** True when every slug of some not-duplicates entry is in `slugs`. */
+export function holdsNotDuplicate(slugs: string[], notDuplicates: string[][]): boolean {
+  const inGroup = new Set(slugs.map((s) => s.toLowerCase()))
+  return notDuplicates.some((entry) => entry.every((s) => inGroup.has(s.toLowerCase())))
+}
+
+export async function loadPendingDuplicateGroups(projectPath: string): Promise<DuplicateGroup[]> {
+  try {
+    const parsed = JSON.parse(await readFile(`${normalizePath(projectPath)}/${PENDING_GROUPS_FILE}`))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+export async function savePendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  await writeFile(
+    `${normalizePath(projectPath)}/${PENDING_GROUPS_FILE}`,
+    JSON.stringify(groups, null, 2),
+  )
+}
+
+/** Drop a group once the Maintenance screen has acted on it. */
+export async function removePendingDuplicateGroup(
+  projectPath: string,
+  slugs: string[],
+): Promise<void> {
+  const groups = await loadPendingDuplicateGroups(projectPath)
+  const key = canonicalKey(slugs)
+  const kept = groups.filter((g) => canonicalKey(g.slugs) !== key)
+  if (kept.length !== groups.length) await savePendingDuplicateGroups(projectPath, kept)
 }
 
 function canonicalKey(slugs: string[]): string {

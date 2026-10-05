@@ -15,6 +15,11 @@ import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
 import { enqueueMerge, waitForTask } from "@/lib/dedup-queue"
+import {
+  holdsNotDuplicate,
+  loadNotDuplicates,
+  savePendingDuplicateGroups,
+} from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { parseSources } from "@/lib/sources-merge"
 import type { DuplicateGroup } from "@/lib/dedup"
@@ -78,10 +83,16 @@ export async function runMaintenanceTick(
   tickRunning = true
   try {
     const groups = await runDuplicateDetection(pp, llmConfig)
-    const high = groups.filter((g) => g.confidence === "high")
+    const notDuplicates = await loadNotDuplicates(pp)
+    // Only high-confidence groups merge with no click. A group holding a
+    // pair marked "not duplicates" is left for a decision by hand.
+    const toMerge = groups.filter(
+      (g) => g.confidence === "high" && !holdsNotDuplicate(g.slugs, notDuplicates),
+    )
+    await savePendingDuplicateGroups(pp, groups.filter((g) => !toMerge.includes(g)))
 
     const outcomes: Promise<string>[] = []
-    for (const group of high) {
+    for (const group of toMerge) {
       const canonical = await chooseCanonicalSlug(pp, group)
       const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
       outcomes.push(waitForTask(taskId))
@@ -95,7 +106,7 @@ export async function runMaintenanceTick(
       finishedAt: new Date(clock.now()).toISOString(),
       skipReason: null,
       groupsFound: {
-        high: high.length,
+        high: groups.filter((g) => g.confidence === "high").length,
         medium: groups.filter((g) => g.confidence === "medium").length,
         low: groups.filter((g) => g.confidence === "low").length,
       },
