@@ -96,11 +96,11 @@ Keep this list current. Merge conflicts can only come from these files.
   holding a pair marked "not duplicates" is never merged, and a
   not-duplicates list that cannot be read merges nothing. Before each
   merge the run re-reads the ingest queue and the switch, and stops
-  merging if either changed during the scan. The queue runs
-  those merges with no resume click, after a restart too; hand-queued
-  merges restored from disk still wait for it. Other groups are saved to
-  `.llm-wiki/dedup-pending-groups.json`, which the Maintenance screen shows
-  on open. After merges the review sweep closes stale duplicate items.
+  merging if either changed during the scan; that run stays due. The
+  queue runs those merges with no resume click, after a restart too;
+  hand-queued merges restored from disk still wait for it. Every group not
+  queued for a merge is saved to `.llm-wiki/dedup-pending-groups.json`,
+  which the Maintenance screen shows on open. After merges the review sweep closes stale duplicate items.
   Each run appends a line to `.llm-wiki/maintenance-runs.jsonl`. Upstream
   edits to the dedup queue, the Maintenance screen or project open in
   `App.tsx` need re-checking against this. Tests in

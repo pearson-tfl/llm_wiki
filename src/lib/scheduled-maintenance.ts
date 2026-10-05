@@ -97,52 +97,66 @@ export async function runMaintenanceTick(
     finishedAt: "",
     skipReason: null,
   }
+  let groups: DuplicateGroup[] = []
+  const enqueued: DuplicateGroup[] = []
+  const outcomes: Promise<DedupTaskOutcome>[] = []
   try {
-    const groups = await runDuplicateDetection(pp, llmConfig)
-    record.groupsFound = {
-      high: groups.filter((g) => g.confidence === "high").length,
-      medium: groups.filter((g) => g.confidence === "medium").length,
-      low: groups.filter((g) => g.confidence === "low").length,
-    }
-    const notDuplicates = await readNotDuplicates(pp)
-    // Only high-confidence groups merge with no click. A group holding a
-    // pair marked "not duplicates" is left for a decision by hand.
-    const toMerge = groups.filter(
-      (g) => g.confidence === "high" && !holdsNotDuplicate(g.slugs, notDuplicates),
-    )
-    await savePendingDuplicateGroups(pp, groups.filter((g) => !toMerge.includes(g)))
-
-    const outcomes: Promise<DedupTaskOutcome>[] = []
-    for (const group of toMerge) {
-      // The scan took a while: re-read what gates a merge before each one.
-      const withheld = await mergeBlocker(pp)
-      if (withheld) {
-        record.skipReason = withheld
-        break
+    try {
+      groups = await runDuplicateDetection(pp, llmConfig)
+      record.groupsFound = {
+        high: groups.filter((g) => g.confidence === "high").length,
+        medium: groups.filter((g) => g.confidence === "medium").length,
+        low: groups.filter((g) => g.confidence === "low").length,
       }
-      const canonical = await chooseCanonicalSlug(pp, group)
-      const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
-      outcomes.push(waitForTask(taskId))
+      const notDuplicates = await readNotDuplicates(pp)
+      // Only high-confidence groups merge with no click. A group holding a
+      // pair marked "not duplicates" is left for a decision by hand.
+      const toMerge = groups.filter(
+        (g) => g.confidence === "high" && !holdsNotDuplicate(g.slugs, notDuplicates),
+      )
+      for (const group of toMerge) {
+        // The scan took a while: re-read what gates a merge before each one.
+        const withheld = await mergeBlocker(pp)
+        if (withheld) {
+          record.skipReason = withheld
+          break
+        }
+        const canonical = await chooseCanonicalSlug(pp, group)
+        const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
+        enqueued.push(group)
+        outcomes.push(waitForTask(taskId))
+      }
+    } catch (err) {
+      record.error = err instanceof Error ? err.message : String(err)
     }
-    record.mergesEnqueued = outcomes.length
-    const settled = await Promise.all(outcomes)
-    record.mergesDone = settled.filter((o) => o === "done").length
-    record.mergesFailed = settled.filter((o) => o === "failed").length
-    // Close review items whose pages the merges removed.
-    if (record.mergesDone > 0) await sweepResolvedReviews(pp)
+
+    if (record.groupsFound) {
+      // Every group not queued for a merge, withheld ones included, is kept
+      // for the Maintenance screen.
+      await savePendingDuplicateGroups(pp, groups.filter((g) => !enqueued.includes(g)))
+      record.mergesEnqueued = outcomes.length
+      const settled = await Promise.all(outcomes)
+      record.mergesDone = settled.filter((o) => o === "done").length
+      record.mergesFailed = settled.filter((o) => o === "failed").length
+      // Close review items whose pages the merges removed.
+      if (record.mergesDone > 0) await sweepResolvedReviews(pp)
+    }
 
     // Later steps run here, after the duplicate scan.
   } catch (err) {
-    record.error = err instanceof Error ? err.message : String(err)
+    record.error ??= err instanceof Error ? err.message : String(err)
   } finally {
     tickRunning = false
   }
 
-  // A run that failed still counts as a run, so a broken model does not
-  // re-spend the scan at every check. Re-read the setting: it may have
-  // been edited while the run was going.
-  const current = await loadScheduledMaintenanceConfig(pp)
-  await saveScheduledMaintenanceConfig(pp, { ...current, lastRun: startedAt })
+  // A run whose merges were withheld stays due, like a skip. A run that
+  // failed still counts as a run, so a broken model does not re-spend the
+  // scan at every check. Re-read the setting: it may have been edited
+  // while the run was going.
+  if (record.skipReason === null) {
+    const current = await loadScheduledMaintenanceConfig(pp)
+    await saveScheduledMaintenanceConfig(pp, { ...current, lastRun: startedAt })
+  }
   record.finishedAt = new Date(clock.now()).toISOString()
   return appendRunRecord(pp, record)
 }

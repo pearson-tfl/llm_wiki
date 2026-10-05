@@ -10,7 +10,7 @@ import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-hel
 import { createDeferred, waitFor } from "@/test-helpers/deferred"
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
-const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0 }))
+const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0, busyFromRead: Infinity, reads: 0 }))
 
 vi.mock("@/commands/fs", () => realFs)
 
@@ -33,7 +33,11 @@ vi.mock("@/lib/dedup-runner", () => ({
 }))
 
 vi.mock("@/lib/ingest-queue", () => ({
-  getQueueSummary: () => ({ ...ingestSummary }),
+  getQueueSummary: () => {
+    ingestSummary.reads += 1
+    const busy = ingestSummary.reads >= ingestSummary.busyFromRead ? 1 : 0
+    return { pending: ingestSummary.pending + busy, processing: ingestSummary.processing }
+  },
 }))
 
 import { executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
@@ -113,6 +117,8 @@ beforeEach(async () => {
   })
   ingestSummary.pending = 0
   ingestSummary.processing = 0
+  ingestSummary.busyFromRead = Infinity
+  ingestSummary.reads = 0
   mockDetect.mockReset()
   mockMerge.mockReset()
   mockDetect.mockResolvedValue([])
@@ -489,6 +495,33 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     expect(mockMerge).not.toHaveBeenCalled()
     expect(getQueue()).toHaveLength(0)
     expect(record).toMatchObject({ skipReason: "ingest-busy", mergesEnqueued: 0 })
+    // Withheld merges are not a run: the job stays due and scans again,
+    // and the withheld group is kept for the Maintenance screen meanwhile.
+    expect((await loadScheduledMaintenanceConfig(tmp.path)).lastRun).toBeNull()
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([group(["agent-loop", "agent-loops"], "high")])
+  })
+
+  it("stops between groups when an ingest starts, and still reports the merge already queued", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook-a.md`, page("Hook", "2026-09-01", ["c.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook-b.md`, page("Hooks", "2026-10-01", ["d.md"]))
+    // Reads: 1 at the start, 2 before the first merge, 3 before the second.
+    ingestSummary.busyFromRead = 3
+    mockDetect.mockResolvedValue([
+      group(["agent-loop", "agent-loops"], "high"),
+      group(["hook-a", "hook-b"], "high"),
+    ])
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["agent-loops"])
+    expect(record).toMatchObject({
+      skipReason: "ingest-busy",
+      mergesEnqueued: 1,
+      mergesDone: 1,
+      mergesFailed: 0,
+    })
   })
 
   it("withholds merges when the job is switched off while the scan runs", async () => {
@@ -514,5 +547,7 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     expect(mockMerge).not.toHaveBeenCalled()
     expect(getQueue()).toHaveLength(0)
     expect(record?.error).toMatch(/not-duplicates/)
+    // Every group found is kept for a decision by hand.
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([group(["agent-loop", "agent-loops"], "high")])
   })
 })
