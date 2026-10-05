@@ -158,7 +158,11 @@ Keep this list current. Merge conflicts can only come from these files.
   looked its project up in the registry, it is still queued and pending
   and no other merge has started; a project switch stops the old
   project's queue before saving it, so no merge starts on the old
-  project during the switch (#35). Upstream edits to the dedup queue,
+  project during the switch (#35). Project switches can overlap, so the
+  dedup queue runs its pauses and restores one at a time, in the order
+  they were called: a restore reads a project's queue file only once the
+  save before it has landed, and a pause's clean-up never empties the
+  next project's queue (#39). Upstream edits to the dedup queue,
   the dedup merge, the ingest queue, the Maintenance screen or project
   open in `App.tsx` need re-checking against this. Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,

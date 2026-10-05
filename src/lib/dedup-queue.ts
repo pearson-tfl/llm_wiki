@@ -71,6 +71,24 @@ let ingestWaitTimer: ReturnType<typeof setTimeout> | null = null
  *  tasks that settled before anyone awaited them. */
 let outcomeWaiters = new Map<string, (outcome: DedupTaskOutcome) => void>()
 let settledOutcomes = new Map<string, DedupTaskOutcome>()
+/** The pause or restore now running. Project switches can overlap, so
+ *  each waits for the one before to finish: a pause's clean-up never lands
+ *  on the next project's queue, and a restore reads a file only once its
+ *  save has landed (#39). */
+let switchStepInFlight: Promise<void> | null = null
+
+/** Run a pause or restore once the one in flight has finished, in call order. */
+async function oneSwitchStepAtATime(step: () => Promise<void>): Promise<void> {
+  // A step that failed is its own caller's error, not the next step's.
+  while (switchStepInFlight) await switchStepInFlight.catch(() => {})
+  const run = step()
+  switchStepInFlight = run
+  try {
+    await run
+  } finally {
+    if (switchStepInFlight === run) switchStepInFlight = null
+  }
+}
 
 function notifyScheduledOutcome(task: DedupTask, outcome: DedupTaskOutcome): void {
   if (!task.scheduled) return
@@ -297,14 +315,20 @@ export function clearQueueState(): void {
   currentProjectId = ""
   currentProjectPath = ""
   currentAbortController = null
+  switchStepInFlight = null
 }
 
 /**
  * Project-switch handshake: stop the active project's queue, flush it to
  * disk (reverting any in-flight task to pending so it gets re-tried on
- * resume), then clear in-memory state.
+ * resume), then clear in-memory state. Waits for a pause or restore
+ * already in flight.
  */
-export async function pauseQueue(): Promise<void> {
+export function pauseQueue(): Promise<void> {
+  return oneSwitchStepAtATime(pauseActiveQueue)
+}
+
+async function pauseActiveQueue(): Promise<void> {
   if (!currentProjectId || !currentProjectPath) return
 
   const pausedProjectPath = currentProjectPath
@@ -336,9 +360,17 @@ export async function pauseQueue(): Promise<void> {
  * Load a project's queue from disk. Restored pending tasks are visible
  * but do not auto-run, except scheduled ones, which run at once; a fresh
  * enqueue for the same group promotes the existing task, and retryTask
- * can also resume one explicitly.
+ * can also resume one explicitly. Waits for a pause or restore already in
+ * flight.
  */
-export async function restoreQueue(
+export function restoreQueue(
+  projectId: string,
+  projectPath: string,
+): Promise<void> {
+  return oneSwitchStepAtATime(() => loadProjectQueue(projectId, projectPath))
+}
+
+async function loadProjectQueue(
   projectId: string,
   projectPath: string,
 ): Promise<void> {
