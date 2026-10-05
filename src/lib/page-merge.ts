@@ -50,8 +50,9 @@ const LOCKED_FIELDS = ["type", "title", "created"] as const
  * the merge — the LLM almost certainly stripped content rather than
  * legitimately deduplicating. 0.7 allows for ~30% legitimate dedup
  * compression while catching obvious truncation / lazy summaries.
+ * The duplicate merge (dedup.ts) checks its reply against the same ratio.
  */
-const BODY_SHRINK_THRESHOLD = 0.7
+export const BODY_SHRINK_THRESHOLD = 0.7
 const HTTP_URL_RE = /https?:\/\/[^\s<>"'\])]+/gi
 
 export interface MergeFn {

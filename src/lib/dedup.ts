@@ -34,6 +34,7 @@ import {
   mergeArrayFieldsIntoContent,
   writeFrontmatterArray,
 } from "./sources-merge"
+import { BODY_SHRINK_THRESHOLD } from "./page-merge"
 
 // ──────────────────────────────────────────────────────────────────
 // Types
@@ -97,6 +98,17 @@ export interface MergeResult {
  * Generic two-prompt LLM call. Both detector and merger use it.
  * Production wraps `streamChat`; tests use mocks.
  */
+/**
+ * The model's merge reply failed the check run before anything is
+ * written: every page stays as it was and nothing is deleted.
+ */
+export class MergeReplyRejectedError extends Error {
+  constructor(reason: string) {
+    super(`Merge reply rejected: ${reason}`)
+    this.name = "MergeReplyRejectedError"
+  }
+}
+
 export type DedupLlmCall = (
   systemPrompt: string,
   userMessage: string,
@@ -363,6 +375,8 @@ export async function mergeDuplicateGroup(
   // 1. LLM body merge
   const userMessage = buildMergerUserMessage(req.group)
   const llmOutput = await llmCall(MERGER_SYSTEM_PROMPT, userMessage, options.signal)
+  const rejection = mergeReplyRejection(llmOutput, req.group)
+  if (rejection) throw new MergeReplyRejectedError(rejection)
 
   // 2. Frontmatter union (deterministic post-processing of LLM output).
   //    For each unioned field, fold every input page's values into
@@ -417,6 +431,29 @@ export async function mergeDuplicateGroup(
     pagesToDelete,
     backup,
   }
+}
+
+/**
+ * The page merge's guard (page-merge.ts), applied to a duplicate merge:
+ * the reply must carry readable frontmatter, and its body must keep at
+ * least BODY_SHRINK_THRESHOLD of the longest input page's body. Returns
+ * why the reply fails, or null when it passes.
+ */
+function mergeReplyRejection(
+  reply: string,
+  group: { slug: string; content: string }[],
+): string | null {
+  if (reply.trim() === "") return "the model's reply was empty"
+  const parsed = parseFrontmatter(reply)
+  if (parsed.frontmatter === null) {
+    return "the model's reply has no readable frontmatter"
+  }
+  const longest = Math.max(...group.map((p) => parseFrontmatter(p.content).body.length))
+  const minimum = Math.ceil(longest * BODY_SHRINK_THRESHOLD)
+  if (parsed.body.length < minimum) {
+    return `the model's reply body is ${parsed.body.length} characters, shorter than ${minimum} (${BODY_SHRINK_THRESHOLD * 100}% of the longest page's ${longest})`
+  }
+  return null
 }
 
 function buildMergerUserMessage(
