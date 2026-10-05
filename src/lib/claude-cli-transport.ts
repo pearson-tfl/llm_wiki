@@ -99,6 +99,36 @@ export function createClaudeCodeStreamParser() {
   }
 }
 
+/** How the CLI 2.1.289 opens the user turn it adds when a reply hits its output limit. */
+const OUTPUT_LIMIT_RESUME_PROMPT = "Output token limit hit."
+
+/**
+ * What one stream-json line says about how the reply ended (#32): the
+ * `result` event's stop reason, and whether the CLI hit its output limit.
+ * At the limit the CLI does not end the reply at `max_tokens`: it adds a
+ * synthetic user turn and resumes, so the reply is stitched from turns.
+ */
+function readClaudeCodeStop(rawLine: string): { stopReason?: string; outputLimitHit: boolean } {
+  try {
+    const value = JSON.parse(rawLine.trim()) as unknown
+    if (!value || typeof value !== "object") return { outputLimitHit: false }
+    const event = value as Record<string, unknown>
+    if (event.type === "result" && typeof event.stop_reason === "string") {
+      return { stopReason: event.stop_reason, outputLimitHit: event.stop_reason === "max_tokens" }
+    }
+    if (event.type === "user" && event.isSynthetic === true) {
+      const content = (event.message as Record<string, unknown> | undefined)?.content
+      const text = Array.isArray(content)
+        ? content.map((c) => (c as Record<string, unknown>)?.text).filter((t) => typeof t === "string").join("")
+        : ""
+      return { outputLimitHit: text.startsWith(OUTPUT_LIMIT_RESUME_PROMPT) }
+    }
+  } catch {
+    // Not JSON: says nothing about the stop.
+  }
+  return { outputLimitHit: false }
+}
+
 export function extractClaudeCodeStructuredError(rawLine: string): string | null {
   const line = rawLine.trim()
   if (!line) return null
@@ -219,6 +249,8 @@ export async function streamClaudeCodeCli(
   // silent-exit case where the CLI exits 0 but emits no content.
   let emittedToken = false
   let structuredError = ""
+  let stopReason: string | undefined
+  let outputLimitHit = false
   // Completion promise: resolves when finishWith() fires so the caller
   // awaits the full round-trip rather than returning after spawn.
   let resolveCompletion: () => void = () => {}
@@ -270,6 +302,9 @@ export async function streamClaudeCodeCli(
     unlistenData = await listen<string>(`claude-cli:${streamId}`, (event) => {
       const eventError = extractClaudeCodeStructuredError(event.payload)
       if (eventError) structuredError = eventError
+      const stop = readClaudeCodeStop(event.payload)
+      stopReason = stop.stopReason ?? stopReason
+      outputLimitHit ||= stop.outputLimitHit
       const token = parse(event.payload)
       if (token !== null) {
         emittedToken = true
@@ -310,7 +345,9 @@ export async function streamClaudeCodeCli(
             )),
           )
         } else {
-          finishWith(onDone)
+          // A reply resumed past the output limit is flagged cut off even
+          // when it completed: the seam between its turns is unchecked.
+          finishWith(() => onDone({ finishReason: stopReason, truncated: outputLimitHit }))
         }
       },
     )
