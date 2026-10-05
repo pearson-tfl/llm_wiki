@@ -48,7 +48,8 @@ let queue: DedupTask[] = []
 let processing = false
 /** Pending tasks restored from disk on startup/project open. These are
  * intentionally hydrated without auto-running so opening a project does
- * not immediately spend LLM tokens on historical merge work. A fresh
+ * not immediately spend LLM tokens on historical merge work. Scheduled
+ * tasks are not held here: the maintenance job queued them to run. A fresh
  * enqueue for the same group promotes the restored task out of this set. */
 let restoredPausedTaskIds = new Set<string>()
 let currentProjectId = ""
@@ -316,8 +317,9 @@ export async function pauseQueue(): Promise<void> {
 
 /**
  * Load a project's queue from disk. Restored pending tasks are visible
- * but do not auto-run; a fresh enqueue for the same group promotes the
- * existing task, and retryTask can also resume one explicitly.
+ * but do not auto-run, except scheduled ones, which run at once; a fresh
+ * enqueue for the same group promotes the existing task, and retryTask
+ * can also resume one explicitly.
  */
 export async function restoreQueue(
   projectId: string,
