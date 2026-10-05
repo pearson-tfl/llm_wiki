@@ -570,6 +570,14 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
   })
 })
 
+describe("streamClaudeCodeCli with chat history (#46)", () => {
+  it("passes on the CLI's answer to every piped question, joined (the defect, before the fold)", async () => {
+    const callbacks = await replayClaudeCliStdout("piped-history.jsonl", 0)
+
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Green.Mango.")
+  })
+})
+
 describe("buildExitError", () => {
   it("translates Unauthenticated stderr into an actionable login hint", () => {
     const msg = buildExitError(1, "Unauthenticated: please log in")
