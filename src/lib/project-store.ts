@@ -361,6 +361,43 @@ export async function loadScheduledImportConfig(projectPath: string): Promise<Sc
   return null
 }
 
+export interface ScheduledMaintenanceConfig {
+  enabled: boolean
+  intervalHours: number
+  lastRun: number | null
+}
+
+export const DEFAULT_SCHEDULED_MAINTENANCE_CONFIG: ScheduledMaintenanceConfig = {
+  enabled: true,
+  intervalHours: 24,
+  lastRun: null,
+}
+
+const SCHEDULED_MAINTENANCE_KEY_PREFIX = "scheduledMaintenanceConfig:"
+
+function scheduledMaintenanceKey(projectPath: string): string {
+  return `${SCHEDULED_MAINTENANCE_KEY_PREFIX}${normalizePath(projectPath)}`
+}
+
+export async function saveScheduledMaintenanceConfig(
+  projectPath: string,
+  config: ScheduledMaintenanceConfig,
+): Promise<void> {
+  const store = await getStore()
+  await store.set(scheduledMaintenanceKey(projectPath), config)
+  await store.save()
+}
+
+export async function loadScheduledMaintenanceConfig(
+  projectPath: string,
+): Promise<ScheduledMaintenanceConfig> {
+  const store = await getStore()
+  const saved = await store.get<Partial<ScheduledMaintenanceConfig>>(
+    scheduledMaintenanceKey(projectPath),
+  )
+  return { ...DEFAULT_SCHEDULED_MAINTENANCE_CONFIG, ...saved }
+}
+
 export async function removeFromRecentProjects(
   path: string
 ): Promise<void> {
