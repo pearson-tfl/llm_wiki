@@ -216,6 +216,15 @@ afterEach(async () => {
   await tmp.cleanup()
 })
 
+describe("the waits in one test share one deadline (#59)", () => {
+  it("a wait that never comes true after earlier waits used most of the time fails with its own error, inside vitest's limit", async () => {
+    const start = Date.now()
+    await waitUntil(() => Date.now() - start >= 1_500)
+    await waitUntil(() => Date.now() - start >= 3_000)
+    await expect(waitUntil(() => false)).rejects.toThrow(/^waitUntil:/)
+  })
+})
+
 describe("ingest and the duplicate merge never write at once (#24)", () => {
   it("an ingest that reaches its write during a merge waits, and its index addition survives", async () => {
     const mergeReply = createDeferred<string>()

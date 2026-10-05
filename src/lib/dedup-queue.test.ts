@@ -52,6 +52,7 @@ import {
   SwitchStepTimeoutError,
   RETRY_RESTORE_ACTION,
   retryTimedOutRestore,
+  dismissStaleRestoreNotice,
 } from "./dedup-queue"
 import { executeMerge } from "./dedup-runner"
 import { isIngestActive } from "@/lib/ingest-queue"
@@ -1310,6 +1311,103 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       } finally {
         abort.mockRestore()
       }
+    })
+
+    describe("follow-ups from the #52 gate (#59)", () => {
+      /** Cut off project B's restore at its time limit, filing a notice. */
+      async function cutOffRestoreOfB(): Promise<void> {
+        mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+        const cutOff = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+        await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+        expect(await cutOff).toBeInstanceOf(SwitchStepTimeoutError)
+      }
+
+      beforeEach(async () => {
+        await pauseQueue()
+        files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      })
+
+      it("a reopen that opens the project's merge queue dismisses the time-out notice", async () => {
+        await cutOffRestoreOfB()
+        expect(retryNotices()).toHaveLength(1)
+
+        await restoreQueue(TEST_ID_B, TEST_PATH_B)
+
+        expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+        expect(retryNotices()).toHaveLength(0)
+      })
+
+      it("the state wipe dismisses the time-out notice", async () => {
+        await cutOffRestoreOfB()
+
+        clearQueueState()
+
+        expect(retryNotices()).toHaveLength(0)
+      })
+
+      it("a notice whose retry would run the restore of a project the user has left stays until a reopen opens the open project's queue", async () => {
+        await cutOffRestoreOfB()
+        // Project A's restore is then cut off while A is still opening, so
+        // it is the restore a Retry would run.
+        let opening = TEST_ID
+        mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+        const cutOffA = restoreQueue(TEST_ID, TEST_PATH, () => opening === TEST_ID)
+          .catch((err: unknown) => err)
+        await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+        expect(await cutOffA).toBeInstanceOf(SwitchStepTimeoutError)
+
+        // The user goes back to project B, whose notice is shown, and
+        // clicks Retry: project A is no longer the one opening.
+        opening = TEST_ID_B
+        const reads = mockReadFile.mock.calls.length
+        await retryTimedOutRestore()
+        expect(mockReadFile.mock.calls.length).toBe(reads)
+        expect(retryNotices()).toHaveLength(1)
+
+        await restoreQueue(TEST_ID_B, TEST_PATH_B)
+
+        expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+        expect(retryNotices()).toHaveLength(0)
+      })
+
+      it("a notice loaded with a project's saved review items after its merge queue opened is dismissed", async () => {
+        await cutOffRestoreOfB()
+        const savedReview = useReviewStore.getState().items
+        await restoreQueue(TEST_ID_B, TEST_PATH_B)
+
+        // Project open loads the saved review items once the queue is open.
+        useReviewStore.getState().setItems(savedReview)
+        dismissStaleRestoreNotice(TEST_ID_B)
+
+        expect(retryNotices()).toHaveLength(0)
+      })
+
+      it("a notice loaded with a project's saved review items stays while its restore runs, once it was cut off, and for another project", async () => {
+        await cutOffRestoreOfB()
+        const savedReview = useReviewStore.getState().items
+
+        // Another project's queue is open.
+        await restoreQueue(TEST_ID, TEST_PATH)
+        useReviewStore.getState().setItems(savedReview)
+        dismissStaleRestoreNotice(TEST_ID_B)
+        expect(retryNotices()).toHaveLength(1)
+
+        // Project B's restore is still reading its queue file.
+        const read = createDeferred<string>()
+        mockReadFile.mockImplementationOnce(() => read.promise)
+        const reopened = restoreQueue(TEST_ID_B, TEST_PATH_B)
+        await flushMicrotasks(20)
+        dismissStaleRestoreNotice(TEST_ID_B)
+        expect(retryNotices()).toHaveLength(1)
+        read.resolve(files.get(FILE_B)!)
+        await reopened
+
+        // Project B's restore was cut off.
+        await cutOffRestoreOfB()
+        useReviewStore.getState().setItems(savedReview)
+        dismissStaleRestoreNotice(TEST_ID_B)
+        expect(retryNotices()).toHaveLength(1)
+      })
     })
   })
 })
