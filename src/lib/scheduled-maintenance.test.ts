@@ -32,7 +32,10 @@ vi.mock("@/lib/dedup-runner", () => ({
   executeMerge: vi.fn(),
 }))
 
+// `busyFromRead` counts the tick's own reads of the summary. The merge
+// queue asks `isIngestActive`, which sees only `pending` and `processing`.
 vi.mock("@/lib/ingest-queue", () => ({
+  isIngestActive: () => ingestSummary.pending + ingestSummary.processing > 0,
   getQueueSummary: () => {
     ingestSummary.reads += 1
     const busy = ingestSummary.reads >= ingestSummary.busyFromRead ? 1 : 0
