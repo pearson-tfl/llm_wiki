@@ -47,7 +47,11 @@ import {
   loadScheduledMaintenanceConfig,
   saveScheduledMaintenanceConfig,
 } from "@/lib/project-store"
-import { runMaintenanceTick } from "./scheduled-maintenance"
+import {
+  runMaintenanceTick,
+  startScheduledMaintenance,
+  stopScheduledMaintenance,
+} from "./scheduled-maintenance"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import type { DuplicateGroup } from "./dedup"
@@ -373,5 +377,57 @@ describe("scheduled maintenance setting", () => {
 
     expect(await runMaintenanceTick(project, { now: () => T0 })).toBeNull()
     expect(mockDetect).not.toHaveBeenCalled()
+  })
+})
+
+describe("scheduled maintenance tick – a scan that fails", () => {
+  it("records the error and counts as a run, so the scan is not re-spent at every check", async () => {
+    await setConfig(null)
+    mockDetect.mockRejectedValue(new Error("model unreachable"))
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+    const again = await runMaintenanceTick(project, { now: () => T0 + HOUR })
+
+    expect(record).toMatchObject({ skipReason: null, error: "model unreachable" })
+    expect(again).toBeNull()
+    expect((await runRecords()).map((r) => r.error)).toEqual(["model unreachable"])
+  })
+})
+
+describe("scheduled maintenance timer", () => {
+  afterEach(() => {
+    stopScheduledMaintenance()
+    vi.useRealTimers()
+  })
+
+  it("runs an overdue job when the wiki is opened, then checks on a timer until stopped", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] })
+    vi.setSystemTime(T0)
+    await setConfig(T0 - 25 * HOUR)
+
+    startScheduledMaintenance(project)
+    await waitFor(async () => (await loadScheduledMaintenanceConfig(tmp.path)).lastRun === T0)
+    expect(mockDetect).toHaveBeenCalledTimes(1)
+
+    vi.setSystemTime(T0 + 24 * HOUR)
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000)
+    await waitFor(() => mockDetect.mock.calls.length === 2)
+
+    stopScheduledMaintenance()
+    vi.setSystemTime(T0 + 48 * HOUR)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+    expect(mockDetect).toHaveBeenCalledTimes(2)
+  })
+
+  it("ticks for the open project only", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] })
+    await setConfig(null)
+    useWikiStore.getState().setProject({ id: "another-project", name: "other", path: "/elsewhere" })
+
+    startScheduledMaintenance(project)
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000)
+
+    expect(mockDetect).not.toHaveBeenCalled()
+    expect(await realFs.fileExists(`${tmp.path}/.llm-wiki/maintenance-runs.jsonl`)).toBe(false)
   })
 })

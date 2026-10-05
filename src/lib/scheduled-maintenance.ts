@@ -14,8 +14,9 @@ import { runDuplicateDetection } from "@/lib/dedup-runner"
 import { sweepResolvedReviews } from "@/lib/sweep-reviews"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
+import { useWikiStore } from "@/stores/wiki-store"
 import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
-import { enqueueMerge, waitForTask } from "@/lib/dedup-queue"
+import { enqueueMerge, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
   holdsNotDuplicate,
   loadNotDuplicates,
@@ -30,7 +31,12 @@ const RUN_RECORD_PATH = ".llm-wiki/maintenance-runs.jsonl"
 
 export type MaintenanceSkipReason = "ingest-busy" | "previous-tick-running" | "no-model"
 
+/** How often the timer checks whether the job is due. The interval in
+ *  the setting is hours; this only bounds how late a due run starts. */
+const CHECK_INTERVAL_MS = 10 * 60 * 1000
+
 let tickRunning = false
+let checkTimer: ReturnType<typeof setInterval> | null = null
 
 export interface MaintenanceRunRecord {
   startedAt: string
@@ -40,6 +46,7 @@ export interface MaintenanceRunRecord {
   mergesEnqueued?: number
   mergesDone?: number
   mergesFailed?: number
+  error?: string
 }
 
 export function isMaintenanceDue(config: ScheduledMaintenanceConfig, now: number): boolean {
@@ -82,8 +89,18 @@ export async function runMaintenanceTick(
   }
 
   tickRunning = true
+  const record: MaintenanceRunRecord = {
+    startedAt: new Date(startedAt).toISOString(),
+    finishedAt: "",
+    skipReason: null,
+  }
   try {
     const groups = await runDuplicateDetection(pp, llmConfig)
+    record.groupsFound = {
+      high: groups.filter((g) => g.confidence === "high").length,
+      medium: groups.filter((g) => g.confidence === "medium").length,
+      low: groups.filter((g) => g.confidence === "low").length,
+    }
     const notDuplicates = await loadNotDuplicates(pp)
     // Only high-confidence groups merge with no click. A group holding a
     // pair marked "not duplicates" is left for a decision by hand.
@@ -92,35 +109,52 @@ export async function runMaintenanceTick(
     )
     await savePendingDuplicateGroups(pp, groups.filter((g) => !toMerge.includes(g)))
 
-    const outcomes: Promise<string>[] = []
+    const outcomes: Promise<DedupTaskOutcome>[] = []
     for (const group of toMerge) {
       const canonical = await chooseCanonicalSlug(pp, group)
       const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
       outcomes.push(waitForTask(taskId))
     }
+    record.mergesEnqueued = outcomes.length
     const settled = await Promise.all(outcomes)
-    const mergesDone = settled.filter((o) => o === "done").length
+    record.mergesDone = settled.filter((o) => o === "done").length
+    record.mergesFailed = settled.length - record.mergesDone
     // Close review items whose pages the merges removed.
-    if (mergesDone > 0) await sweepResolvedReviews(pp)
+    if (record.mergesDone > 0) await sweepResolvedReviews(pp)
 
     // Later steps run here, after the duplicate scan.
-
-    await saveScheduledMaintenanceConfig(pp, { ...config, lastRun: startedAt })
-    return await appendRunRecord(pp, {
-      startedAt: new Date(startedAt).toISOString(),
-      finishedAt: new Date(clock.now()).toISOString(),
-      skipReason: null,
-      groupsFound: {
-        high: groups.filter((g) => g.confidence === "high").length,
-        medium: groups.filter((g) => g.confidence === "medium").length,
-        low: groups.filter((g) => g.confidence === "low").length,
-      },
-      mergesEnqueued: outcomes.length,
-      mergesDone,
-      mergesFailed: settled.length - mergesDone,
-    })
+  } catch (err) {
+    record.error = err instanceof Error ? err.message : String(err)
   } finally {
     tickRunning = false
+  }
+
+  // A run that failed still counts as a run, so a broken model does not
+  // re-spend the scan at every check. Re-read the setting: it may have
+  // been edited while the run was going.
+  const current = await loadScheduledMaintenanceConfig(pp)
+  await saveScheduledMaintenanceConfig(pp, { ...current, lastRun: startedAt })
+  record.finishedAt = new Date(clock.now()).toISOString()
+  return appendRunRecord(pp, record)
+}
+
+/** Start the job for the opened project: an overdue run starts now. */
+export function startScheduledMaintenance(project: WikiProject): void {
+  stopScheduledMaintenance()
+  const check = () => {
+    if (useWikiStore.getState().project?.id !== project.id) return
+    void runMaintenanceTick(project, { now: Date.now }).catch((err) => {
+      console.error("Scheduled maintenance tick failed:", err)
+    })
+  }
+  check()
+  checkTimer = setInterval(check, CHECK_INTERVAL_MS)
+}
+
+export function stopScheduledMaintenance(): void {
+  if (checkTimer) {
+    clearInterval(checkTimer)
+    checkTimer = null
   }
 }
 
