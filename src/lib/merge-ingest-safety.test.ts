@@ -123,6 +123,21 @@ async function read(rel: string): Promise<string> {
   return readFileRaw(`${tmp.path}/${rel}`)
 }
 
+const MERGE_PAGES = ["wiki/index.md", "wiki/concepts/attention.md", "wiki/concepts/transformer-attention.md"]
+
+async function snapshotMergePages(): Promise<Map<string, string>> {
+  const before = new Map<string, string>()
+  for (const rel of MERGE_PAGES) before.set(rel, await read(rel))
+  return before
+}
+
+/** Every merge page is as it was, and no backup folder was written. */
+async function expectNothingWritten(before: Map<string, string>): Promise<void> {
+  for (const [rel, content] of before) expect(await read(rel)).toBe(content)
+  const history = await fs.readdir(`${tmp.path}/.llm-wiki/page-history`).catch(() => [])
+  expect(history).toEqual([])
+}
+
 async function bothQueuesIdle(): Promise<boolean> {
   return dedupQueue.getQueue().length === 0 && ingestQueue.getQueue().length === 0
 }
@@ -310,17 +325,12 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
   it("rejects a reply cut off at the output cap, though it keeps over 70% of the longest page (#29)", async () => {
     model.mergeReply = reply(MERGED)
     model.mergeCutOff = true
-    const before = new Map<string, string>()
-    for (const rel of ["wiki/index.md", "wiki/concepts/attention.md", "wiki/concepts/transformer-attention.md"]) {
-      before.set(rel, await read(rel))
-    }
+    const before = await snapshotMergePages()
 
     const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention", { scheduled: true })
     expect(await dedupQueue.waitForTask(taskId)).toBe("rejected")
 
-    for (const [rel, content] of before) expect(await read(rel)).toBe(content)
-    const history = await fs.readdir(`${tmp.path}/.llm-wiki/page-history`).catch(() => [])
-    expect(history).toEqual([])
+    await expectNothingWritten(before)
     await flushIO(20)
     expect(model.mergeCalls).toBe(1)
 
@@ -336,10 +346,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     const log = vi.spyOn(console, "log")
     const mergeReply = createDeferred<string>()
     model.mergeReply = held(mergeReply)
-    const before = new Map<string, string>()
-    for (const rel of ["wiki/index.md", "wiki/concepts/attention.md", "wiki/concepts/transformer-attention.md"]) {
-      before.set(rel, await read(rel))
-    }
+    const before = await snapshotMergePages()
 
     const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
     await waitFor(() => model.mergeCalls === 1)
@@ -348,9 +355,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     mergeReply.resolve(MERGED)
     await flushIO(20)
 
-    for (const [rel, content] of before) expect(await read(rel)).toBe(content)
-    const history = await fs.readdir(`${tmp.path}/.llm-wiki/page-history`).catch(() => [])
-    expect(history).toEqual([])
+    await expectNothingWritten(before)
     expect(dedupQueue.getQueue()).toEqual([])
     expect(useReviewStore.getState().items).toEqual([])
     expect(log.mock.calls.flat().join("\n")).toContain(
@@ -362,10 +367,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
   it("writes nothing for a merge interrupted by a project switch mid-reply, and keeps it pending (#29)", async () => {
     const mergeReply = createDeferred<string>()
     model.mergeReply = held(mergeReply)
-    const before = new Map<string, string>()
-    for (const rel of ["wiki/index.md", "wiki/concepts/attention.md", "wiki/concepts/transformer-attention.md"]) {
-      before.set(rel, await read(rel))
-    }
+    const before = await snapshotMergePages()
 
     await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
     await waitFor(() => model.mergeCalls === 1)
@@ -373,9 +375,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     mergeReply.resolve(MERGED)
     await flushIO(20)
 
-    for (const [rel, content] of before) expect(await read(rel)).toBe(content)
-    const history = await fs.readdir(`${tmp.path}/.llm-wiki/page-history`).catch(() => [])
-    expect(history).toEqual([])
+    await expectNothingWritten(before)
     await dedupQueue.restoreQueue(PROJECT_ID, tmp.path)
     expect(dedupQueue.getQueue().map((t) => [t.status, t.error])).toEqual([["pending", null]])
   })

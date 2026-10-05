@@ -108,7 +108,8 @@ Keep this list current. Merge conflicts can only come from these files.
   the real merge prompt.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
-  `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`, `src/lib/ingest-queue.ts`, `src/App.tsx`,
+  `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`,
+  `src/lib/ingest-queue.ts`, `src/App.tsx`,
   `src/components/settings/sections/maintenance-section.tsx`,
   `src/i18n/{en,it,ru,zh}.json` – a scheduled
   maintenance job per wiki project runs the duplicate scan with no click
@@ -146,14 +147,15 @@ Keep this list current. Merge conflicts can only come from these files.
   and reason in `rejectedMerges`. A rejected merge is not retried within
   the run, but the next scheduled scan (daily by default) queues the
   group again if it still finds it with high confidence, which resets the
-  failed task. A merge cancelled or cut short
-  by a project switch while the model replies writes nothing (#29): the
-  client ends a cancelled request as done with the text so far, so the
-  merge checks its cancel signal before the reply. Upstream edits to the dedup queue, the dedup merge,
-  the ingest queue, the Maintenance screen or project open in `App.tsx`
-  need re-checking against this. Tests in
+  failed task. A merge cancelled or cut short by a project switch while
+  the model replies writes nothing (#29): the client ends a cancelled
+  request as done with the text so far, so the merge checks its cancel
+  signal before the reply. Upstream edits to the dedup queue, the dedup
+  merge, the ingest queue, the Maintenance screen or project open in
+  `App.tsx` need re-checking against this. Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,
-  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup.test.ts` and
+  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-runner.test.ts`,
+  `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
