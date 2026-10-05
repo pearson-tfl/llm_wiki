@@ -950,6 +950,18 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
     })
 
+    it("a restore whose project is no longer the one opening leaves the open project and its merge running", async () => {
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await vi.waitFor(() => expect(mockExecuteMerge).toHaveBeenCalledTimes(1))
+      const signal = mockExecuteMerge.mock.calls[0][4]!.signal!
+
+      await restoreQueue(TEST_ID_B, TEST_PATH_B, () => false)
+
+      expect(signal.aborted).toBe(false)
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["a", "b"]])
+      await expect(enqueueMerge(TEST_ID, makeGroup(["e", "f"]), "e")).resolves.toBeTruthy()
+    })
+
     it("a restore whose project stops being the one opening while the open project saves loads nothing", async () => {
       await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
       await flushMicrotasks(20)

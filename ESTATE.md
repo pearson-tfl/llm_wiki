@@ -166,12 +166,13 @@ Keep this list current. Merge conflicts can only come from these files.
   project's queue (#39). A pause or restore still running after 30
   seconds fails alone with a logged `SwitchStepTimeoutError`, leaves no
   project's merge queue open, and lets the steps behind it run; its read
-  or write settling later changes nothing. A restore first stops the
-  open project's merge and saves its queue, and `App.tsx` skips the
-  restore, before it is called and again once its turn comes, when
-  another project has been opened since (#43). Upstream edits to the dedup queue,
-  the dedup merge, the ingest queue, the Maintenance screen or project
-  open in `App.tsx` need re-checking against this. Tests in
+  or write settling later changes nothing in memory. A restore first
+  stops the open project's merge and saves its queue, and `App.tsx`
+  skips the restore, before it is called and again once its turn comes,
+  when another project has been opened since (#43). Upstream edits to
+  the dedup queue, the dedup merge, the ingest queue, the Maintenance
+  screen or project open in `App.tsx` need re-checking against this.
+  Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,
   `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-runner.test.ts`,
   `src/lib/dedup.test.ts` and

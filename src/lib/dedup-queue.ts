@@ -359,10 +359,10 @@ export function clearQueueState(): void {
 }
 
 /**
- * Project-switch handshake: stop the active project's queue, flush it to
- * disk (reverting any in-flight task to pending so it gets re-tried on
- * resume), then clear in-memory state. Waits for a pause or restore
- * already in flight.
+ * Project-switch handshake: stop the active project's queue and clear its
+ * in-memory state, then flush its tasks to disk (reverting any in-flight
+ * task to pending so it gets re-tried on resume). Waits for a pause or
+ * restore already in flight.
  */
 export function pauseQueue(): Promise<void> {
   return oneSwitchStepAtATime(pauseActiveQueue)
@@ -456,7 +456,6 @@ async function loadProjectQueue(
       .map((t) => t.id),
   )
   await saveQueue(pp)
-  if (abandoned.aborted) return
 
   const pending = queue.filter((t) => t.status === "pending").length
   const failed = queue.filter((t) => t.status === "failed").length
