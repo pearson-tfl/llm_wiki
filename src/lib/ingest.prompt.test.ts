@@ -325,3 +325,55 @@ describe("long-source ingest planning", () => {
     expect(chunks[1].main.startsWith(chunks[0].main.slice(-200))).toBe(false)
   })
 })
+
+describe("existing-page prompts", () => {
+  it("asks the analysis to end with a plain topics list, one name per line", () => {
+    const prompt = buildAnalysisPrompt("", "")
+    expect(prompt).toContain("## Topics")
+    expect(prompt.indexOf("## Topics")).toBeGreaterThan(prompt.indexOf("## Recommendations"))
+    expect(prompt).toContain("after every other section")
+    expect(prompt).toContain("one name per line, with no bullets, numbering or other text")
+  })
+
+  it("asks each long-source digest to end with a topics list", () => {
+    const prompt = buildChunkAnalysisSystemPrompt("", "", "", "")
+    expect(prompt).toContain("End the digest with a `### Topics` list")
+    expect(prompt).toContain("one name per line")
+  })
+
+  it("labels the index in both stages as a partial, read-only list of recently updated pages", () => {
+    const analysis = buildAnalysisPrompt("", "- [[concepts/a]] — A")
+    const generation = buildGenerationPrompt("", "", "- [[concepts/a]] — A", "source.pdf")
+    for (const prompt of [analysis, generation]) {
+      expect(prompt).toContain("## Current Wiki Index (a partial, read-only list of recently updated pages")
+    }
+    expect(generation).not.toContain("preserve all existing entries")
+  })
+
+  it("labels the overview read-only instead of asking the model to update it", () => {
+    const prompt = buildGenerationPrompt("", "", "", "source.pdf", "# Overview")
+    expect(prompt).toContain("## Current Overview (read-only; the application maintains it)")
+    expect(prompt).not.toContain("update this to reflect the new source")
+    expect(prompt).toContain("Do not generate wiki/index.md or wiki/overview.md")
+  })
+
+  it("carries each candidate's exact path and text before the output format, which stays last", () => {
+    const prompt = buildGenerationPrompt("", "", "", "source.pdf", undefined, "", undefined, [
+      { path: "wiki/concepts/agent-harness-engineering.md", content: "---\ntitle: Agent Harness Engineering\n---\n\nBody A." },
+      { path: "wiki/entities/openclaw.md", content: "---\ntitle: OpenClaw\n---\n\nBody B." },
+    ])
+    const block = prompt.indexOf("## Existing Pages for This Source")
+    expect(block).toBeGreaterThan(-1)
+    expect(block).toBeLessThan(prompt.indexOf("## Output Format"))
+    expect(prompt.lastIndexOf("## ")).toBeGreaterThan(prompt.indexOf("## Output Format"))
+    expect(prompt).toContain('<existing-page path="wiki/concepts/agent-harness-engineering.md">\n---\ntitle: Agent Harness Engineering\n---\n\nBody A.\n</existing-page>')
+    expect(prompt).toContain('<existing-page path="wiki/entities/openclaw.md">')
+    expect(prompt).toContain("write a FILE block with that page's exact path")
+    expect(prompt).toContain("Create a new page only for a topic that none of these pages covers")
+  })
+
+  it("omits the candidate block when there are no candidates", () => {
+    const prompt = buildGenerationPrompt("", "", "", "source.pdf")
+    expect(prompt).not.toContain("## Existing Pages for This Source")
+  })
+})
