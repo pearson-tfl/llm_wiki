@@ -809,15 +809,41 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       throw new Error("boom")
     })
 
-    const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
-    const paused = pauseQueue()
-    read.resolve()
+    try {
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+      const paused = pauseQueue()
+      read.resolve()
 
-    await expect(restoreB).rejects.toThrow("boom")
-    await expect(paused).resolves.toBeUndefined()
-    // The pause ran: project B is no longer active.
-    await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
-    warn.mockRestore()
+      await expect(restoreB).rejects.toThrow("boom")
+      await expect(paused).resolves.toBeUndefined()
+      // The pause ran: project B is no longer active.
+      await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("a switch left running across a state wipe does not let the next pause past a restore still reading", async () => {
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    const save = holdNextWrite()
+    const stalePause = pauseQueue()
+    clearQueueState()
+
+    files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+    const read = createDeferred<void>()
+    mockReadFile.mockImplementationOnce(async (path: string) => {
+      await read.promise
+      return files.get(path)!
+    })
+    const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+    save.resolve()
+    await stalePause
+    const paused = pauseQueue()
+    await flushMicrotasks(20)
+    read.resolve()
+    await Promise.all([restoreB, paused])
+
+    expect(files.get(FILE_B)).toContain('"c"')
   })
 })
 
