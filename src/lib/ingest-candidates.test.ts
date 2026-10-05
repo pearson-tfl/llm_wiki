@@ -6,6 +6,7 @@ import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 import { computeContextBudget } from "./context-budget"
+import { resetEmbeddingOptimizeAccountingForTests } from "./embedding"
 
 let listingFails = false
 vi.mock("@/commands/fs", () => ({
@@ -21,25 +22,46 @@ vi.mock("./mineru", () => ({
   parseWithMineruResult: vi.fn(),
 }))
 
-// The embedding search is faked at its public boundary: per query, the
-// page ids it returns; or an error it throws; or a recorded fetch error.
+// The embedding search runs for real; the Tauri commands under it are faked.
+// A query's vector is its position in `searchQueries`, and the vector store
+// answers it with one chunk per page listed for that query in `searchHits`.
+// Either command can fail instead, rejecting with a string as a Tauri
+// command's error does.
 let searchHits: Record<string, Array<{ id: string; score: number }>> = {}
-let searchThrows: Error | null = null
-let lastEmbeddingError: string | null = null
+let embeddingFetchError: string | null = null
+let vectorStoreError: string | null = null
 const searchQueries: string[] = []
+
+vi.mock("@tauri-apps/api/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tauri-apps/api/core")>()
+  return {
+    ...actual,
+    invoke: async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "embedding_fetch") {
+        searchQueries.push(String(args?.text))
+        if (embeddingFetchError) throw embeddingFetchError
+        return [searchQueries.length - 1]
+      }
+      if (cmd === "vector_search_chunks") {
+        if (vectorStoreError) throw vectorStoreError
+        const query = searchQueries[(args?.queryEmbedding as number[])[0]]
+        return (searchHits[query] ?? []).map((hit) => ({
+          chunk_id: `${hit.id}#0`,
+          page_id: hit.id,
+          chunk_index: 0,
+          chunk_text: "",
+          heading_path: "",
+          score: hit.score,
+        }))
+      }
+      return actual.invoke(cmd, args)
+    },
+  }
+})
 
 vi.mock("@/lib/embedding", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./embedding")>()
-  return {
-    wikiPageIdFromPath: actual.wikiPageIdFromPath,
-    embedPage: vi.fn(async () => {}),
-    getLastEmbeddingError: () => lastEmbeddingError,
-    searchByEmbedding: vi.fn(async (_project: string, query: string) => {
-      searchQueries.push(query)
-      if (searchThrows) throw searchThrows
-      return searchHits[query] ?? []
-    }),
-  }
+  return { ...actual, embedPage: vi.fn(async () => {}) }
 })
 
 // The model fake routes on the system prompt and records every request.
@@ -140,9 +162,10 @@ describe("autoIngest offers existing pages before generation", () => {
 
   beforeEach(async () => {
     searchHits = {}
-    searchThrows = null
-    lastEmbeddingError = null
+    embeddingFetchError = null
+    vectorStoreError = null
     searchQueries.length = 0
+    resetEmbeddingOptimizeAccountingForTests()
     analysisReply = [
       "## Key Concepts",
       "- Agent Harness Engineering: designing an agent's environment.",
@@ -220,6 +243,39 @@ describe("autoIngest offers existing pages before generation", () => {
     expect(system).toContain("partial, read-only list of recently updated pages")
   })
 
+  it("offers the next passing hits for a topic when its top hits are excluded or have no page", async () => {
+    for (const slug of ["gateway-routing", "gateway-auth", "gateway-limits", "gateway-overflow"]) {
+      await writeFileRaw(
+        `${tmp.path}/wiki/concepts/${slug}.md`,
+        page("concept", slug, ["other.md"], `About ${slug}.`),
+      )
+    }
+    searchHits = {
+      "OpenClaw Gateway": [
+        { id: "sources/openclaw-docs", score: 0.99 },
+        { id: "concepts/deleted-page", score: 0.98 },
+        { id: "gateway-routing", score: 0.97 },
+        { id: "index", score: 0.96 },
+        { id: "concepts/gateway-routing", score: 0.9 },
+        { id: "concepts/gateway-auth", score: 0.85 },
+        { id: "concepts/gateway-limits", score: 0.8 },
+        { id: "concepts/gateway-overflow", score: 0.75 },
+      ],
+    }
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    const offered = (lastGeneration().system.match(/<existing-page path="[^"]+">/g) ?? []).sort()
+    expect(offered).toEqual([
+      '<existing-page path="wiki/concepts/agent-harness-engineering.md">',
+      '<existing-page path="wiki/concepts/gateway-auth.md">',
+      '<existing-page path="wiki/concepts/gateway-limits.md">',
+      '<existing-page path="wiki/concepts/gateway-routing.md">',
+    ])
+    const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
+    expect(log).not.toContain("search skipped")
+  })
+
   it("merges a write to a candidate path into the existing page instead of creating a new one", async () => {
     generationReply = [
       summaryBlock,
@@ -255,19 +311,24 @@ describe("autoIngest offers existing pages before generation", () => {
     expect(log).toContain("Existing-page search skipped: embeddings are off.")
   })
 
-  it("still offers the exact-path candidate and records why when the search fails", async () => {
-    searchThrows = new Error("vector store unavailable")
+  it("still offers the exact-path candidate and records why when the vector store fails", async () => {
+    vectorStoreError = "Open table error: corrupt manifest"
+    searchHits = { "OpenClaw Gateway": [{ id: "entities/openclaw", score: 0.9 }] }
 
     const written = await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
 
     expect(written).toContain("wiki/sources/harness-notes.md")
-    expect(lastGeneration().system).toContain('<existing-page path="wiki/concepts/agent-harness-engineering.md">')
+    const { system } = lastGeneration()
+    expect(system).toContain('<existing-page path="wiki/concepts/agent-harness-engineering.md">')
+    expect(system).not.toContain('<existing-page path="wiki/entities/openclaw.md">')
     const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
-    expect(log).toContain("Existing-page search skipped: search failed: vector store unavailable.")
+    expect(log).toContain(
+      "Existing-page search skipped: search failed: vector store: Open table error: corrupt manifest.",
+    )
   })
 
-  it("records an embedding fetch error that the search swallowed as a skipped search", async () => {
-    lastEmbeddingError = "HTTP 401 from embedding endpoint"
+  it("records a failed query embedding as a skipped search", async () => {
+    embeddingFetchError = "HTTP 401 from embedding endpoint"
 
     await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
 

@@ -782,11 +782,17 @@ export interface PageSearchResult {
   matchedChunks?: Array<{ text: string; headingPath: string; score: number }>
 }
 
+export interface EmbeddingSearchOptions {
+  /** Throw when the vector store search fails, instead of returning no hits. */
+  throwOnStoreError?: boolean
+}
+
 export async function searchByEmbedding(
   projectPath: string,
   query: string,
   cfg: EmbeddingConfig,
   topK: number = 10,
+  options: EmbeddingSearchOptions = {},
 ): Promise<PageSearchResult[]> {
   if (!cfg.enabled || !cfg.model) return []
 
@@ -798,7 +804,9 @@ export async function searchByEmbedding(
   try {
     rawChunks = await vectorSearchChunks(projectPath, queryEmb, Math.max(topK * 3, 30))
   } catch (err) {
-    console.log(`[Embedding] LanceDB chunk search failed: ${err instanceof Error ? err.message : err}`)
+    const message = err instanceof Error ? err.message : String(err)
+    console.log(`[Embedding] LanceDB chunk search failed: ${message}`)
+    if (options.throwOnStoreError) throw new Error(`vector store: ${message}`)
     return []
   }
   if (rawChunks.length === 0) return []
