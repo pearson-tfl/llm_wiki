@@ -7,7 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
 import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
-import { createDeferred, flushIO, waitFor, type Deferred } from "@/test-helpers/deferred"
+import { createDeferred, flushIO, type Deferred } from "@/test-helpers/deferred"
 import { ingestScenarios } from "@/test-helpers/scenarios/ingest-scenarios"
 
 vi.mock("@/commands/fs", () => realFs)
@@ -145,6 +145,35 @@ async function bothQueuesIdle(): Promise<boolean> {
   return dedupQueue.getQueue().length === 0 && ingestQueue.getQueue().length === 0
 }
 
+/** Real time a wait allows, inside the test's own 5-second limit. */
+const WAIT_LIMIT_MS = 2_000
+
+/**
+ * Wait until `predicate()` returns true, or throw once WAIT_LIMIT_MS of
+ * real time has passed. The waits here are on real I/O, which under a
+ * loaded suite can take more event-loop turns than a count allows (#44).
+ */
+async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  const deadline = Date.now() + WAIT_LIMIT_MS
+  while (!(await predicate())) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitUntil: predicate never became true within ${WAIT_LIMIT_MS} ms`)
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  }
+}
+
+/** Move the fake clock a minute at a time until the merge queue is empty.
+ *  The merge's ingest-idle check runs on the fake clock, but the saves
+ *  before it is armed and the merge's own writes are real I/O, which can
+ *  land after a single advance (#44). */
+async function advanceUntilMergeQueueEmpty(): Promise<void> {
+  await waitUntil(async () => {
+    await vi.advanceTimersByTimeAsync(60_000)
+    return dedupQueue.getQueue().length === 0
+  })
+}
+
 beforeEach(async () => {
   tmp = await createTempProject("merge-safety")
   registry.path = tmp.path
@@ -194,17 +223,17 @@ describe("ingest and the duplicate merge never write at once (#24)", () => {
     model.ingestReplies = [reply(scenario.analysisResponse), reply(scenario.generationResponse)]
 
     await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
-    await waitFor(() => model.mergeCalls === 1)
+    await waitUntil(() => model.mergeCalls === 1)
 
     // The merge has read every page and waits on the model. Ingest a
     // source now: its preparation runs, and it reaches its write.
     await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
-    await waitFor(() => model.ingestCalls === 2)
+    await waitUntil(() => model.ingestCalls === 2)
     await flushIO(50)
     expect(await read("wiki/index.md")).toBe(INDEX)
 
     mergeReply.resolve(MERGED)
-    await waitFor(bothQueuesIdle, 500)
+    await waitUntil(bothQueuesIdle)
 
     const index = await read("wiki/index.md")
     expect(index).toContain("rope")
@@ -221,7 +250,7 @@ describe("ingest and the duplicate merge never write at once (#24)", () => {
     model.mergeReply = reply(MERGED)
 
     await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
-    await waitFor(() => model.ingestCalls === 1)
+    await waitUntil(() => model.ingestCalls === 1)
 
     await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
     await flushIO(20)
@@ -230,11 +259,10 @@ describe("ingest and the duplicate merge never write at once (#24)", () => {
     expect(dedupQueue.getQueue().map((t) => t.status)).toEqual(["pending"])
 
     analysis.resolve(scenario.analysisResponse)
-    await waitFor(() => ingestQueue.getQueue().length === 0, 500)
+    await waitUntil(() => !ingestQueue.isIngestActive())
     expect(model.mergeCalls).toBe(0)
 
-    await vi.advanceTimersByTimeAsync(60_000)
-    await waitFor(() => dedupQueue.getQueue().length === 0, 500)
+    await advanceUntilMergeQueueEmpty()
     expect(model.mergeCalls).toBe(1)
     expect(await fileExists(`${tmp.path}/wiki/concepts/transformer-attention.md`)).toBe(false)
     expect(await read("wiki/index.md")).toContain("rope")
@@ -251,20 +279,19 @@ describe("ingest and the duplicate merge never write at once (#24)", () => {
     const otherWriter = createDeferred<void>()
     const otherWrite = withProjectLock(tmp.path, () => otherWriter.promise)
     await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
-    await waitFor(() => dedupQueue.getQueue()[0]?.status === "processing")
+    await waitUntil(() => dedupQueue.getQueue()[0]?.status === "processing")
 
     // Ingest starts during that wait.
     await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
-    await waitFor(() => model.ingestCalls === 1)
+    await waitUntil(() => model.ingestCalls === 1)
     otherWriter.resolve()
     await otherWrite
-    await waitFor(() => dedupQueue.getQueue()[0]?.status === "pending")
+    await waitUntil(() => dedupQueue.getQueue()[0]?.status === "pending")
     expect(model.mergeCalls).toBe(0)
 
     analysis.resolve(scenario.analysisResponse)
-    await waitFor(() => ingestQueue.getQueue().length === 0, 500)
-    await vi.advanceTimersByTimeAsync(60_000)
-    await waitFor(() => dedupQueue.getQueue().length === 0, 500)
+    await waitUntil(() => !ingestQueue.isIngestActive())
+    await advanceUntilMergeQueueEmpty()
     expect(model.mergeCalls).toBe(1)
     expect(await read("wiki/index.md")).toContain("rope")
     expect(await read("wiki/index.md")).not.toContain("transformer-attention")
@@ -314,7 +341,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     const before = await read("wiki/concepts/attention.md")
 
     const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
-    await waitFor(() => model.mergeCalls === 1)
+    await waitUntil(() => model.mergeCalls === 1)
     await dedupQueue.cancelTask(taskId)
     // A cancelled request ends with whatever text had arrived.
     mergeReply.resolve("---\ntype: concept\n")
@@ -374,7 +401,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     const before = await snapshotMergePages()
 
     const taskId = await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
-    await waitFor(() => model.mergeCalls === 1)
+    await waitUntil(() => model.mergeCalls === 1)
     await dedupQueue.cancelTask(taskId)
     // The client ends a cancelled request as done, with the text so far.
     mergeReply.resolve(MERGED)
@@ -395,7 +422,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
     const before = await snapshotMergePages()
 
     await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
-    await waitFor(() => model.mergeCalls === 1)
+    await waitUntil(() => model.mergeCalls === 1)
     await dedupQueue.pauseQueue()
     mergeReply.resolve(MERGED)
     await flushIO(20)
