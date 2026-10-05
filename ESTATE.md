@@ -109,7 +109,7 @@ Keep this list current. Merge conflicts can only come from these files.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`,
-  `src/lib/ingest-queue.ts`, `src/App.tsx`,
+  `src/lib/ingest-queue.ts`, `src/App.tsx`, `src/lib/auto-save.ts`,
   `src/components/settings/sections/maintenance-section.tsx`,
   `src/components/review/review-view.tsx`,
   `src/i18n/{en,it,ru,zh}.json` – a scheduled
@@ -185,11 +185,15 @@ Keep this list current. Merge conflicts can only come from these files.
   runs it. A Retry dismisses the notice only once no restore is left cut
   off (#52). A restore that opens a project's merge queue dismisses it
   too, and so does project open when the review items it loads hold a
-  notice saved before that queue opened (#59).
+  notice saved before that queue opened (#59). Project open turns
+  auto-save back on before it reads the project's saved review items, so
+  the review auto-save writes nothing for a project until they have
+  loaded, and the load keeps a notice filed meanwhile beside them (#62).
   Upstream edits to the dedup queue, the dedup merge, the ingest queue,
-  the Maintenance screen, the Review screen or project open in `App.tsx`
-  need re-checking against this.
+  the Maintenance screen, the Review screen, the auto-save or project
+  open in `App.tsx` need re-checking against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`,
+  `src/lib/auto-save.test.ts`, `src/lib/auto-save.review-load.test.ts`,
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
