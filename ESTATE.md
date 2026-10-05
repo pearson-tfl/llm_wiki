@@ -84,20 +84,32 @@ Keep this list current. Merge conflicts can only come from these files.
   fix 1 of #16). The analysis ends with a topics list, and each long-source
   digest begins with one, so trimming a long digest keeps it. Before
   generation, ingest searches the wiki by meaning once per topic and adds any
-  page whose file name matches a topic's title. It gives generation up to 12
-  of those pages, with their exact paths and text, inside a block capped at a
-  share of the context page budget. The cap is reserved before the source
-  budget is worked out, so a source that no longer fits goes to the chunked
-  path. The prompt tells the model to update a listed page by its exact path.
-  The index is labelled a partial, read-only list of recent pages and the
-  overview read-only. Each ingest's `wiki/log.md` entry ends with pages
-  offered, updated and created, and why the embedding search or the exact-path
-  check was skipped when one was. `ingest.ts` is a large upstream file that
-  changes in most releases: re-check these changes at the next upstream merge.
-  Tests in `src/lib/ingest-candidates.test.ts` and
-  `src/lib/ingest.prompt.test.ts`.
+  page whose file name matches a topic's title. Each search fetches 10 hits
+  and keeps the best 3 that are pages ingest may offer and that exist with
+  text, so other sources' summaries and embeddings with no page behind them
+  do not use up a topic's places (#22). It gives generation up to 12 of
+  those pages, with their exact paths and text, inside a block capped at 15%
+  of the context. The cap is counted with the schema, purpose, index and
+  overview in the room set aside before the source budget is worked out, so
+  a source that would not fit beside them goes to the chunked path. Upstream
+  limits that room to a quarter of the context, so the whole cap is reserved
+  only while those four files take a tenth of the context or less. Their
+  size does not shrink with the context, so the smaller the context, the
+  more likely only part of the cap is reserved. The prompt tells the model to
+  update a listed page by its exact path. The index is labelled a partial,
+  read-only list of recent pages and the overview read-only. Each ingest's
+  `wiki/log.md` entry ends with pages offered, updated and created, and why
+  the embedding search or the exact-path check was skipped when one was,
+  including a failed embedding fetch or vector store search. `ingest.ts` is
+  a large upstream file that changes in most releases: re-check these
+  changes at the next upstream merge. Tests in
+  `src/lib/ingest-candidates.test.ts` and `src/lib/ingest.prompt.test.ts`.
   `src/lib/ingest-source-path-collision.test.ts` had its merge fake matched to
   the real merge prompt.
+- `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
+  the vector store search fails, which ingest's candidate search uses so the
+  failure reaches its log (#22). Without the option it returns no hits, as
+  upstream does.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

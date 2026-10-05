@@ -70,6 +70,9 @@ const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"
 const CANDIDATE_MAX_PAGES = 12
 const CANDIDATE_MAX_TOPICS = 20
 const CANDIDATE_HITS_PER_TOPIC = 3
+// Hits fetched per topic, so that excluded pages and hits with no page file
+// do not use up the per-topic slots.
+const CANDIDATE_SEARCH_HITS_PER_TOPIC = 10
 // A topics-section line longer than this is prose, not a name.
 const CANDIDATE_TOPIC_MAX_CHARS = 120
 const CANDIDATE_BLOCK_PAGE_BUDGET_SHARE = 0.3
@@ -2878,9 +2881,10 @@ async function wikiPagesBySlug(projectPath: string): Promise<Map<string, string[
 }
 
 /**
- * Existing wiki pages on the analysed source's topics: an embedding search
- * per topic plus a page at each topic's title-derived file name, ranked by
- * best score and cut to the candidate budget. Never throws for a search
+ * Existing wiki pages on the analysed source's topics: each topic's best
+ * embedding hits that are offerable pages with text, plus a page at each
+ * topic's title-derived file name, ranked by best score and cut to the
+ * candidate budget. Never throws for a search
  * failure; it reports why the search was skipped instead.
  */
 async function selectExistingPageCandidates(
@@ -2894,6 +2898,17 @@ async function selectExistingPageCandidates(
   const offer = (relativePath: string, score: number) => {
     if (!isCandidatePagePath(relativePath, sourceSummaryPath)) return
     scores.set(relativePath, Math.max(scores.get(relativePath) ?? Number.NEGATIVE_INFINITY, score))
+  }
+
+  // Page text by path, read once: a search hit counts only if its page has text.
+  const contents = new Map<string, string>()
+  const readPage = async (relativePath: string) => {
+    let content = contents.get(relativePath)
+    if (content === undefined) {
+      content = (await tryReadFile(`${projectPath}/${relativePath}`)).trim()
+      contents.set(relativePath, content)
+    }
+    return content
   }
 
   const skipped: string[] = []
@@ -2916,11 +2931,20 @@ async function selectExistingPageCandidates(
     try {
       const { searchByEmbedding, getLastEmbeddingError } = await import("@/lib/embedding")
       for (const query of queries.filter(Boolean)) {
-        const hits = await searchByEmbedding(projectPath, query, embCfg, CANDIDATE_HITS_PER_TOPIC)
+        const hits = await searchByEmbedding(projectPath, query, embCfg, CANDIDATE_SEARCH_HITS_PER_TOPIC, {
+          throwOnStoreError: true,
+        })
         // searchByEmbedding answers a failed embedding fetch with no hits.
         const fetchError = hits.length === 0 ? getLastEmbeddingError() : null
         if (fetchError) throw new Error(fetchError)
-        for (const hit of hits) offer(`wiki/${hit.id}.md`, hit.score)
+        let kept = 0
+        for (const hit of hits) {
+          if (kept >= CANDIDATE_HITS_PER_TOPIC) break
+          const relativePath = `wiki/${hit.id}.md`
+          if (!isCandidatePagePath(relativePath, sourceSummaryPath) || !(await readPage(relativePath))) continue
+          offer(relativePath, hit.score)
+          kept++
+        }
       }
     } catch (err) {
       skipped.push(`Existing-page search skipped: search failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -2933,7 +2957,7 @@ async function selectExistingPageCandidates(
   const ranked = [...scores.entries()].sort((a, b) => b[1] - a[1]).map(([relativePath]) => relativePath)
   for (const relativePath of ranked) {
     if (pages.length >= CANDIDATE_MAX_PAGES || room < CANDIDATE_MIN_PAGE_CHARS) break
-    const content = (await tryReadFile(`${projectPath}/${relativePath}`)).trim()
+    const content = await readPage(relativePath)
     if (!content) continue
     const page = { path: relativePath, content: trimLongText(content, Math.min(maxPageSize, room)) }
     pages.push(page)
