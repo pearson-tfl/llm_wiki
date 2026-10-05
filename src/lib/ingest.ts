@@ -2884,8 +2884,8 @@ async function wikiPagesBySlug(projectPath: string): Promise<Map<string, string[
  * Existing wiki pages on the analysed source's topics: each topic's best
  * embedding hits that are offerable pages with text, plus a page at each
  * topic's title-derived file name, ranked by best score and cut to the
- * candidate budget. Never throws for a search
- * failure; it reports why the search was skipped instead.
+ * candidate budget. Never throws for a search failure; it reports why the
+ * search was skipped instead.
  */
 async function selectExistingPageCandidates(
   projectPath: string,
