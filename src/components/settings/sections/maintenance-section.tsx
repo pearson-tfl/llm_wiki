@@ -20,7 +20,11 @@ import { Label } from "@/components/ui/label"
 import { useWikiStore } from "@/stores/wiki-store"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { runDuplicateDetection } from "@/lib/dedup-runner"
-import { addNotDuplicate } from "@/lib/dedup-storage"
+import {
+  addNotDuplicate,
+  loadPendingDuplicateGroups,
+  removePendingDuplicateGroup,
+} from "@/lib/dedup-storage"
 import {
   enqueueMerge,
   cancelTask,
@@ -42,7 +46,12 @@ import {
   type FileHistorySettings,
   type FileHistoryStats,
 } from "@/commands/fs"
-import { addToRecentProjects } from "@/lib/project-store"
+import {
+  addToRecentProjects,
+  loadScheduledMaintenanceConfig,
+  saveScheduledMaintenanceConfig,
+  type ScheduledMaintenanceConfig,
+} from "@/lib/project-store"
 
 interface GroupUiEntry {
   group: DuplicateGroup
@@ -248,6 +257,35 @@ export function MaintenanceSection() {
   const llmReady = hasUsableLlm(llmConfig)
   const projectReady = !!project
 
+  // The scheduled maintenance job's setting, and the groups its last run
+  // saved but did not merge, shown on open as if a scan had just run.
+  const [schedule, setSchedule] = useState<ScheduledMaintenanceConfig | null>(null)
+  useEffect(() => {
+    let active = true
+    setSchedule(null)
+    if (!project) return () => { active = false }
+    void loadScheduledMaintenanceConfig(project.path).then((config) => {
+      if (active) setSchedule(config)
+    })
+    void loadPendingDuplicateGroups(project.path).then((saved) => {
+      if (!active) return
+      setGroups(saved.map((g) => ({ group: g, canonicalSlug: g.slugs[0], skipped: false })))
+    })
+    return () => { active = false }
+  }, [project])
+
+  const updateSchedule = useCallback(
+    async (change: Partial<ScheduledMaintenanceConfig>) => {
+      if (!project) return
+      const projectPath = project.path
+      // Re-read so a run that finished meanwhile keeps its lastRun.
+      const next = { ...(await loadScheduledMaintenanceConfig(projectPath)), ...change }
+      await saveScheduledMaintenanceConfig(projectPath, next)
+      if (useWikiStore.getState().project?.path === projectPath) setSchedule(next)
+    },
+    [project],
+  )
+
   const handleScan = useCallback(async () => {
     if (!project) return
     setScanning(true)
@@ -285,6 +323,7 @@ export function MaintenanceSection() {
       if (!project) return
       try {
         await enqueueMerge(project.id, entry.group, entry.canonicalSlug)
+        await removePendingDuplicateGroup(project.path, entry.group.slugs)
         // Refresh immediately so the card flips to "queued" without
         // waiting for the next 1s poll tick.
         setTasks([...getQueue()])
@@ -321,6 +360,7 @@ export function MaintenanceSection() {
       if (!entry) return
       try {
         await addNotDuplicate(project.path, entry.group.slugs)
+        await removePendingDuplicateGroup(project.path, entry.group.slugs)
         setGroups((prev) =>
           prev.map((g, i) => (i === idx ? { ...g, skipped: true } : g)),
         )
@@ -530,6 +570,65 @@ export function MaintenanceSection() {
               defaultValue: "Configure an LLM provider first.",
             })}
           </p>
+        )}
+
+        {schedule && (
+          <div className="space-y-3 rounded-md border border-border/60 bg-background/60 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <Label htmlFor="scheduled-dedup-enabled">
+                  {t("settings.sections.maintenance.dedup.scheduleEnabled", {
+                    defaultValue: "Run the duplicate scan on a schedule",
+                  })}
+                </Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {t("settings.sections.maintenance.dedup.scheduleHint", {
+                    defaultValue:
+                      "High-confidence groups merge with no click, backed up as a manual merge is. Other groups are kept here for you to act on.",
+                  })}
+                </p>
+              </div>
+              <button
+                id="scheduled-dedup-enabled"
+                type="button"
+                role="switch"
+                aria-checked={schedule.enabled}
+                disabled={!project}
+                onClick={() => void updateSchedule({ enabled: !schedule.enabled })}
+                className={`relative h-6 w-11 shrink-0 rounded-full border transition-colors disabled:opacity-50 ${schedule.enabled ? "border-primary bg-primary" : "border-border bg-muted"}`}
+              >
+                <span className={`absolute top-0.5 h-[18px] w-[18px] rounded-full bg-background shadow-sm transition-transform ${schedule.enabled ? "left-[22px]" : "left-0.5"}`} />
+              </button>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="scheduled-dedup-interval">
+                {t("settings.sections.maintenance.dedup.scheduleInterval", {
+                  defaultValue: "Interval (hours)",
+                })}
+              </Label>
+              <input
+                id="scheduled-dedup-interval"
+                type="number"
+                min={1}
+                step={1}
+                value={schedule.intervalHours}
+                disabled={!project}
+                onChange={(event) => {
+                  const hours = Number(event.target.value)
+                  if (Number.isInteger(hours) && hours >= 1) void updateSchedule({ intervalHours: hours })
+                }}
+                className="h-8 w-20 rounded-md border border-input bg-background px-2 text-sm tabular-nums"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {t("settings.sections.maintenance.dedup.scheduleLastRun", {
+                defaultValue: "Last run: {{when}}",
+                when: schedule.lastRun
+                  ? new Date(schedule.lastRun).toLocaleString()
+                  : t("settings.sections.maintenance.dedup.scheduleNever", { defaultValue: "never" }),
+              })}
+            </p>
+          </div>
         )}
 
         <Button

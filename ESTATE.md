@@ -80,6 +80,27 @@ Keep this list current. Merge conflicts can only come from these files.
   the link (pearson-tfl/llm_wiki#8). Not covered: in the file preview and
   the research panel, a path link is stopped with no notice. Tests in
   `src/lib/relative-links.test.ts`.
+- `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
+  `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/App.tsx`,
+  `src/components/settings/sections/maintenance-section.tsx` – a scheduled
+  maintenance job per wiki project runs the duplicate scan with no click
+  (pearson-tfl/llm_wiki#18, from #16). On by default, every 24 hours,
+  switchable and adjustable in Settings > Maintenance; the setting sits in
+  `app-state.json` beside the scheduled import one. A timer checks every
+  10 minutes for the open project only, and an overdue run starts when the
+  wiki is opened. A run waits, and records why, while the ingest queue is
+  busy, a previous run is still going, or no model is set. High-confidence
+  groups go onto the existing merge queue, into the page with the most
+  sources, then the earliest created date, then the first listed; a group
+  holding a pair marked "not duplicates" is never merged. The queue runs
+  those merges with no resume click, after a restart too; hand-queued
+  merges restored from disk still wait for it. Other groups are saved to
+  `.llm-wiki/dedup-pending-groups.json`, which the Maintenance screen shows
+  on open. After merges the review sweep closes stale duplicate items.
+  Each run appends a line to `.llm-wiki/maintenance-runs.jsonl`. Upstream
+  edits to the dedup queue, the Maintenance screen or project open in
+  `App.tsx` need re-checking against this. Tests in
+  `src/lib/scheduled-maintenance.test.ts` and `src/lib/dedup-queue.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

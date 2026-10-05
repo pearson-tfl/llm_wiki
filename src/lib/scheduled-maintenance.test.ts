@@ -42,7 +42,11 @@ import {
   getQueue,
   restoreQueue,
 } from "@/lib/dedup-queue"
-import { addNotDuplicate, loadPendingDuplicateGroups } from "@/lib/dedup-storage"
+import {
+  addNotDuplicate,
+  loadPendingDuplicateGroups,
+  removePendingDuplicateGroup,
+} from "@/lib/dedup-storage"
 import {
   loadScheduledMaintenanceConfig,
   saveScheduledMaintenanceConfig,
@@ -295,6 +299,20 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     expect(record?.mergesEnqueued).toBe(0)
     // Kept for a decision by hand instead.
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([holdsPair])
+  })
+})
+
+describe("saved groups – the Maintenance screen's manual actions", () => {
+  it("drops a saved group once Merge or Not duplicates acts on it, matching slugs in any order or case", async () => {
+    await setConfig(null)
+    const acted = group(["pstack", "p-stack"], "medium")
+    const left = group(["seat", "lane"], "low")
+    mockDetect.mockResolvedValue([acted, left])
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    await removePendingDuplicateGroup(tmp.path, ["P-Stack", "pstack"])
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([left])
   })
 })
 
