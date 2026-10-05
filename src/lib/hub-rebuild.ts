@@ -18,8 +18,10 @@ const REQUEST_PATH = ".llm-wiki/hub-rebuild-request.json"
 const ARCHIVE_DIR = ".llm-wiki/hub-rebuild-archive"
 /** The rewrite is a whole page written to disk: the dedup merge's cap. */
 const HUB_REBUILD_MAX_TOKENS = 16_384
-/** Pages asked of the search; only source summaries among them are used. */
-const HUB_SEARCH_TOP_K = 50
+/** Pages asked of the search. Only source summaries among them are used,
+ *  and concept and entity pages outnumber them, so ask deep; the text
+ *  budget, not this, bounds what the model is given. */
+const HUB_SEARCH_TOP_K = 200
 const HUB_QUERY_MAX_CHARS = 2_000
 /** A summary cut shorter than this is not worth offering. */
 const HUB_MIN_SUMMARY_CHARS = 1_000
@@ -33,11 +35,11 @@ const SYSTEM_PROMPT = [
   "Write nothing before or after the page.",
 ].join("\n")
 
-export type HubResult =
+type HubResult =
   | { path: string; result: "rebuilt" }
   | { path: string; result: "rejected" | "failed"; reason: string }
 
-export interface HubRebuildOutcome {
+interface HubRebuildOutcome {
   rebuilt: string[]
   rejected: string[]
   /** Set when a write was withheld: the request stays for the next run. */
@@ -72,9 +74,8 @@ export async function runHubRebuildRequest(
     results.push(step)
   }
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-")
   await writeFile(
-    `${pp}/${ARCHIVE_DIR}/${stamp}.json`,
+    `${pp}/${ARCHIVE_DIR}/${fileStamp()}.json`,
     `${JSON.stringify({ archivedAt: new Date().toISOString(), pages, results }, null, 2)}\n`,
   )
   // The archive holds the request now; the request path is cleared so the
@@ -115,6 +116,10 @@ async function rebuildHub(
   const failed = (reason: string): HubResult => ({ path, result: "failed", reason })
   const before = await blocker()
   if (before) return { withheld: before }
+  // The request is agent-written: only a page under wiki/ is rewritten.
+  if (!/^wiki\/(?:[^/]+\/)*[^/]+\.md$/.test(path) || path.split("/").includes("..")) {
+    return failed("not a wiki page path")
+  }
   const hubPath = `${pp}/${path}`
   if (!(await fileExists(hubPath))) return failed("page not found")
 
@@ -158,8 +163,7 @@ async function rebuildHub(
       today,
     )
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-")
-    await writeFile(`${pp}/.llm-wiki/page-history/hub-rebuild-${stamp}/${path.replace(/[/\\]/g, "_")}`, current)
+    await writeFile(`${pp}/.llm-wiki/page-history/hub-rebuild-${fileStamp()}/${path.replace(/[/\\]/g, "_")}`, current)
     await writeFile(hubPath, rebuilt)
     return { path, result: "rebuilt" }
   } catch (err) {
@@ -222,4 +226,8 @@ function linkedSlugs(body: string): Set<string> {
     if (!target.includes("/")) slugs.add(target)
   }
   return slugs
+}
+
+function fileStamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, "-")
 }

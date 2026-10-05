@@ -731,6 +731,60 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [HUB, SECOND_HUB] })
   })
 
+  it("counts a summary as drawn on for each live link form, and not for a link to another folder", async () => {
+    // Slugs and link forms copied from the live vault's concept pages.
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md`,
+      summary("Selective Classification", "learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md", "Abstain when unsure."),
+    )
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/openclaw-docs-platforms--platforms-overview.md`,
+      summary("Platforms Overview", "openclaw-docs-platforms--platforms-overview.md", "Where the gateway runs."),
+    )
+    mockSearch.mockResolvedValue([
+      { id: "sources/learn-agent-arch-ext-arxiv-1705.08500-selective-classification", score: 0.9 },
+      { id: "sources/openclaw-docs-platforms--platforms-overview", score: 0.85 },
+      { id: "sources/harness-notes", score: 0.8 },
+    ])
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(
+      rewrite(
+        [
+          "An agent may abstain ([[learn-agent-arch-ext-arxiv-1705.08500-selective-classification|Selective classification]]).",
+          "The gateway runs on several platforms ([[wiki/sources/openclaw-docs-platforms--platforms-overview.md|Platforms]]).",
+          "See also [[concepts/harness-notes]].",
+        ].join(" "),
+      ),
+    )
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toContain(
+      'sources: ["learn-agent-arch-ext-addyosmani-loop-engineering.md", "learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md", "openclaw-docs-platforms--platforms-overview.md"]',
+    )
+  })
+
+  it("fails a hub with no front matter on disk, one the search finds no summaries for, and a path outside wiki/", async () => {
+    await writeFileRaw(`${tmp.path}/wiki/concepts/bare.md`, "# Bare\n\nNo front matter here.\n")
+    await writeFileRaw(`${tmp.path}/raw/outside.md`, HUB_PAGE)
+    await writeRequest(["wiki/concepts/bare.md", HUB, "raw/outside.md", "wiki/../raw/outside.md"])
+    // The first search (for the hub) finds only a concept page.
+    mockSearch.mockResolvedValueOnce([{ id: "concepts/loop-engineering", score: 0.9 }])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await readFileRaw(`${tmp.path}/raw/outside.md`)).toBe(HUB_PAGE)
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: "wiki/concepts/bare.md", result: "failed", reason: "the page has no front matter" },
+      { path: HUB, result: "failed", reason: "the search found no source summaries" },
+      { path: "raw/outside.md", result: "failed", reason: "not a wiki page path" },
+      { path: "wiki/../raw/outside.md", result: "failed", reason: "not a wiki page path" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
   it("does nothing for hubs when no request file is present", async () => {
     const record = await runMaintenanceTick(project, { now: () => T0 })
 
@@ -842,6 +896,20 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(mockModel).not.toHaveBeenCalled()
     expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
     expect(record).toMatchObject({ skipReason: "ingest-busy" })
+  })
+
+  it("leaves a request with no list of page paths in place and records why", async () => {
+    for (const body of ['{"hubs": []}', '{"pages": ["wiki/concepts/a.md", 7]}']) {
+      await writeFileRaw(`${tmp.path}/${REQUEST}`, body)
+      await setConfig(null)
+
+      const record = await runMaintenanceTick(project, { now: () => T0 })
+
+      expect(record?.error).toMatch(/no "pages" list of page paths/)
+      expect(await readFileRaw(`${tmp.path}/${REQUEST}`)).toBe(body)
+    }
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await archives()).toEqual([])
   })
 
   it("withholds the hub write when an ingest starts during the model call, and the request and the run stay due", async () => {
