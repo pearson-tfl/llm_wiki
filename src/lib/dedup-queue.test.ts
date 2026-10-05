@@ -914,6 +914,27 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
     })
 
+    it("a restore whose save lands after its time limit starts no merge before the next restore's save lands", async () => {
+      await pauseQueue()
+      const [scheduledTask] = JSON.parse(queueFileWith(TEST_ID_B, ["c", "d"]))
+      files.set(FILE_B, JSON.stringify([{ ...scheduledTask, scheduled: true }]))
+      const lateSave = holdNextWrite()
+      const firstRestore = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await firstRestore).toBeInstanceOf(SwitchStepTimeoutError)
+
+      const save = holdNextWrite()
+      const secondRestore = restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await flushMicrotasks(20)
+      lateSave.resolve()
+      await flushMicrotasks(20)
+      expect(mockExecuteMerge).not.toHaveBeenCalled()
+
+      save.resolve()
+      await secondRestore
+      await vi.waitFor(() => expect(mockExecuteMerge).toHaveBeenCalledTimes(1))
+    })
+
     it("a restore made while another project's merge runs cancels that merge and saves its project before loading", async () => {
       await pauseQueue()
       await pauseQueue()

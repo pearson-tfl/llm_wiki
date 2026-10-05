@@ -456,6 +456,7 @@ async function loadProjectQueue(
       .map((t) => t.id),
   )
   await saveQueue(pp)
+  if (abandoned.aborted) return
 
   const pending = queue.filter((t) => t.status === "pending").length
   const failed = queue.filter((t) => t.status === "failed").length

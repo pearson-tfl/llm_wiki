@@ -172,10 +172,9 @@ Keep this list current. Merge conflicts can only come from these files.
   when another project has been opened since (#43). Upstream edits to
   the dedup queue, the dedup merge, the ingest queue, the Maintenance
   screen or project open in `App.tsx` need re-checking against this.
-  Tests in
-  `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,
-  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-runner.test.ts`,
-  `src/lib/dedup.test.ts` and
+  Tests in `src/lib/scheduled-maintenance.test.ts`,
+  `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
+  `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
