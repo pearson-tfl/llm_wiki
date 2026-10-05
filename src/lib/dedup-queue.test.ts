@@ -18,10 +18,15 @@ const idToPath: Record<string, string> = {
   [TEST_ID]: TEST_PATH,
   [TEST_ID_B]: TEST_PATH_B,
 }
+/** While set, every registry lookup waits for it. */
+let registryHold: Promise<void> | null = null
 vi.mock("@/lib/project-identity", () => ({
   ensureProjectId: vi.fn(),
   upsertProjectInfo: vi.fn(),
-  getProjectPathById: vi.fn(async (id: string) => idToPath[id] ?? null),
+  getProjectPathById: vi.fn(async (id: string) => {
+    if (registryHold) await registryHold
+    return idToPath[id] ?? null
+  }),
   getProjectIdByPath: vi.fn(),
   loadRegistry: vi.fn(),
 }))
@@ -42,7 +47,7 @@ import { executeMerge } from "./dedup-runner"
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { __resetProjectLocksForTesting } from "./project-mutex"
-import type { DuplicateGroup, MergeResult } from "./dedup"
+import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "./dedup"
 
 const mockExecuteMerge = vi.mocked(executeMerge)
 const mockReadFile = vi.mocked(readFile)
@@ -66,6 +71,7 @@ async function activate(id: string = TEST_ID): Promise<void> {
 
 beforeEach(async () => {
   clearQueueState()
+  registryHold = null
   // A merge a test left hanging still holds the project write lock.
   __resetProjectLocksForTesting()
   mockExecuteMerge.mockReset()
@@ -336,6 +342,69 @@ describe("dedup-queue — cancel / delete", () => {
 
     expect(mockExecuteMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["c", "d"]])
   })
+
+  it("a merge cancelled while the queue looks up its project never runs, and the next stays cancellable (#35)", async () => {
+    const signals: AbortSignal[] = []
+    mockExecuteMerge.mockImplementation(async (_pp, _g, _slug, _llm, opts) => {
+      signals.push(opts!.signal!)
+      return new Promise<MergeResult>(() => {})
+    })
+    const lookup = createDeferred<void>()
+    registryHold = lookup.promise
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    const second = await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c")
+    await flushMicrotasks(5)
+    await cancelTask(first)
+    lookup.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["c", "d"]])
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([[second, "processing"]])
+    await cancelTask(second)
+    expect(signals[0].aborted).toBe(true)
+  })
+
+  it("a merge whose project lookup ends while an earlier retried merge runs does not start beside it (#35)", async () => {
+    mockExecuteMerge
+      .mockRejectedValueOnce(new MergeReplyRejectedError("test"))
+      .mockImplementation(() => new Promise<MergeResult>(() => {}))
+    const retried = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await flushMicrotasks(20)
+    expect(getQueue()[0].status).toBe("failed")
+
+    const lookup = createDeferred<void>()
+    registryHold = lookup.promise
+    const later = await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c")
+    await flushMicrotasks(5)
+    registryHold = null
+    await retryTask(retried)
+    await flushMicrotasks(20)
+    lookup.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["a", "b"], ["a", "b"]])
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([
+      [retried, "processing"],
+      [later, "pending"],
+    ])
+  })
+
+  it("a merge that failed for good while the queue looked up its project does not run again (#35)", async () => {
+    mockExecuteMerge.mockRejectedValueOnce(new MergeReplyRejectedError("test"))
+    const lookup = createDeferred<void>()
+    registryHold = lookup.promise
+    const id = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await flushMicrotasks(5)
+    registryHold = null
+    resumeProcessing()
+    await flushMicrotasks(20)
+    lookup.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge).toHaveBeenCalledOnce()
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([[id, "failed"]])
+  })
 })
 
 describe("dedup-queue — pauseQueue / restoreQueue", () => {
@@ -579,6 +648,56 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
     await pauseQueue()
     await restoreQueue(TEST_ID_B, TEST_PATH_B)
     expect(getQueueSummary().total).toBe(0)
+  })
+
+  it.each([
+    // The project is no longer active, so the enqueue is refused.
+    ["a scheduled enqueue", () => enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c", { scheduled: true }).catch(() => "")],
+    ["the resume click", resumeProcessing],
+  ])("%s while a project switch saves the queue starts no merge (#35)", async (_label, trigger) => {
+    // A merge ends when aborted, which frees the project lock.
+    mockExecuteMerge.mockImplementation((_pp, _g, _slug, _llm, opts) =>
+      new Promise<MergeResult>((_resolve, reject) => {
+        opts!.signal!.addEventListener("abort", () => reject(new Error("aborted")))
+      }),
+    )
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await flushMicrotasks(5)
+    expect(mockExecuteMerge).toHaveBeenCalledOnce()
+
+    const save = createDeferred<void>()
+    mockWriteFile.mockImplementationOnce(() => save.promise)
+    const paused = pauseQueue()
+    await trigger()
+    await flushMicrotasks(20)
+    save.resolve()
+    await paused
+    await restoreQueue(TEST_ID_B, TEST_PATH_B)
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge).toHaveBeenCalledOnce()
+  })
+
+  it("a merge whose project lookup ends while a project switch saves the queue neither starts nor saves (#35)", async () => {
+    const lookup = createDeferred<void>()
+    registryHold = lookup.promise
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    await flushMicrotasks(5)
+
+    const save = createDeferred<void>()
+    mockWriteFile.mockImplementationOnce(() => save.promise)
+    const writesBefore = mockWriteFile.mock.calls.length
+    const paused = pauseQueue()
+    lookup.resolve()
+    await flushMicrotasks(20)
+    save.resolve()
+    await paused
+
+    expect(mockExecuteMerge).not.toHaveBeenCalled()
+    // Only the switch's own save, with the task left pending.
+    const writes = mockWriteFile.mock.calls.slice(writesBefore)
+    expect(writes).toHaveLength(1)
+    expect(writes[0][1]).toContain('"pending"')
   })
 })
 

@@ -154,9 +154,13 @@ Keep this list current. Merge conflicts can only come from these files.
   signal before the reply. A cancel starts the next merge at once; the
   cancelled merge's run, when it ends, leaves the queue alone and files
   no review item, so the next merge can still be cancelled and no third
-  starts beside it (#33). Upstream edits to the dedup queue, the dedup
-  merge, the ingest queue, the Maintenance screen or project open in
-  `App.tsx` need re-checking against this. Tests in
+  starts beside it (#33). A merge starts only if, once the queue has
+  looked its project up in the registry, it is still queued and pending
+  and no other merge has started; a project switch stops the old
+  project's queue before saving it, so no merge starts on the old
+  project during the switch (#35). Upstream edits to the dedup queue,
+  the dedup merge, the ingest queue, the Maintenance screen or project
+  open in `App.tsx` need re-checking against this. Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,
   `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-runner.test.ts`,
   `src/lib/dedup.test.ts` and
