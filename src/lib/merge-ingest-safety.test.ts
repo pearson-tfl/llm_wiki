@@ -145,19 +145,26 @@ async function bothQueuesIdle(): Promise<boolean> {
   return dedupQueue.getQueue().length === 0 && ingestQueue.getQueue().length === 0
 }
 
-/** Real time a wait allows, inside the test's own 5-second limit. */
-const WAIT_LIMIT_MS = 2_000
+/** Vitest's own limit on a test, which this file does not change. */
+const VITEST_TEST_LIMIT_MS = 5_000
+/** Time left after the deadline for a wait's error to reach the report. */
+const REPORT_SLACK_MS = 1_000
+/** Real time all the waits in one test share: 5,000 - 1,000 = 4,000 ms
+ *  (#59). */
+const WAIT_LIMIT_MS = VITEST_TEST_LIMIT_MS - REPORT_SLACK_MS
+/** When the running test's waits run out, set as each test starts. */
+let waitDeadline = 0
 
 /**
- * Wait until `predicate()` returns true, or throw once WAIT_LIMIT_MS of
- * real time has passed. The waits here are on real I/O, which under a
- * loaded suite can take more event-loop turns than a count allows (#44).
+ * Wait until `predicate()` returns true, or throw once the test's
+ * WAIT_LIMIT_MS of real time has passed, before vitest's own time-out
+ * (#59). The waits here are on real I/O, which under a loaded suite can
+ * take more event-loop turns than a count allows (#44).
  */
 async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + WAIT_LIMIT_MS
   while (!(await predicate())) {
-    if (Date.now() > deadline) {
-      throw new Error(`waitUntil: predicate never became true within ${WAIT_LIMIT_MS} ms`)
+    if (Date.now() > waitDeadline) {
+      throw new Error(`waitUntil: predicate never became true within the test's ${WAIT_LIMIT_MS} ms`)
     }
     await new Promise<void>((resolve) => setImmediate(resolve))
   }
@@ -207,6 +214,7 @@ beforeEach(async () => {
   dedupQueue.clearQueueState()
   await ingestQueue.restoreQueue(PROJECT_ID, tmp.path)
   await dedupQueue.restoreQueue(PROJECT_ID, tmp.path)
+  waitDeadline = Date.now() + WAIT_LIMIT_MS
 })
 
 afterEach(async () => {

@@ -78,8 +78,12 @@ function App() {
   async function hydrateProjectSideStores(proj: WikiProject): Promise<void> {
     try {
       const savedReview = await loadReviewItems(proj.path)
+      const { dismissStaleRestoreNotice } = await import("@/lib/dedup-queue")
       if (savedReview.length > 0 && isCurrentProject(proj)) {
         useReviewStore.getState().setItems(savedReview)
+        // A merge-queue time-out notice saved before this reopen goes if
+        // the queue has opened since (#59).
+        dismissStaleRestoreNotice(proj.id)
       }
     } catch (err) {
       console.warn("[startup] failed to load review items:", err)

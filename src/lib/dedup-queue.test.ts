@@ -1337,6 +1337,14 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
         expect(retryNotices()).toHaveLength(0)
       })
 
+      it("a reopen with no notice to dismiss leaves the review items as they were, so nothing is saved over them", async () => {
+        const before = useReviewStore.getState().items
+
+        await restoreQueue(TEST_ID_B, TEST_PATH_B)
+
+        expect(useReviewStore.getState().items).toBe(before)
+      })
+
       it("the state wipe dismisses the time-out notice", async () => {
         await cutOffRestoreOfB()
 
