@@ -36,6 +36,7 @@ import {
   pauseQueue,
   restoreQueue,
   resumeProcessing,
+  waitForTask,
 } from "./dedup-queue"
 import { executeMerge } from "./dedup-runner"
 import { readFile, writeFile } from "@/commands/fs"
@@ -429,6 +430,65 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
     expect(getQueue()).toHaveLength(0)
   })
 
+  it("runs a restored scheduled merge with no resume while a restored hand merge still waits", async () => {
+    const persisted = JSON.stringify([
+      {
+        id: "dedup-by-hand",
+        projectId: TEST_ID,
+        group: { slugs: ["hand-a", "hand-b"], confidence: "medium", reason: "x" },
+        canonicalSlug: "hand-a",
+        status: "pending",
+        addedAt: 1,
+        error: null,
+        retryCount: 0,
+      },
+      {
+        id: "dedup-scheduled",
+        projectId: TEST_ID,
+        group: { slugs: ["sched-a", "sched-b"], confidence: "high", reason: "x" },
+        canonicalSlug: "sched-a",
+        status: "processing",
+        addedAt: 2,
+        error: null,
+        retryCount: 0,
+        scheduled: true,
+      },
+      {
+        id: "dedup-scheduled-failed",
+        projectId: TEST_ID,
+        group: { slugs: ["gone-a", "gone-b"], confidence: "high", reason: "x" },
+        canonicalSlug: "gone-a",
+        status: "failed",
+        addedAt: 3,
+        error: "merge model failed",
+        retryCount: 3,
+        scheduled: true,
+      },
+    ])
+    mockReadFile.mockImplementation(async (path: string) =>
+      path.startsWith(TEST_PATH) ? persisted : Promise.reject(new Error("ENOENT")),
+    )
+    mockExecuteMerge.mockResolvedValue({
+      canonicalContent: "",
+      canonicalPath: "",
+      rewrites: [],
+      pagesToDelete: [],
+      backup: [],
+    })
+
+    await restoreQueue(TEST_ID, TEST_PATH)
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge).toHaveBeenCalledOnce()
+    expect(mockExecuteMerge.mock.calls[0][2]).toBe("sched-a")
+    // A scheduled merge that had failed for good stays failed.
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([
+      ["dedup-by-hand", "pending"],
+      ["dedup-scheduled-failed", "failed"],
+    ])
+    expect(getQueueSummary().restoredBacklogWaiting).toBe(true)
+  })
+
   it("does not leak tasks across project switch", async () => {
     mockExecuteMerge.mockImplementation(() => new Promise(() => {}))
 
@@ -438,5 +498,50 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
     await pauseQueue()
     await restoreQueue(TEST_ID_B, TEST_PATH_B)
     expect(getQueueSummary().total).toBe(0)
+  })
+})
+
+describe("dedup-queue — outcomes a scheduled run waits for", () => {
+  const merged = {
+    canonicalContent: "",
+    canonicalPath: "",
+    rewrites: [],
+    pagesToDelete: [],
+    backup: [],
+  }
+
+  it("reports done, and failed after the last retry", async () => {
+    mockExecuteMerge.mockImplementation(async (_pp, g) => {
+      if (g.slugs.includes("bad")) throw new Error("boom")
+      return merged
+    })
+
+    const ok = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a", { scheduled: true })
+    const bad = await enqueueMerge(TEST_ID, makeGroup(["bad", "worse"]), "bad", { scheduled: true })
+
+    expect(await waitForTask(ok)).toBe("done")
+    expect(await waitForTask(bad)).toBe("failed")
+  })
+
+  it("reports cancelled when the merge is cancelled by hand", async () => {
+    mockExecuteMerge.mockImplementation(() => new Promise(() => {}))
+    await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+    const id = await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c", { scheduled: true })
+    const outcome = waitForTask(id)
+
+    await cancelTask(id)
+
+    expect(await outcome).toBe("cancelled")
+  })
+
+  it("reports interrupted when the project is switched mid-merge", async () => {
+    mockExecuteMerge.mockImplementation(() => new Promise(() => {}))
+    const id = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a", { scheduled: true })
+    const outcome = waitForTask(id)
+    await flushMicrotasks(20)
+
+    await pauseQueue()
+
+    expect(await outcome).toBe("interrupted")
   })
 })

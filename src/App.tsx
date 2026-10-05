@@ -496,12 +496,21 @@ function App() {
       } catch (err) {
         console.error("Failed to restore ingest queue:", err)
       }
-      // Same handshake for the dedup-merge queue.
-      import("@/lib/dedup-queue").then(({ restoreQueue }) => {
-        restoreQueue(proj.id, proj.path).catch((err) =>
-          console.error("Failed to restore dedup queue:", err)
-        )
-      })
+      // Same handshake for the dedup-merge queue. The scheduled
+      // maintenance job enqueues merges onto it, so it starts once the
+      // queue is this project's.
+      import("@/lib/dedup-queue").then(({ restoreQueue }) =>
+        restoreQueue(proj.id, proj.path)
+      ).catch((err) =>
+        console.error("Failed to restore dedup queue:", err)
+      ).then(async () => {
+        // Started even when the restore failed: a run then records the
+        // failed enqueue in its run record.
+        const { startScheduledMaintenance } = await import("@/lib/scheduled-maintenance")
+        if (isCurrentProject(proj)) startScheduledMaintenance(proj)
+      }).catch((err) =>
+        console.error("Failed to start scheduled maintenance:", err)
+      )
       // Start project source watch if enabled
       import("@/lib/project-file-sync").then(async ({
         startAllProjectFileSync,
@@ -620,6 +629,9 @@ function App() {
     // Stop scheduled import before switching projects
     import("@/lib/scheduled-import").then(({ stopScheduledImport }) => {
       stopScheduledImport()
+    }).catch(() => {})
+    import("@/lib/scheduled-maintenance").then(({ stopScheduledMaintenance }) => {
+      stopScheduledMaintenance()
     }).catch(() => {})
 
     // Save current project's scheduled import config before clearing

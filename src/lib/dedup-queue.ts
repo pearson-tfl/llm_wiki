@@ -8,7 +8,8 @@
  *     half the rewrites silently disappear.
  *   - LLM calls take seconds; the user wants to queue several merges
  *     and walk away. The queue must survive app close so an
- *     interrupted merge resumes on next launch.
+ *     interrupted merge resumes on next launch – after a resume click
+ *     for a hand-queued merge, at once for a scheduled one.
  *
  * Mirrors `ingest-queue.ts` almost line-for-line: same lifecycle
  * (pause / restore on project switch), same persistence file shape,
@@ -35,7 +36,12 @@ export interface DedupTask {
   addedAt: number
   error: string | null
   retryCount: number
+  /** Enqueued by the scheduled maintenance job: runs without the resume
+   *  click, including after a restore. */
+  scheduled?: boolean
 }
+
+export type DedupTaskOutcome = "done" | "failed" | "cancelled" | "interrupted"
 
 // ── State ─────────────────────────────────────────────────────────────────
 
@@ -43,12 +49,51 @@ let queue: DedupTask[] = []
 let processing = false
 /** Pending tasks restored from disk on startup/project open. These are
  * intentionally hydrated without auto-running so opening a project does
- * not immediately spend LLM tokens on historical merge work. A fresh
+ * not immediately spend LLM tokens on historical merge work. Scheduled
+ * tasks are not held here: the maintenance job queued them to run. A fresh
  * enqueue for the same group promotes the restored task out of this set. */
 let restoredPausedTaskIds = new Set<string>()
 let currentProjectId = ""
 let currentProjectPath = ""
 let currentAbortController: AbortController | null = null
+/** Callers awaiting a scheduled task's outcome, and outcomes of scheduled
+ *  tasks that settled before anyone awaited them. */
+let outcomeWaiters = new Map<string, (outcome: DedupTaskOutcome) => void>()
+let settledOutcomes = new Map<string, DedupTaskOutcome>()
+
+function notifyScheduledOutcome(task: DedupTask, outcome: DedupTaskOutcome): void {
+  if (!task.scheduled) return
+  const waiter = outcomeWaiters.get(task.id)
+  if (waiter) {
+    outcomeWaiters.delete(task.id)
+    waiter(outcome)
+  } else {
+    settledOutcomes.set(task.id, outcome)
+  }
+}
+
+/** Resolve every waiting run as interrupted and forget unclaimed outcomes. */
+function interruptScheduledWaiters(): void {
+  for (const waiter of outcomeWaiters.values()) waiter("interrupted")
+  outcomeWaiters = new Map()
+  settledOutcomes = new Map()
+}
+
+/**
+ * Resolve when a scheduled task leaves the running queue: merged, failed
+ * for good, cancelled, or interrupted by a project switch.
+ */
+export function waitForTask(taskId: string): Promise<DedupTaskOutcome> {
+  const settled = settledOutcomes.get(taskId)
+  if (settled) {
+    settledOutcomes.delete(taskId)
+    return Promise.resolve(settled)
+  }
+  const task = queue.find((t) => t.id === taskId)
+  if (!task?.scheduled) return Promise.resolve("interrupted")
+  if (task.status === "failed") return Promise.resolve("failed")
+  return new Promise((resolve) => outcomeWaiters.set(taskId, resolve))
+}
 
 // ── Persistence ───────────────────────────────────────────────────────────
 
@@ -100,11 +145,13 @@ export function groupKey(slugs: readonly string[]): string {
  * project. Returns the new task's id. Idempotent on the same group:
  * if there's already a pending/processing/failed task for the same
  * slug-set, the existing id is returned instead of a duplicate.
+ * `scheduled` marks a merge the scheduled maintenance job enqueued.
  */
 export async function enqueueMerge(
   projectId: string,
   group: DuplicateGroup,
   canonicalSlug: string,
+  options: { scheduled?: boolean } = {},
 ): Promise<string> {
   if (!currentProjectId || currentProjectId !== projectId) {
     throw new Error(
@@ -121,6 +168,7 @@ export async function enqueueMerge(
   )
   if (existing) {
     restoredPausedTaskIds.delete(existing.id)
+    if (options.scheduled) existing.scheduled = true
     if (existing.status === "failed") {
       existing.status = "pending"
       existing.error = null
@@ -140,6 +188,7 @@ export async function enqueueMerge(
     addedAt: Date.now(),
     error: null,
     retryCount: 0,
+    ...(options.scheduled ? { scheduled: true } : {}),
   }
 
   queue.push(task)
@@ -192,6 +241,7 @@ export async function cancelTask(taskId: string): Promise<void> {
 
   restoredPausedTaskIds.delete(taskId)
   queue = queue.filter((t) => t.id !== taskId)
+  notifyScheduledOutcome(task, "cancelled")
   await saveQueue(currentProjectPath)
   processNext(currentProjectId)
 }
@@ -229,6 +279,7 @@ export function clearQueueState(): void {
   }
   queue = []
   restoredPausedTaskIds.clear()
+  interruptScheduledWaiters()
   processing = false
   currentProjectId = ""
   currentProjectPath = ""
@@ -261,14 +312,16 @@ export async function pauseQueue(): Promise<void> {
 
   queue = []
   restoredPausedTaskIds.clear()
+  interruptScheduledWaiters()
   currentProjectId = ""
   currentProjectPath = ""
 }
 
 /**
  * Load a project's queue from disk. Restored pending tasks are visible
- * but do not auto-run; a fresh enqueue for the same group promotes the
- * existing task, and retryTask can also resume one explicitly.
+ * but do not auto-run, except scheduled ones, which run at once; a fresh
+ * enqueue for the same group promotes the existing task, and retryTask
+ * can also resume one explicitly.
  */
 export async function restoreQueue(
   projectId: string,
@@ -303,7 +356,7 @@ export async function restoreQueue(
   queue = mine
   restoredPausedTaskIds = new Set(
     queue
-      .filter((t) => t.status === "pending")
+      .filter((t) => t.status === "pending" && !t.scheduled)
       .map((t) => t.id),
   )
   await saveQueue(pp)
@@ -312,9 +365,10 @@ export async function restoreQueue(
   const failed = queue.filter((t) => t.status === "failed").length
   if (pending > 0 || restored > 0) {
     console.log(
-      `[Dedup Queue] Restored: ${pending} pending paused for manual resume, ${failed} failed, ${restored} reset from interrupted`,
+      `[Dedup Queue] Restored: ${pending} pending (${restoredPausedTaskIds.size} paused for manual resume), ${failed} failed, ${restored} reset from interrupted`,
     )
   }
+  processNext(projectId)
 }
 
 // ── Processing ────────────────────────────────────────────────────────────
@@ -339,6 +393,7 @@ async function processNext(projectId: string): Promise<void> {
   if (!pp) {
     next.status = "failed"
     next.error = "Project not found in registry (was it deleted?)"
+    notifyScheduledOutcome(next, "failed")
     await saveQueue(currentProjectPath)
     processNext(projectId)
     return
@@ -355,6 +410,7 @@ async function processNext(projectId: string): Promise<void> {
     next.status = "failed"
     next.error = "LLM not configured — set API key in Settings"
     processing = false
+    notifyScheduledOutcome(next, "failed")
     await saveQueue(pp)
     return
   }
@@ -374,6 +430,7 @@ async function processNext(projectId: string): Promise<void> {
     currentAbortController = null
     restoredPausedTaskIds.delete(next.id)
     queue = queue.filter((t) => t.id !== next.id)
+    notifyScheduledOutcome(next, "done")
     await saveQueue(pp)
     // Tell the rest of the app the wiki tree changed.
     useWikiStore.getState().bumpDataVersion()
@@ -388,6 +445,7 @@ async function processNext(projectId: string): Promise<void> {
 
     if (next.retryCount >= MAX_RETRIES) {
       next.status = "failed"
+      notifyScheduledOutcome(next, "failed")
       console.log(
         `[Dedup Queue] Failed (${next.retryCount}x): ${next.group.slugs.join(",")} — ${message}`,
       )
