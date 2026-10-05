@@ -45,15 +45,15 @@ export interface HubRebuildOutcome {
 }
 
 /**
- * Process the hub-rebuild request, if one is present. `writeBlocker` is
- * asked after each model call, before the write; a non-null answer stops
- * the run with the request left in place. Returns null with no request.
+ * Process the hub-rebuild request, if one is present. `blocker` is asked
+ * before each hub and again before its write; a non-null answer stops the
+ * run with the request left in place. Returns null with no request.
  */
 export async function runHubRebuildRequest(
   pp: string,
   llmConfig: LlmConfig,
   today: string,
-  writeBlocker: () => Promise<MaintenanceSkipReason | null>,
+  blocker: () => Promise<MaintenanceSkipReason | null>,
 ): Promise<HubRebuildOutcome | null> {
   const requestPath = `${pp}/${REQUEST_PATH}`
   if (!(await fileExists(requestPath))) return null
@@ -65,7 +65,7 @@ export async function runHubRebuildRequest(
   const llm = buildDedupLlmCall(llmConfig, HUB_REBUILD_MAX_TOKENS)
   const results: HubResult[] = []
   for (const path of pages) {
-    const step = await rebuildHub(pp, path, llmConfig, today, llm, writeBlocker)
+    const step = await rebuildHub(pp, path, llmConfig, today, llm, blocker)
     if ("withheld" in step) {
       return { ...tally(results), withheld: step.withheld }
     }
@@ -110,9 +110,11 @@ async function rebuildHub(
   llmConfig: LlmConfig,
   today: string,
   llm: ReturnType<typeof buildDedupLlmCall>,
-  writeBlocker: () => Promise<MaintenanceSkipReason | null>,
+  blocker: () => Promise<MaintenanceSkipReason | null>,
 ): Promise<HubResult | { withheld: MaintenanceSkipReason }> {
   const failed = (reason: string): HubResult => ({ path, result: "failed", reason })
+  const before = await blocker()
+  if (before) return { withheld: before }
   const hubPath = `${pp}/${path}`
   if (!(await fileExists(hubPath))) return failed("page not found")
 
@@ -139,8 +141,8 @@ async function rebuildHub(
     }
 
     // The model call took a while: re-read what gates a write.
-    const withheld = await writeBlocker()
-    if (withheld) return { withheld }
+    const after = await blocker()
+    if (after) return { withheld: after }
 
     const linked = linkedSlugs(proposed.body)
     const sources = summaries

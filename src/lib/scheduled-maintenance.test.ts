@@ -812,6 +812,20 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(record?.error).toMatch(/hub-rebuild request/)
   })
 
+  it("does not start the rebuild when an ingest started during the duplicate scan", async () => {
+    await writeRequest([HUB])
+    mockDetect.mockImplementation(async () => {
+      ingestSummary.pending = 1
+      return []
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
+    expect(record).toMatchObject({ skipReason: "ingest-busy" })
+  })
+
   it("withholds the hub write when an ingest starts during the model call, and the request and the run stay due", async () => {
     await writeRequest([HUB])
     mockModel.mockImplementation(async () => {
