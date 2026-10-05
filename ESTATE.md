@@ -130,9 +130,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `{"pages": ["wiki/concepts/<hub>.md", ...]}`, written by an agent. For each
   hub it searches by meaning on the hub's title and text (200 pages deep),
   takes the source summaries (`wiki/sources/`) found, within the page
-  budget left after the
-  hub, and has one model call rewrite the hub as a synthesis linking the
-  summaries it draws on. The hub keeps its own front matter; its sources
+  budget left after the hub, and has one model call rewrite the hub as a
+  synthesis linking the summaries it draws on. The hub keeps its own front matter; its sources
   list gains the sources of each summary the rewrite links, and `updated`
   is stamped. The old page goes to `.llm-wiki/page-history/hub-rebuild-<time>/`
   before the write. A rewrite with no front matter, or whose body is under
