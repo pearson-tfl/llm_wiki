@@ -1,7 +1,8 @@
 /**
- * Scheduled maintenance job (#16 fix 2, ticket #18): a per-project timer
- * that runs the existing duplicate scan with no click. Started and stopped
- * the same way as scheduled import, for the open project only.
+ * Scheduled maintenance job (#16 fixes 2 and 3, tickets #18 and #19): a
+ * per-project timer that runs the existing duplicate scan, then any
+ * hub-rebuild request, with no click. Started and stopped the same way as
+ * scheduled import, for the open project only.
  */
 import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
@@ -23,6 +24,7 @@ import {
   savePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
+import { runHubRebuildRequest } from "@/lib/hub-rebuild"
 import { parseSources } from "@/lib/sources-merge"
 import type { DuplicateGroup } from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
@@ -56,6 +58,9 @@ export interface MaintenanceRunRecord {
   /** Merges that failed every retry; cancelled or interrupted ones are
    *  neither done nor failed. */
   mergesFailed?: number
+  /** Present when a hub-rebuild request was processed. */
+  hubsRebuilt?: string[]
+  hubsRejected?: string[]
   error?: string
 }
 
@@ -142,7 +147,26 @@ export async function runMaintenanceTick(
       if (record.mergesDone > 0) await sweepResolvedReviews(pp)
     }
 
-    // Later steps run here, after the duplicate scan.
+    // Hub rebuild, after the duplicate scan, unless the scan's merges
+    // were withheld: whatever withheld them still holds.
+    if (record.skipReason === null) {
+      try {
+        const hubs = await runHubRebuildRequest(
+          pp,
+          llmConfig,
+          new Date(startedAt).toISOString().slice(0, 10),
+          () => mergeBlocker(pp),
+        )
+        if (hubs) {
+          record.hubsRebuilt = hubs.rebuilt
+          record.hubsRejected = hubs.rejected
+          record.skipReason = hubs.withheld
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        record.error = record.error ? `${record.error}; ${message}` : message
+      }
+    }
   } catch (err) {
     record.error ??= err instanceof Error ? err.message : String(err)
   } finally {

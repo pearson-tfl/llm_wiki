@@ -135,6 +135,32 @@ Keep this list current. Merge conflicts can only come from these files.
   the vector store search fails, which ingest's candidate search uses so the
   failure reaches its log (#22). Without the option it returns no hits, as
   upstream does.
+- `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
+  `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
+  from a one-off request file (pearson-tfl/llm_wiki#19, fix 3 of #16). After
+  the duplicate scan, a due run reads `.llm-wiki/hub-rebuild-request.json`,
+  `{"pages": ["wiki/concepts/<hub>.md", ...]}`, written by an agent. For each
+  hub it searches by meaning on the hub's title and text (200 pages deep),
+  takes the source summaries (`wiki/sources/`) found, within the page budget
+  left after the hub, and has one model call rewrite the hub as a synthesis
+  linking the summaries it draws on. The hub keeps its own front matter; its
+  sources list gains the sources of each summary the rewrite links, and
+  `updated` is stamped. The old page goes to
+  `.llm-wiki/page-history/hub-rebuild-<time>/` before the write. A rewrite
+  with no front matter, or whose body is under 0.7 of the old body (the
+  same-path merge's ratio, now exported from `page-merge.ts` with its
+  front-matter setter), is rejected and the old page kept. Embeddings off, a
+  failed search, no summaries found, a missing page, a page with no front
+  matter or a path not under `wiki/` fail that hub with the reason, and the
+  next hub runs. The request is then moved to
+  `.llm-wiki/hub-rebuild-archive/<time>.json` with each hub's result. The
+  run's line in `maintenance-runs.jsonl` lists the hubs rebuilt and rejected.
+  The ingest queue and the switch are re-read before each hub and before each
+  write; a hub whose page changed on disk during its model call fails and is
+  kept as it is. If the queue or switch changed, the run stops with the
+  request in place, stays due, and redoes on the next run any hub it had
+  already rebuilt. An unreadable request is left in place and the run records
+  why. Tests in `src/lib/scheduled-maintenance.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

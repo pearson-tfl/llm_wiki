@@ -1,9 +1,10 @@
 /**
- * Seam 2 of #16 (ticket #18): the scheduled maintenance tick, called with
- * an explicit clock against a real temporary project. Detection and merge
- * are faked at the dedup runner boundary; the merge queue, the
- * not-duplicates list, the saved-groups file, the run record and the
- * review sweep are real.
+ * Seam 2 of #16 (tickets #18, #19): the scheduled maintenance tick, called
+ * with an explicit clock against a real temporary project. Detection, merge
+ * and the model call are faked at the dedup runner boundary, and the
+ * embedding search at its own; the merge queue, the not-duplicates list,
+ * the saved-groups file, the hub-rebuild request and archive, the page
+ * history, the run record and the review sweep are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
@@ -30,6 +31,13 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 vi.mock("@/lib/dedup-runner", () => ({
   runDuplicateDetection: vi.fn(),
   executeMerge: vi.fn(),
+  buildDedupLlmCall: vi.fn(),
+}))
+
+vi.mock("@/lib/embedding", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./embedding")>()),
+  searchByEmbedding: vi.fn(),
+  getLastEmbeddingError: vi.fn(),
 }))
 
 vi.mock("@/lib/ingest-queue", () => ({
@@ -40,7 +48,8 @@ vi.mock("@/lib/ingest-queue", () => ({
   },
 }))
 
-import { executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
+import { buildDedupLlmCall, executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
+import { getLastEmbeddingError, searchByEmbedding } from "@/lib/embedding"
 import {
   clearQueueState,
   getQueue,
@@ -67,6 +76,11 @@ import type { WikiProject } from "@/types/wiki"
 
 const mockDetect = vi.mocked(runDuplicateDetection)
 const mockMerge = vi.mocked(executeMerge)
+const mockBuildLlm = vi.mocked(buildDedupLlmCall)
+const mockSearch = vi.mocked(searchByEmbedding)
+const mockEmbeddingError = vi.mocked(getLastEmbeddingError)
+/** The model call the hub rebuild makes: (system, user) → reply. */
+const mockModel = vi.fn<(system: string, user: string) => Promise<string>>()
 
 const HOUR = 60 * 60 * 1000
 const T0 = Date.parse("2026-10-05T09:00:00Z")
@@ -122,6 +136,12 @@ beforeEach(async () => {
   mockDetect.mockReset()
   mockMerge.mockReset()
   mockDetect.mockResolvedValue([])
+  mockSearch.mockReset()
+  mockEmbeddingError.mockReset()
+  mockEmbeddingError.mockReturnValue(null)
+  mockModel.mockReset()
+  mockBuildLlm.mockReset()
+  mockBuildLlm.mockReturnValue((system, user) => mockModel(system, user))
 
   useWikiStore.getState().setProject(project)
   useWikiStore.getState().setLlmConfig({
@@ -131,6 +151,12 @@ beforeEach(async () => {
     ollamaUrl: "",
     customEndpoint: "",
     maxContextSize: 128000,
+  })
+  useWikiStore.getState().setEmbeddingConfig({
+    enabled: true,
+    endpoint: "http://embed.invalid",
+    apiKey: "",
+    model: "fake-embed",
   })
   useReviewStore.getState().setItems([])
 
@@ -549,5 +575,358 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     expect(record?.error).toMatch(/not-duplicates/)
     // Every group found is kept for a decision by hand.
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([group(["agent-loop", "agent-loops"], "high")])
+  })
+})
+
+describe("scheduled maintenance tick – hub rebuild", () => {
+  const HUB = "wiki/concepts/agent-harness-engineering.md"
+  const SECOND_HUB = "wiki/concepts/loop-engineering.md"
+  const REQUEST = ".llm-wiki/hub-rebuild-request.json"
+  /** The live Agent Harness Wiki vault's hub page, copied on 5 Oct 2026. */
+  const HUB_PAGE = [
+    "---",
+    "type: concept",
+    "title: Agent Harness Engineering",
+    "created: 2026-09-30",
+    "updated: 2026-09-30",
+    "tags: [agent-architecture, execution-environment]",
+    "related: [learn-agent-arch-ext-addyosmani-loop-engineering, loop-engineering]",
+    'sources: ["learn-agent-arch-ext-addyosmani-loop-engineering.md"]',
+    "---",
+    "# Agent Harness Engineering",
+    "",
+    "Agent harness engineering means designing the environment in which an individual agent operates.",
+    "",
+    "[[Learn-agent-arch-ext-addyosmani-loop-engineering]] uses this idea to distinguish two levels of design. The harness supports an individual agent. [[Loop-engineering]] coordinates recurring discovery, delegation, verification, and state recording around agent runs.",
+    "",
+    "The article links to a separate essay on harness engineering but does not develop its implementation here. This source therefore supports the distinction between levels, not a detailed specification of a harness.",
+    "",
+  ].join("\n")
+
+  function summary(title: string, rawSource: string, body: string): string {
+    return [
+      "---",
+      "type: source",
+      `title: ${title}`,
+      "created: 2026-09-29",
+      "updated: 2026-09-29",
+      "tags: [agents]",
+      "related: []",
+      `sources: [${JSON.stringify(rawSource)}]`,
+      "---",
+      `# ${title}`,
+      "",
+      body,
+      "",
+    ].join("\n")
+  }
+
+  /** A model reply: a whole page whose body is the old one plus `extra`. */
+  function rewrite(extra: string, title = "Agent Harness Engineering (rebuilt)"): string {
+    const oldBody = HUB_PAGE.split("---\n").slice(2).join("---\n")
+    return ["---", "type: concept", `title: ${title}`, "sources: []", "---", oldBody, extra, ""].join("\n")
+  }
+
+  async function archives(): Promise<Record<string, unknown>[]> {
+    const dir = `${tmp.path}/.llm-wiki/hub-rebuild-archive`
+    if (!(await realFs.fileExists(dir))) return []
+    const files = (await realFs.listDirectory(dir)).filter((f) => !f.is_dir)
+    return Promise.all(files.map(async (f) => JSON.parse(await readFileRaw(f.path))))
+  }
+
+  async function pageHistory(): Promise<string[]> {
+    const dir = `${tmp.path}/.llm-wiki/page-history`
+    if (!(await realFs.fileExists(dir))) return []
+    const walk = (nodes: Awaited<ReturnType<typeof realFs.listDirectory>>): string[] =>
+      nodes.flatMap((n) => (n.is_dir ? walk(n.children ?? []) : [n.path]))
+    return Promise.all(walk(await realFs.listDirectory(dir)).map(readFileRaw))
+  }
+
+  async function writeRequest(pages: string[]): Promise<void> {
+    await writeFileRaw(`${tmp.path}/${REQUEST}`, JSON.stringify({ pages }))
+  }
+
+  beforeEach(async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/${HUB}`, HUB_PAGE)
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/learn-agent-arch-ext-addyosmani-loop-engineering.md`,
+      summary("Loop Engineering", "learn-agent-arch-ext-addyosmani-loop-engineering.md", "Loop engineering wraps agent runs."),
+    )
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/harness-notes.md`,
+      summary("Harness Notes", "harness-notes.md", "A harness holds the tools, hooks and permissions an agent runs with."),
+    )
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/codex-howto-catalog.md`,
+      summary("Codex How-To Repository Catalog", "codex-howto-CATALOG.md", "A table of contents."),
+    )
+    await writeFileRaw(`${tmp.path}/wiki/concepts/loop-engineering.md`, page("Loop Engineering", "2026-09-30", ["x.md"]))
+    mockSearch.mockResolvedValue([
+      { id: "sources/learn-agent-arch-ext-addyosmani-loop-engineering", score: 0.9 },
+      { id: "concepts/loop-engineering", score: 0.85 },
+      { id: "sources/harness-notes", score: 0.8 },
+      { id: "sources/codex-howto-catalog", score: 0.5 },
+    ])
+  })
+
+  it("rewrites a requested hub from its source summaries, unions its sources, backs it up and archives the request", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(
+      rewrite(
+        "A harness holds the tools, hooks and permissions an agent runs with ([[sources/harness-notes|Harness Notes]]); loop engineering wraps those runs ([[Learn-agent-arch-ext-addyosmani-loop-engineering]]).",
+      ),
+    )
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    // The search used the hub's title and text.
+    const query = String(mockSearch.mock.calls[0][1])
+    expect(query).toContain("Agent Harness Engineering")
+    expect(query).toContain("designing the environment in which an individual agent operates")
+    // The model got the hub and every source summary found, and no other page.
+    const [, user] = mockModel.mock.calls[0]
+    expect(user).toContain("designing the environment in which an individual agent operates")
+    expect(user).toContain("wiki/sources/harness-notes.md")
+    expect(user).toContain("A harness holds the tools, hooks and permissions an agent runs with.")
+    expect(user).toContain("wiki/sources/learn-agent-arch-ext-addyosmani-loop-engineering.md")
+    expect(user).toContain("wiki/sources/codex-howto-catalog.md")
+    expect(user).not.toContain("Loop Engineering body.")
+
+    const rebuilt = await readFileRaw(`${tmp.path}/${HUB}`)
+    expect(rebuilt).toContain("[[sources/harness-notes|Harness Notes]]")
+    // The hub keeps its own front matter: title, type and created hold.
+    expect(rebuilt).toMatch(/^---\ntype: concept\ntitle: Agent Harness Engineering\ncreated: 2026-09-30\n/)
+    expect(rebuilt).toContain("updated: 2026-10-05")
+    // Its own source plus each linked summary's; the unlinked catalog is not drawn on.
+    expect(rebuilt).toContain(
+      'sources: ["learn-agent-arch-ext-addyosmani-loop-engineering.md", "harness-notes.md"]',
+    )
+    expect(await pageHistory()).toEqual([HUB_PAGE])
+
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(false)
+    expect(await archives()).toEqual([
+      expect.objectContaining({ pages: [HUB], results: [{ path: HUB, result: "rebuilt" }] }),
+    ])
+    expect(record).toMatchObject({ skipReason: null, hubsRebuilt: [HUB], hubsRejected: [] })
+    expect((await runRecords()).slice(-1)[0]).toMatchObject({ hubsRebuilt: [HUB], hubsRejected: [] })
+  })
+
+  it("rejects a rewrite whose body shrinks below the same-path merge's ratio, and one with no front matter, keeping the old page", async () => {
+    await writeFileRaw(`${tmp.path}/${SECOND_HUB}`, page("Loop Engineering", "2026-09-30", ["x.md"]))
+    await writeRequest([HUB, SECOND_HUB])
+    mockModel
+      .mockResolvedValueOnce("---\ntype: concept\ntitle: Agent Harness Engineering\n---\n# Agent Harness Engineering\n\nShort.\n")
+      .mockResolvedValueOnce("# Loop Engineering\n\nLoop Engineering body, rewritten at length with no front matter at all.\n")
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(await readFileRaw(`${tmp.path}/${SECOND_HUB}`)).toBe(page("Loop Engineering", "2026-09-30", ["x.md"]))
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "rejected", reason: expect.stringMatching(/shrank/) },
+      { path: SECOND_HUB, result: "rejected", reason: expect.stringMatching(/front matter/) },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [HUB, SECOND_HUB] })
+  })
+
+  it("counts a summary as drawn on for each live link form, and not for a link to another folder", async () => {
+    // Slugs from the live vault; the dotted-slug alias and folder link forms are
+    // the live ones, and the `wiki/sources/<slug>.md` form is made up to pin the stripping.
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md`,
+      summary("Selective Classification", "learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md", "Abstain when unsure."),
+    )
+    await writeFileRaw(
+      `${tmp.path}/wiki/sources/openclaw-docs-platforms--platforms-overview.md`,
+      summary("Platforms Overview", "openclaw-docs-platforms--platforms-overview.md", "Where the gateway runs."),
+    )
+    mockSearch.mockResolvedValue([
+      { id: "sources/learn-agent-arch-ext-arxiv-1705.08500-selective-classification", score: 0.9 },
+      { id: "sources/openclaw-docs-platforms--platforms-overview", score: 0.85 },
+      { id: "sources/harness-notes", score: 0.8 },
+    ])
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(
+      rewrite(
+        [
+          "An agent may abstain ([[learn-agent-arch-ext-arxiv-1705.08500-selective-classification|Selective classification]]).",
+          "The gateway runs on several platforms ([[wiki/sources/openclaw-docs-platforms--platforms-overview.md|Platforms]]).",
+          "See also [[concepts/harness-notes]].",
+        ].join(" "),
+      ),
+    )
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toContain(
+      'sources: ["learn-agent-arch-ext-addyosmani-loop-engineering.md", "learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md", "openclaw-docs-platforms--platforms-overview.md"]',
+    )
+  })
+
+  it("fails a hub with no front matter on disk, one the search finds no summaries for, and a path outside wiki/", async () => {
+    await writeFileRaw(`${tmp.path}/wiki/concepts/bare.md`, "# Bare\n\nNo front matter here.\n")
+    await writeFileRaw(`${tmp.path}/raw/outside.md`, HUB_PAGE)
+    await writeRequest(["wiki/concepts/bare.md", HUB, "raw/outside.md", "wiki/../raw/outside.md", "wiki/..\\raw\\outside.md"])
+    // The first search (for the hub) finds only a concept page.
+    mockSearch.mockResolvedValueOnce([{ id: "concepts/loop-engineering", score: 0.9 }])
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await readFileRaw(`${tmp.path}/raw/outside.md`)).toBe(HUB_PAGE)
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: "wiki/concepts/bare.md", result: "failed", reason: "the page has no front matter" },
+      { path: HUB, result: "failed", reason: "the search found no source summaries" },
+      { path: "raw/outside.md", result: "failed", reason: "not a wiki page path" },
+      { path: "wiki/../raw/outside.md", result: "failed", reason: "not a wiki page path" },
+      { path: "wiki/..\\raw\\outside.md", result: "failed", reason: "not a wiki page path" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
+  it("does nothing for hubs when no request file is present", async () => {
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockSearch).not.toHaveBeenCalled()
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await archives()).toEqual([])
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(record).toMatchObject({ skipReason: null })
+    expect(record).not.toHaveProperty("hubsRebuilt")
+  })
+
+  it("records a hub whose search fails as failed with the reason, and carries on with the next", async () => {
+    await writeFileRaw(`${tmp.path}/${SECOND_HUB}`, page("Loop Engineering", "2026-09-30", ["x.md"]))
+    await writeRequest([HUB, SECOND_HUB])
+    // searchByEmbedding answers a failed embedding fetch with no hits.
+    mockSearch.mockResolvedValueOnce([])
+    mockEmbeddingError.mockReturnValueOnce("Embedding API 503: upstream unavailable")
+    mockModel.mockResolvedValue(rewrite("Loop engineering wraps agent runs ([[learn-agent-arch-ext-addyosmani-loop-engineering]]).", "Loop Engineering"))
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(await readFileRaw(`${tmp.path}/${SECOND_HUB}`)).toContain("updated: 2026-10-05")
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: expect.stringContaining("Embedding API 503") },
+      { path: SECOND_HUB, result: "rebuilt" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [SECOND_HUB], hubsRejected: [] })
+  })
+
+  it("records every hub as failed when embeddings are off, and a hub that is not on disk", async () => {
+    await writeRequest([HUB, "wiki/concepts/merged-away.md"])
+    useWikiStore.getState().setEmbeddingConfig({ enabled: false, endpoint: "", apiKey: "", model: "" })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockSearch).not.toHaveBeenCalled()
+    expect(mockModel).not.toHaveBeenCalled()
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: expect.stringMatching(/embeddings are off/) },
+      { path: "wiki/concepts/merged-away.md", result: "failed", reason: expect.stringMatching(/not found/) },
+    ])
+    expect(record).toMatchObject({ skipReason: null, hubsRebuilt: [], hubsRejected: [] })
+  })
+
+  it("offers source summaries only within the text budget", async () => {
+    useWikiStore.getState().setLlmConfig({ ...useWikiStore.getState().llmConfig, maxContextSize: 10_000 })
+    for (const name of ["long-a", "long-b", "long-c"]) {
+      await writeFileRaw(`${tmp.path}/wiki/sources/${name}.md`, summary(name, `${name}.md`, `${name} `.repeat(400)))
+    }
+    mockSearch.mockResolvedValue([
+      { id: "sources/long-a", score: 0.9 },
+      { id: "sources/long-b", score: 0.8 },
+      { id: "sources/long-c", score: 0.7 },
+    ])
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("More."))
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    const [, user] = mockModel.mock.calls[0]
+    expect(user).toContain("wiki/sources/long-a.md")
+    expect(user).toContain("wiki/sources/long-b.md")
+    expect(user).not.toContain("wiki/sources/long-c.md")
+    // Page budget 5,000 characters, less the hub, for every summary together.
+    expect(user.length).toBeLessThan(5_000 + HUB_PAGE.length + 2_000)
+  })
+
+  it("leaves an unreadable request in place and records why", async () => {
+    await writeFileRaw(`${tmp.path}/${REQUEST}`, '{"pages": ["wiki/concepts/agent-harness-engin')
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
+    expect(await archives()).toEqual([])
+    expect(record?.error).toMatch(/hub-rebuild request/)
+  })
+
+  it("keeps a hub that changed on disk during the model call, and records it as failed", async () => {
+    await writeRequest([HUB])
+    const ingested = `${HUB_PAGE}\nA paragraph an ingest added while the model was working.\n`
+    mockModel.mockImplementation(async () => {
+      await writeFileRaw(`${tmp.path}/${HUB}`, ingested)
+      return rewrite("More.")
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(ingested)
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: "the page changed during the rebuild" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
+  it("does not start the rebuild when an ingest started during the duplicate scan", async () => {
+    await writeRequest([HUB])
+    mockDetect.mockImplementation(async () => {
+      ingestSummary.pending = 1
+      return []
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
+    expect(record).toMatchObject({ skipReason: "ingest-busy" })
+  })
+
+  it("leaves a request with no list of page paths in place and records why", async () => {
+    for (const body of ['{"hubs": []}', '{"pages": ["wiki/concepts/a.md", 7]}']) {
+      await writeFileRaw(`${tmp.path}/${REQUEST}`, body)
+      await setConfig(null)
+
+      const record = await runMaintenanceTick(project, { now: () => T0 })
+
+      expect(record?.error).toMatch(/no "pages" list of page paths/)
+      expect(await readFileRaw(`${tmp.path}/${REQUEST}`)).toBe(body)
+    }
+    expect(mockModel).not.toHaveBeenCalled()
+    expect(await archives()).toEqual([])
+  })
+
+  it("withholds the hub write when an ingest starts during the model call, and the request and the run stay due", async () => {
+    await writeRequest([HUB])
+    mockModel.mockImplementation(async () => {
+      ingestSummary.pending = 1
+      return rewrite("More.")
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
+    expect(await archives()).toEqual([])
+    expect(record).toMatchObject({ skipReason: "ingest-busy" })
+    expect((await loadScheduledMaintenanceConfig(tmp.path)).lastRun).toBeNull()
   })
 })
