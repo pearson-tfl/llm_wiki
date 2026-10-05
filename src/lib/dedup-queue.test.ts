@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { createDeferred, flushMicrotasks, type Deferred } from "@/test-helpers/deferred"
 
 vi.mock("./dedup-runner", () => ({
@@ -42,6 +42,8 @@ import {
   restoreQueue,
   resumeProcessing,
   waitForTask,
+  SWITCH_STEP_TIMEOUT_MS,
+  SwitchStepTimeoutError,
 } from "./dedup-queue"
 import { executeMerge } from "./dedup-runner"
 import { readFile, writeFile } from "@/commands/fs"
@@ -844,6 +846,127 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
     await Promise.all([restoreB, paused])
 
     expect(files.get(FILE_B)).toContain('"c"')
+  })
+
+  describe("time limits, and a restore over an open project (#43)", () => {
+    let consoleError: ReturnType<typeof vi.spyOn>
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      consoleError.mockRestore()
+    })
+
+    it("a pause whose save never settles fails alone at the time limit, logs a named error, and lets the restore behind it run", async () => {
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockWriteFile.mockImplementationOnce(() => new Promise(() => {}))
+
+      const paused = pauseQueue().catch((err: unknown) => err)
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+
+      expect(await paused).toBeInstanceOf(SwitchStepTimeoutError)
+      await restoreB
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("SwitchStepTimeoutError"))
+    })
+
+    it("a pause whose save settles just inside the time limit succeeds", async () => {
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      const save = holdNextWrite()
+
+      const paused = pauseQueue()
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS - 1)
+      save.resolve()
+
+      await expect(paused).resolves.toBeUndefined()
+      expect(files.get(FILE_A)).toContain('"a"')
+      expect(consoleError).not.toHaveBeenCalled()
+    })
+
+    it("a restore whose read never settles leaves no project open, and its late read changes nothing", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      const read = createDeferred<void>()
+      mockReadFile.mockImplementationOnce(async (path: string) => {
+        await read.promise
+        return files.get(path)!
+      })
+
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      const paused = pauseQueue()
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+
+      expect(await restoreB).toBeInstanceOf(SwitchStepTimeoutError)
+      await paused
+      // The pause behind it saved no empty queue over project B's file.
+      expect(files.get(FILE_B)).toContain('"c"')
+      read.resolve()
+      await flushMicrotasks(20)
+      expect(getQueue()).toHaveLength(0)
+      await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    })
+
+    it("a restore made while another project's merge runs cancels that merge and saves its project before loading", async () => {
+      await pauseQueue()
+      await pauseQueue()
+      // Project A's queue file holds a scheduled merge, which runs once A opens.
+      const [scheduledTask] = JSON.parse(queueFileWith(TEST_ID, ["a", "b"]))
+      files.set(FILE_A, JSON.stringify([{ ...scheduledTask, scheduled: true }]))
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      await restoreQueue(TEST_ID, TEST_PATH)
+      await vi.waitFor(() => expect(mockExecuteMerge).toHaveBeenCalledTimes(1))
+      const signal = mockExecuteMerge.mock.calls[0][4]!.signal!
+
+      await restoreQueue(TEST_ID_B, TEST_PATH_B)
+
+      expect(signal.aborted).toBe(true)
+      expect(JSON.parse(files.get(FILE_A)!)[0].status).toBe("pending")
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+    })
+
+    it("a restore whose project is no longer the one opening when its turn comes leaves the queue alone", async () => {
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      let opening = TEST_ID_B
+      const save = holdNextWrite()
+
+      const paused = pauseQueue()
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B, () => opening === TEST_ID_B)
+      // The user moved on before project B's restore had its turn.
+      opening = TEST_ID
+      save.resolve()
+      await Promise.all([paused, restoreB])
+
+      expect(getQueue()).toHaveLength(0)
+      await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    })
+
+    it("a restore whose project stops being the one opening while the open project saves loads nothing", async () => {
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      let opening = TEST_ID_B
+      const save = holdNextWrite()
+
+      const restoreB = restoreQueue(TEST_ID_B, TEST_PATH_B, () => opening === TEST_ID_B)
+      await flushMicrotasks(20)
+      opening = TEST_ID
+      save.resolve()
+      await restoreB
+
+      expect(files.get(FILE_A)).toContain('"a"')
+      expect(getQueue()).toHaveLength(0)
+      await expect(enqueueMerge(TEST_ID_B, makeGroup(["e", "f"]), "e")).rejects.toThrow("not the active project")
+    })
   })
 })
 

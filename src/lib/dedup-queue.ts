@@ -77,15 +77,52 @@ let settledOutcomes = new Map<string, DedupTaskOutcome>()
  *  save has landed (#39). */
 let switchStepInFlight: Promise<void> | null = null
 
-/** Run a pause or restore once the one in flight has finished, in call order. */
-async function oneSwitchStepAtATime(step: () => Promise<void>): Promise<void> {
+/** A pause or restore is at most one queue-file read and one write, which
+ *  take milliseconds; a step still running after this has hung (#43). */
+export const SWITCH_STEP_TIMEOUT_MS = 30_000
+
+export class SwitchStepTimeoutError extends Error {
+  name = "SwitchStepTimeoutError"
+}
+
+/**
+ * Run a pause or restore once the one in flight has finished. One step
+ * runs at a time, but not strictly in call order: a caller arriving
+ * between two steps can go before one already waiting. A step must never
+ * call `pauseQueue` or `restoreQueue` itself: it would wait for its own
+ * finish for ever.
+ *
+ * A step still running after SWITCH_STEP_TIMEOUT_MS fails alone (#43): no
+ * project is left open, its signal tells it to change nothing more when
+ * its read or write settles, and the steps behind it run.
+ */
+async function oneSwitchStepAtATime(
+  step: (abandoned: AbortSignal) => Promise<void>,
+): Promise<void> {
   // A step that failed is its own caller's error, not the next step's.
   while (switchStepInFlight) await switchStepInFlight.catch(() => {})
-  const run = step()
+  const abandon = new AbortController()
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeLimit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      abandon.abort()
+      stopActiveQueue()
+      reject(new SwitchStepTimeoutError(
+        `a project-switch pause or restore took over ${SWITCH_STEP_TIMEOUT_MS} ms; no project's merge queue is open`,
+      ))
+    }, SWITCH_STEP_TIMEOUT_MS)
+  })
+  const run = Promise.race([step(abandon.signal), timeLimit])
   switchStepInFlight = run
   try {
     await run
+  } catch (err) {
+    if (err instanceof SwitchStepTimeoutError) {
+      console.error(`[Dedup Queue] ${err.name}: ${err.message}`)
+    }
+    throw err
   } finally {
+    clearTimeout(timer)
     if (switchStepInFlight === run) switchStepInFlight = null
   }
 }
@@ -131,9 +168,12 @@ function queueFilePath(projectPath: string): string {
   return `${normalizePath(projectPath)}/.llm-wiki/dedup-queue.json`
 }
 
-async function saveQueue(projectPath: string): Promise<void> {
+async function saveQueue(
+  projectPath: string,
+  tasks: readonly DedupTask[] = queue,
+): Promise<void> {
   try {
-    const toSave = queue.filter((t) => t.status !== "done")
+    const toSave = tasks.filter((t) => t.status !== "done")
     await writeFile(queueFilePath(projectPath), JSON.stringify(toSave, null, 2))
   } catch {
     // non-critical
@@ -332,24 +372,28 @@ async function pauseActiveQueue(): Promise<void> {
   if (!currentProjectId || !currentProjectPath) return
 
   const pausedProjectPath = currentProjectPath
+  const pausedTasks = queue
 
+  // No merge may start while the save below runs (#35), and a save that
+  // settles after the step's time limit changes nothing in memory (#43).
+  stopActiveQueue()
+  for (const task of pausedTasks) {
+    if (task.status === "processing") {
+      task.status = "pending"
+    }
+  }
+  await saveQueue(pausedProjectPath, pausedTasks)
+}
+
+/** Stop the open project's merge and forget its queue, saving nothing. */
+function stopActiveQueue(): void {
   if (currentAbortController) {
     currentAbortController.abort()
     currentAbortController = null
   }
   processing = false
-
-  for (const task of queue) {
-    if (task.status === "processing") {
-      task.status = "pending"
-    }
-  }
-
-  // No merge may start while the save below runs (#35).
   currentProjectId = ""
   currentProjectPath = ""
-  await saveQueue(pausedProjectPath)
-
   queue = []
   restoredPausedTaskIds.clear()
   interruptScheduledWaiters()
@@ -361,30 +405,34 @@ async function pauseActiveQueue(): Promise<void> {
  * but do not auto-run, except scheduled ones, which run at once; a fresh
  * enqueue for the same group promotes the existing task, and retryTask
  * can also resume one explicitly. Waits for a pause or restore already in
- * flight.
+ * flight, then does nothing if `stillOpening` says the project is no
+ * longer the one being opened (#43). A project still open is paused
+ * first: its merge stopped and its queue saved.
  */
 export function restoreQueue(
   projectId: string,
   projectPath: string,
+  stillOpening: () => boolean = () => true,
 ): Promise<void> {
-  return oneSwitchStepAtATime(() => loadProjectQueue(projectId, projectPath))
+  return oneSwitchStepAtATime(async (abandoned) => {
+    if (!stillOpening()) return
+    await pauseActiveQueue()
+    if (abandoned.aborted || !stillOpening()) return
+    await loadProjectQueue(projectId, projectPath, abandoned)
+  })
 }
 
 async function loadProjectQueue(
   projectId: string,
   projectPath: string,
+  abandoned: AbortSignal,
 ): Promise<void> {
   const pp = normalizePath(projectPath)
-  queue = []
-  restoredPausedTaskIds.clear()
-  stopIngestWait()
-  processing = false
-  currentAbortController = null
   currentProjectId = projectId
   currentProjectPath = pp
 
   const saved = await loadQueue(pp, projectId)
-  if (saved.length === 0) return
+  if (abandoned.aborted || saved.length === 0) return
 
   const mine = saved.filter((t) => t.projectId === projectId)
   if (mine.length !== saved.length) {
@@ -408,6 +456,7 @@ async function loadProjectQueue(
       .map((t) => t.id),
   )
   await saveQueue(pp)
+  if (abandoned.aborted) return
 
   const pending = queue.filter((t) => t.status === "pending").length
   const failed = queue.filter((t) => t.status === "failed").length
