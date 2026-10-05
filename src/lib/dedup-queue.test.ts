@@ -1075,6 +1075,12 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
     })
 
     it("a pause's save that lands after its time limit leaves the reopened project's newer save on disk", async () => {
+      // The first run ends when the pause cancels it, freeing the write lock.
+      mockExecuteMerge.mockImplementationOnce((_pp, _group, _slug, _cfg, options) =>
+        new Promise((_, reject) => {
+          options!.signal!.addEventListener("abort", () => reject(new Error("cancelled")))
+        })
+      )
       await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a", { scheduled: true })
       await flushMicrotasks(20)
       const lateSave = holdNextWrite()
@@ -1149,7 +1155,7 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       await flushMicrotasks(20)
 
       // Project B's merge is still running, so the new one waits.
-      expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+      expect(getQueue().filter((t) => t.status === "processing")).toHaveLength(1)
     })
 
     it("a merge whose last save lands after its project is reopened leaves the reopened project's merge marked running", async () => {
@@ -1174,7 +1180,7 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       await enqueueMerge(TEST_ID, makeGroup(["e", "f"]), "e")
       await flushMicrotasks(20)
 
-      expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+      expect(getQueue().filter((t) => t.status === "processing")).toHaveLength(1)
     })
   })
 })
