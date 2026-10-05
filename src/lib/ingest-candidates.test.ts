@@ -25,7 +25,8 @@ vi.mock("./mineru", () => ({
 // The embedding search runs for real; the Tauri commands under it are faked.
 // A query's vector is its position in `searchQueries`, and the vector store
 // answers it with one chunk per page listed for that query in `searchHits`.
-// Either command can fail instead.
+// Either command can fail instead, rejecting with a string as a Tauri
+// command's error does.
 let searchHits: Record<string, Array<{ id: string; score: number }>> = {}
 let embeddingFetchError: string | null = null
 let vectorStoreError: string | null = null
@@ -38,11 +39,11 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "embedding_fetch") {
         searchQueries.push(String(args?.text))
-        if (embeddingFetchError) throw new Error(embeddingFetchError)
+        if (embeddingFetchError) throw embeddingFetchError
         return [searchQueries.length - 1]
       }
       if (cmd === "vector_search_chunks") {
-        if (vectorStoreError) throw new Error(vectorStoreError)
+        if (vectorStoreError) throw vectorStoreError
         const query = searchQueries[(args?.queryEmbedding as number[])[0]]
         return (searchHits[query] ?? []).map((hit) => ({
           chunk_id: `${hit.id}#0`,
@@ -311,7 +312,7 @@ describe("autoIngest offers existing pages before generation", () => {
   })
 
   it("still offers the exact-path candidate and records why when the vector store fails", async () => {
-    vectorStoreError = "Table 'wiki_chunks' was not found"
+    vectorStoreError = "Open table error: corrupt manifest"
     searchHits = { "OpenClaw Gateway": [{ id: "entities/openclaw", score: 0.9 }] }
 
     const written = await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
@@ -322,7 +323,7 @@ describe("autoIngest offers existing pages before generation", () => {
     expect(system).not.toContain('<existing-page path="wiki/entities/openclaw.md">')
     const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
     expect(log).toContain(
-      "Existing-page search skipped: search failed: vector store: Table 'wiki_chunks' was not found.",
+      "Existing-page search skipped: search failed: vector store: Open table error: corrupt manifest.",
     )
   })
 
