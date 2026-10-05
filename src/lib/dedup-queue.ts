@@ -321,14 +321,15 @@ export async function pauseQueue(): Promise<void> {
     }
   }
 
+  // No merge may start while the save below runs (#35).
+  currentProjectId = ""
+  currentProjectPath = ""
   await saveQueue(pausedProjectPath)
 
   queue = []
   restoredPausedTaskIds.clear()
   interruptScheduledWaiters()
   stopIngestWait()
-  currentProjectId = ""
-  currentProjectPath = ""
 }
 
 /**
@@ -435,7 +436,14 @@ async function processNext(projectId: string): Promise<void> {
 
   const registryPath = await getProjectPathById(projectId)
   const pp = registryPath ? normalizePath(registryPath) : ""
-  if (currentProjectId !== projectId) return
+  // A cancel or another run may have moved the queue on during the lookup
+  // (#35).
+  if (
+    currentProjectId !== projectId ||
+    processing ||
+    next.status !== "pending" ||
+    !queue.includes(next)
+  ) return
 
   if (!pp) {
     next.status = "failed"
