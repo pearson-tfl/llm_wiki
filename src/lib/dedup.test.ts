@@ -4,11 +4,13 @@ import {
   detectDuplicateGroups,
   parseDetectorResponse,
   mergeDuplicateGroup,
+  MergeReplyRejectedError,
   rewriteCrossReferences,
   rewriteIndexMd,
   type EntitySummary,
 } from "./dedup"
 import { parseFrontmatterArray } from "./sources-merge"
+import { parseFrontmatter } from "./frontmatter"
 
 const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`
 
@@ -537,5 +539,81 @@ describe("mergeDuplicateGroup", () => {
     // The backup content is the ORIGINAL, not the post-merge version
     const refBackup = result.backup.find((b) => b.path === "wiki/concepts/ref.md")
     expect(refBackup?.content).toBe(refOrig)
+  })
+
+  describe("checks the model's reply before anything is written", () => {
+    const canonicalBody = [
+      "## Overview",
+      "",
+      "Accumulibacter is a polyphosphate-accumulating organism found in EBPR plants.",
+      "It takes up volatile fatty acids under anaerobic conditions and stores them as PHA.",
+    ].join("\n")
+    const group = [
+      {
+        slug: "accumulibacter",
+        path: "wiki/entities/accumulibacter.md",
+        content: PAGE("type: entity\ntitle: Accumulibacter\nsources: [\"doc-A.pdf\"]", canonicalBody),
+      },
+      {
+        slug: "paos",
+        path: "wiki/entities/paos.md",
+        content: PAGE("type: entity\ntitle: PAOs\nsources: [\"doc-B.pdf\"]", "PAOs store phosphate."),
+      },
+    ]
+    const request = {
+      group,
+      canonicalSlug: "accumulibacter",
+      otherWikiPages: [
+        { path: "wiki/concepts/ebpr.md", content: PAGE("type: concept", "See [[paos]].") },
+      ],
+    }
+
+    async function rejection(reply: string): Promise<MergeReplyRejectedError> {
+      const err = await mergeDuplicateGroup(request, vi.fn().mockResolvedValue(reply), {
+        today: FIXED_TODAY,
+      }).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(MergeReplyRejectedError)
+      return err as MergeReplyRejectedError
+    }
+
+    it("rejects an empty reply", async () => {
+      expect((await rejection("")).message).toMatch(/empty/)
+      expect((await rejection("  \n\n ")).message).toMatch(/empty/)
+    })
+
+    it("rejects a reply with no frontmatter", async () => {
+      const err = await rejection(`${canonicalBody}\n\nPAOs store phosphate.`)
+      expect(err.message).toMatch(/frontmatter/)
+    })
+
+    it("rejects a reply whose frontmatter cannot be parsed", async () => {
+      const err = await rejection(`---\ntitle: [unclosed\n---\n\n${canonicalBody}`)
+      expect(err.message).toMatch(/frontmatter/)
+    })
+
+    it("rejects a reply much shorter than the canonical page", async () => {
+      const err = await rejection(PAGE("type: entity\ntitle: Accumulibacter", "A PAO."))
+      expect(err.message).toMatch(/shorter/)
+    })
+
+    it("accepts a reply at the shrink threshold and rejects one character under it", async () => {
+      // 70% of the longest page's body, the page merge's threshold.
+      const longest = parseFrontmatter(group[0].content).body.length
+      const atThreshold = Math.ceil(longest * 0.7)
+      const reply = (bodyLength: number) => {
+        const page = PAGE("type: entity\ntitle: Accumulibacter", "x".repeat(bodyLength))
+        const padding = bodyLength - parseFrontmatter(page).body.length
+        return PAGE("type: entity\ntitle: Accumulibacter", "x".repeat(bodyLength + padding))
+      }
+      expect(parseFrontmatter(reply(atThreshold)).body.length).toBe(atThreshold)
+
+      const result = await mergeDuplicateGroup(
+        request,
+        vi.fn().mockResolvedValue(reply(atThreshold)),
+        { today: FIXED_TODAY },
+      )
+      expect(result.canonicalPath).toBe("wiki/entities/accumulibacter.md")
+      expect((await rejection(reply(atThreshold - 1))).message).toMatch(/shorter/)
+    })
   })
 })

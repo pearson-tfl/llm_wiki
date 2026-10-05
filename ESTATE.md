@@ -107,7 +107,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/ingest-source-path-collision.test.ts` had its merge fake matched to
   the real merge prompt.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
-  `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/App.tsx`,
+  `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
+  `src/lib/page-merge.ts`, `src/lib/ingest-queue.ts`, `src/App.tsx`,
   `src/components/settings/sections/maintenance-section.tsx`,
   `src/i18n/{en,it,ru,zh}.json` – a scheduled
   maintenance job per wiki project runs the duplicate scan with no click
@@ -127,10 +128,26 @@ Keep this list current. Merge conflicts can only come from these files.
   hand-queued merges restored from disk still wait for it. Every group not
   queued for a merge is saved to `.llm-wiki/dedup-pending-groups.json`,
   which the Maintenance screen shows on open. After merges the review sweep closes stale duplicate items.
-  Each run appends a line to `.llm-wiki/maintenance-runs.jsonl`. Upstream
-  edits to the dedup queue, the Maintenance screen or project open in
-  `App.tsx` need re-checking against this. Tests in
-  `src/lib/scheduled-maintenance.test.ts` and `src/lib/dedup-queue.test.ts`.
+  Each run appends a line to `.llm-wiki/maintenance-runs.jsonl`.
+  Ingest and a duplicate merge never write at once (#24): the merge queue
+  starts no merge while ingest is active – a source processing, or pending
+  in a queue that is neither paused nor waiting on model settings
+  (`isIngestActive`, the only change to `ingest-queue.ts`) – and checks
+  again every 5 seconds, so it carries on with no click; a running merge
+  holds the project write lock every ingest write takes, from its first
+  read to its last write. A merge reply that is empty, has no readable
+  frontmatter, or keeps under 70% of the longest page's body (the
+  threshold `page-merge.ts` uses, shared from there) is rejected before
+  any write, by hand-queued and scheduled merges alike: no page changes,
+  none is deleted, the task stays failed with the reason and is not
+  retried, a duplicate item goes to the review queue, and the run record
+  counts it in `mergesRejected` with the group and reason in
+  `rejectedMerges`. Upstream edits to the dedup queue, the dedup merge,
+  the ingest queue, the Maintenance screen or project open in `App.tsx`
+  need re-checking against this. Tests in
+  `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,
+  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup.test.ts` and
+  `src/lib/ingest-queue.test.ts`.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
   failure reaches its log (#22). Without the option it returns no hits, as

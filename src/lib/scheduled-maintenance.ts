@@ -17,7 +17,7 @@ import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { useWikiStore } from "@/stores/wiki-store"
 import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
-import { enqueueMerge, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
+import { enqueueMerge, getQueue, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
   holdsNotDuplicate,
   readNotDuplicates,
@@ -55,12 +55,16 @@ export interface MaintenanceRunRecord {
   groupsFound?: { high: number; medium: number; low: number }
   mergesEnqueued?: number
   mergesDone?: number
-  /** Merges that failed every retry; cancelled or interrupted ones are
-   *  neither done nor failed. */
+  /** Merges that failed every retry; rejected, cancelled or interrupted
+   *  ones are not counted here. */
   mergesFailed?: number
   /** Present when a hub-rebuild request was processed. */
   hubsRebuilt?: string[]
   hubsRejected?: string[]
+  /** Merges whose model reply failed the check before any write, so no
+   *  page changed (#24). */
+  mergesRejected?: number
+  rejectedMerges?: { slugs: string[]; reason: string }[]
   error?: string
 }
 
@@ -104,6 +108,7 @@ export async function runMaintenanceTick(
   }
   let groups: DuplicateGroup[] = []
   const enqueued: DuplicateGroup[] = []
+  const taskIds: string[] = []
   const outcomes: Promise<DedupTaskOutcome>[] = []
   try {
     try {
@@ -129,6 +134,7 @@ export async function runMaintenanceTick(
         const canonical = await chooseCanonicalSlug(pp, group)
         const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
         enqueued.push(group)
+        taskIds.push(taskId)
         outcomes.push(waitForTask(taskId))
       }
     } catch (err) {
@@ -143,6 +149,15 @@ export async function runMaintenanceTick(
       const settled = await Promise.all(outcomes)
       record.mergesDone = settled.filter((o) => o === "done").length
       record.mergesFailed = settled.filter((o) => o === "failed").length
+      record.mergesRejected = settled.filter((o) => o === "rejected").length
+      if (record.mergesRejected > 0) {
+        // A rejected task stays on the queue, failed, with the reason.
+        record.rejectedMerges = taskIds.flatMap((id, i) =>
+          settled[i] === "rejected"
+            ? [{ slugs: enqueued[i].slugs, reason: getQueue().find((t) => t.id === id)?.error ?? "" }]
+            : [],
+        )
+      }
       // Close review items whose pages the merges removed.
       if (record.mergesDone > 0) await sweepResolvedReviews(pp)
     }

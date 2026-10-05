@@ -41,6 +41,7 @@ import {
 import { executeMerge } from "./dedup-runner"
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
+import { __resetProjectLocksForTesting } from "./project-mutex"
 import type { DuplicateGroup } from "./dedup"
 
 const mockExecuteMerge = vi.mocked(executeMerge)
@@ -57,6 +58,8 @@ async function activate(id: string = TEST_ID): Promise<void> {
 
 beforeEach(async () => {
   clearQueueState()
+  // A merge a test left hanging still holds the project write lock.
+  __resetProjectLocksForTesting()
   mockExecuteMerge.mockReset()
   mockReadFile.mockReset()
   mockWriteFile.mockReset()

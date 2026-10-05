@@ -40,7 +40,10 @@ vi.mock("@/lib/embedding", async (importOriginal) => ({
   getLastEmbeddingError: vi.fn(),
 }))
 
+// `busyFromRead` counts the tick's own reads of the summary. The merge
+// queue asks `isIngestActive`, which sees only `pending` and `processing`.
 vi.mock("@/lib/ingest-queue", () => ({
+  isIngestActive: () => ingestSummary.pending + ingestSummary.processing > 0,
   getQueueSummary: () => {
     ingestSummary.reads += 1
     const busy = ingestSummary.reads >= ingestSummary.busyFromRead ? 1 : 0
@@ -71,7 +74,7 @@ import {
 } from "./scheduled-maintenance"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
-import type { DuplicateGroup } from "./dedup"
+import { MergeReplyRejectedError, type DuplicateGroup } from "./dedup"
 import type { WikiProject } from "@/types/wiki"
 
 const mockDetect = vi.mocked(runDuplicateDetection)
@@ -296,6 +299,42 @@ describe("scheduled maintenance tick – duplicate scan", () => {
     // Only the failed merge is left on the queue.
     expect(getQueue().map((t) => [t.canonicalSlug, t.status])).toEqual([["seat-one", "failed"]])
   })
+
+  it("records a merge whose reply was rejected, apart from the merges that failed", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["a.md", "b.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/seat-one.md`, page("Seat", "2026-10-02", ["g.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/seat-two.md`, page("Seats", "2026-10-03", ["h.md"]))
+    mockDetect.mockResolvedValue([
+      group(["agent-loop", "agent-loops"], "high"),
+      group(["seat-one", "seat-two"], "high"),
+    ])
+    mergeOnDisk()
+    const merge = mockMerge.getMockImplementation()!
+    mockMerge.mockImplementation(async (...args) => {
+      if (args[1].slugs.includes("seat-one")) throw new MergeReplyRejectedError("the model's reply was empty")
+      return merge(...args)
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record).toMatchObject({
+      mergesEnqueued: 2,
+      mergesDone: 1,
+      mergesFailed: 0,
+      mergesRejected: 1,
+      rejectedMerges: [
+        { slugs: ["seat-one", "seat-two"], reason: "Merge reply rejected: the model's reply was empty" },
+      ],
+    })
+    expect((await runRecords())[0]).toMatchObject({ mergesRejected: 1 })
+    // Not retried: the model is not asked again for the same group.
+    expect(mockMerge.mock.calls.filter((c) => c[1].slugs.includes("seat-one"))).toHaveLength(1)
+    expect(useReviewStore.getState().items).toMatchObject([
+      { type: "duplicate", title: "Duplicate merge rejected: seat-one, seat-two", resolved: false },
+    ])
+  })
 })
 
 describe("scheduled maintenance tick – canonical page edge cases", () => {
@@ -420,6 +459,7 @@ describe("scheduled maintenance tick – after merges", () => {
       mergesEnqueued: 0,
       mergesDone: 0,
       mergesFailed: 0,
+      mergesRejected: 0,
     })
     expect(records[1].startedAt).toBe("2026-10-06T10:00:00.000Z")
   })

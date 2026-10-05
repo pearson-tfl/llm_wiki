@@ -715,6 +715,17 @@ export function isQueuePaused(): boolean {
 }
 
 /**
+ * Whether ingest is writing, or about to: a run is in flight, or a task is
+ * pending in a queue that will start it. A paused queue, or one blocked on
+ * model settings, starts nothing. The duplicate-merge queue starts no
+ * merge while this holds (pearson-tfl/llm_wiki#24).
+ */
+export function isIngestActive(): boolean {
+  if (activeRuns.size > 0) return true
+  return !paused && !blockedOnLlmConfig && queue.some((t) => t.status === "pending")
+}
+
+/**
  * Get current queue state.
  */
 export function getQueue(): readonly IngestTask[] {

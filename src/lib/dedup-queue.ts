@@ -14,7 +14,12 @@
  * Mirrors `ingest-queue.ts` almost line-for-line: same lifecycle
  * (pause / restore on project switch), same persistence file shape,
  * same retry-up-to-3 policy, same registry-based path resolution so
- * a relocated project still finds its tasks.
+ * a relocated project still finds its tasks. A merge reply that fails
+ * its check is not retried.
+ *
+ * Merges and ingest never write at once (#24): no merge starts while
+ * ingest is active, and a running merge holds the project write lock
+ * that every ingest write takes.
  */
 import { readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -23,7 +28,10 @@ import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { executeMerge } from "@/lib/dedup-runner"
-import type { DuplicateGroup } from "@/lib/dedup"
+import { MergeReplyRejectedError, type DuplicateGroup } from "@/lib/dedup"
+import { withProjectLock } from "@/lib/project-mutex"
+import { isIngestActive } from "@/lib/ingest-queue"
+import { useReviewStore } from "@/stores/review-store"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -41,7 +49,7 @@ export interface DedupTask {
   scheduled?: boolean
 }
 
-export type DedupTaskOutcome = "done" | "failed" | "cancelled" | "interrupted"
+export type DedupTaskOutcome = "done" | "failed" | "rejected" | "cancelled" | "interrupted"
 
 // ── State ─────────────────────────────────────────────────────────────────
 
@@ -56,6 +64,8 @@ let restoredPausedTaskIds = new Set<string>()
 let currentProjectId = ""
 let currentProjectPath = ""
 let currentAbortController: AbortController | null = null
+/** Set while a merge waits for ingest to go idle; fires the next check. */
+let ingestWaitTimer: ReturnType<typeof setTimeout> | null = null
 /** Callers awaiting a scheduled task's outcome, and outcomes of scheduled
  *  tasks that settled before anyone awaited them. */
 let outcomeWaiters = new Map<string, (outcome: DedupTaskOutcome) => void>()
@@ -81,7 +91,8 @@ function interruptScheduledWaiters(): void {
 
 /**
  * Resolve when a scheduled task leaves the running queue: merged, failed
- * for good, cancelled, or interrupted by a project switch.
+ * for good, its merge reply rejected, cancelled, or interrupted by a
+ * project switch.
  */
 export function waitForTask(taskId: string): Promise<DedupTaskOutcome> {
   const settled = settledOutcomes.get(taskId)
@@ -280,6 +291,7 @@ export function clearQueueState(): void {
   queue = []
   restoredPausedTaskIds.clear()
   interruptScheduledWaiters()
+  stopIngestWait()
   processing = false
   currentProjectId = ""
   currentProjectPath = ""
@@ -313,6 +325,7 @@ export async function pauseQueue(): Promise<void> {
   queue = []
   restoredPausedTaskIds.clear()
   interruptScheduledWaiters()
+  stopIngestWait()
   currentProjectId = ""
   currentProjectPath = ""
 }
@@ -330,6 +343,7 @@ export async function restoreQueue(
   const pp = normalizePath(projectPath)
   queue = []
   restoredPausedTaskIds.clear()
+  stopIngestWait()
   processing = false
   currentAbortController = null
   currentProjectId = projectId
@@ -374,6 +388,33 @@ export async function restoreQueue(
 // ── Processing ────────────────────────────────────────────────────────────
 
 const MAX_RETRIES = 3
+/** How often a merge held back by ingest checks whether ingest is idle. */
+const INGEST_IDLE_CHECK_MS = 5_000
+
+/** Check again once INGEST_IDLE_CHECK_MS has passed, with no click. */
+function waitForIngestIdle(projectId: string): void {
+  if (ingestWaitTimer) return
+  ingestWaitTimer = setTimeout(() => {
+    ingestWaitTimer = null
+    processNext(projectId)
+  }, INGEST_IDLE_CHECK_MS)
+}
+
+function stopIngestWait(): void {
+  if (ingestWaitTimer) clearTimeout(ingestWaitTimer)
+  ingestWaitTimer = null
+}
+
+/** Tell the user, in the review queue, that a merge was refused. */
+function recordRejection(task: DedupTask, reason: string): void {
+  useReviewStore.getState().addItem({
+    type: "duplicate",
+    title: `Duplicate merge rejected: ${task.group.slugs.join(", ")}`,
+    description: `${reason}. Every page was left as it was and none was deleted. Retry the merge from the Maintenance screen, or merge the pages by hand.`,
+    affectedPages: task.group.slugs.map((slug) => `${slug}.md`),
+    options: [{ label: "Skip", action: "Skip" }],
+  })
+}
 
 async function processNext(projectId: string): Promise<void> {
   if (processing) return
@@ -385,6 +426,11 @@ async function processNext(projectId: string): Promise<void> {
     !restoredPausedTaskIds.has(t.id)
   )
   if (!next) return
+  // A merge never starts while ingest is active (#24).
+  if (isIngestActive()) {
+    waitForIngestIdle(projectId)
+    return
+  }
 
   const registryPath = await getProjectPathById(projectId)
   const pp = registryPath ? normalizePath(registryPath) : ""
@@ -421,11 +467,26 @@ async function processNext(projectId: string): Promise<void> {
 
   currentAbortController = new AbortController()
 
+  const signal = currentAbortController.signal
   try {
-    await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, {
-      signal: currentAbortController.signal,
+    // The merge holds the project write lock from its first read to its
+    // last write, so an ingest that reaches its write meanwhile waits for
+    // it. Ingest may have started during the waits above: re-check once
+    // the lock is held, and hand the turn back if it has.
+    const merged = await withProjectLock(pp, async () => {
+      if (isIngestActive()) return false
+      await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
+      return true
     })
     if (currentProjectId !== projectId) return
+    if (!merged) {
+      currentAbortController = null
+      next.status = "pending"
+      processing = false
+      await saveQueue(pp)
+      waitForIngestIdle(projectId)
+      return
+    }
 
     currentAbortController = null
     restoredPausedTaskIds.delete(next.id)
@@ -443,7 +504,15 @@ async function processNext(projectId: string): Promise<void> {
     next.retryCount++
     next.error = message
 
-    if (next.retryCount >= MAX_RETRIES) {
+    if (err instanceof MergeReplyRejectedError) {
+      // Final: an automatic retry would re-spend the model on the same
+      // group with no one watching. A retry by hand starts it again.
+      next.status = "failed"
+      // A cancelled task has left the queue: its cut-off reply is no news.
+      if (queue.includes(next)) recordRejection(next, message)
+      notifyScheduledOutcome(next, "rejected")
+      console.log(`[Dedup Queue] Rejected: ${next.group.slugs.join(",")} — ${message}`)
+    } else if (next.retryCount >= MAX_RETRIES) {
       next.status = "failed"
       notifyScheduledOutcome(next, "failed")
       console.log(
