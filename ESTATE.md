@@ -150,8 +150,9 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/ingest-queue.test.ts`.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
-  failure reaches its log (#22). Without the option it returns no hits, as
-  upstream does.
+  failure reaches its log (#22), and the hub rebuild's search uses so the
+  failure is that hub's reason (#27). Without the option it returns no hits,
+  as upstream does.
 - `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
   `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
   from a one-off request file (pearson-tfl/llm_wiki#19, fix 3 of #16). After
@@ -167,17 +168,22 @@ Keep this list current. Merge conflicts can only come from these files.
   with no front matter, or whose body is under 0.7 of the old body (the
   same-path merge's ratio, now exported from `page-merge.ts` with its
   front-matter setter), is rejected and the old page kept. Embeddings off, a
-  failed search, no summaries found, a missing page, a page with no front
-  matter or a path not under `wiki/` fail that hub with the reason, and the
-  next hub runs. The request is then moved to
+  failed search (the embedding fetch, or the vector store, named as
+  `search failed: vector store: …`), no summaries found, a missing page, a
+  page with no front matter or a path not under `wiki/` fail that hub with
+  the reason, and the next hub runs. The request is then moved to
   `.llm-wiki/hub-rebuild-archive/<time>.json` with each hub's result. The
   run's line in `maintenance-runs.jsonl` lists the hubs rebuilt and rejected.
-  The ingest queue and the switch are re-read before each hub and before each
-  write; a hub whose page changed on disk during its model call fails and is
-  kept as it is. If the queue or switch changed, the run stops with the
-  request in place, stays due, and redoes on the next run any hub it had
-  already rebuilt. An unreadable request is left in place and the run records
-  why. Tests in `src/lib/scheduled-maintenance.test.ts`.
+  Ingest activity (`isIngestActive`, as the merge queue reads it, so a paused
+  queue's pending tasks do not hold the run back) and the switch are read at
+  the run's start and re-read before each hub and before each write. The
+  final read, backup and write of each hub hold the project write lock every
+  ingest write and merge takes (#27), and the re-read before the write is made
+  once the lock is held; a hub whose page changed on disk during its model
+  call fails and is kept as it is. If ingest or the switch changed, the run
+  stops with the request in place, stays due, and redoes on the next run any
+  hub it had already rebuilt. An unreadable request is left in place and the
+  run records why. Tests in `src/lib/scheduled-maintenance.test.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain

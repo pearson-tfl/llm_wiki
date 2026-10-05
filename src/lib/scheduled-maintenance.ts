@@ -16,7 +16,7 @@ import { sweepResolvedReviews } from "@/lib/sweep-reviews"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { useWikiStore } from "@/stores/wiki-store"
-import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
+import { isIngestActive } from "@/lib/ingest-queue"
 import { enqueueMerge, getQueue, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
   holdsNotDuplicate,
@@ -200,21 +200,16 @@ export async function runMaintenanceTick(
   return appendRunRecord(pp, record)
 }
 
-function ingestBusy(): boolean {
-  const ingest = getIngestQueueSummary()
-  return ingest.pending + ingest.processing > 0
-}
-
 function startBlocker(llmConfig: LlmConfig): MaintenanceSkipReason | null {
   if (tickRunning) return "previous-tick-running"
-  if (ingestBusy()) return "ingest-busy"
+  if (isIngestActive()) return "ingest-busy"
   if (!hasUsableLlm(llmConfig)) return "no-model"
   return null
 }
 
 async function mergeBlocker(pp: string): Promise<MaintenanceSkipReason | null> {
   if (!(await loadScheduledMaintenanceConfig(pp)).enabled) return "switched-off"
-  return ingestBusy() ? "ingest-busy" : null
+  return isIngestActive() ? "ingest-busy" : null
 }
 
 /** Start the job for the opened project: an overdue run starts now. */

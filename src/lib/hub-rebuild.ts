@@ -10,6 +10,7 @@ import { buildDedupLlmCall } from "@/lib/dedup-runner"
 import { computeContextBudget } from "@/lib/context-budget"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { BODY_SHRINK_THRESHOLD, setFrontmatterScalar } from "@/lib/page-merge"
+import { withProjectLock } from "@/lib/project-mutex"
 import { mergeSourcesLists, parseSources, writeSources } from "@/lib/sources-merge"
 import type { MaintenanceSkipReason } from "@/lib/scheduled-maintenance"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
@@ -145,13 +146,6 @@ async function rebuildHub(
       }
     }
 
-    // The model call took a while: re-read what gates a write.
-    const after = await blocker()
-    if (after) return { withheld: after }
-    // An ingest that started and finished during the model call is not
-    // seen by the gates; its write must not be lost to a stale read.
-    if ((await readFile(hubPath)) !== current) return failed("the page changed during the rebuild")
-
     const linked = linkedSlugs(proposed.body)
     const sources = summaries
       .filter((s) => linked.has(s.slug))
@@ -163,9 +157,21 @@ async function rebuildHub(
       today,
     )
 
-    await writeFile(`${pp}/.llm-wiki/page-history/hub-rebuild-${fileStamp()}/${path.replace(/[/\\]/g, "_")}`, current)
-    await writeFile(hubPath, rebuilt)
-    return { path, result: "rebuilt" }
+    // The final read, backup and write hold the project write lock every
+    // ingest write and merge takes, so no other write lands between them.
+    return await withProjectLock(pp, async () => {
+      // The model call and the wait for the lock took a while: re-read
+      // what gates a write.
+      const after = await blocker()
+      if (after) return { withheld: after }
+      // An ingest that started and finished during the model call is not
+      // seen by the gates; its write must not be lost to a stale read.
+      if ((await readFile(hubPath)) !== current) return failed("the page changed during the rebuild")
+
+      await writeFile(`${pp}/.llm-wiki/page-history/hub-rebuild-${fileStamp()}/${path.replace(/[/\\]/g, "_")}`, current)
+      await writeFile(hubPath, rebuilt)
+      return { path, result: "rebuilt" }
+    })
   } catch (err) {
     return failed(err instanceof Error ? err.message : String(err))
   }
@@ -186,7 +192,11 @@ async function findSummaries(pp: string, hub: string, llmConfig: LlmConfig): Pro
   const query = `${String(frontmatter?.title ?? "")}\n\n${body.trim()}`.slice(0, HUB_QUERY_MAX_CHARS)
 
   const { searchByEmbedding, getLastEmbeddingError } = await import("@/lib/embedding")
-  const hits = await searchByEmbedding(pp, query, embCfg, HUB_SEARCH_TOP_K)
+  const hits = await searchByEmbedding(pp, query, embCfg, HUB_SEARCH_TOP_K, { throwOnStoreError: true }).catch(
+    (err) => {
+      throw new Error(`search failed: ${err instanceof Error ? err.message : String(err)}`)
+    },
+  )
   // searchByEmbedding answers a failed embedding fetch with no hits.
   const fetchError = hits.length === 0 ? getLastEmbeddingError() : null
   if (fetchError) throw new Error(`search failed: ${fetchError}`)

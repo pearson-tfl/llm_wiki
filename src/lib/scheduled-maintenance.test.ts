@@ -4,20 +4,26 @@
  * and the model call are faked at the dedup runner boundary, and the
  * embedding search at its own; the merge queue, the not-duplicates list,
  * the saved-groups file, the hub-rebuild request and archive, the page
- * history, the run record and the review sweep are real.
+ * history, the project lock, the run record and the review sweep are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { createDeferred, waitFor } from "@/test-helpers/deferred"
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
-const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0, busyFromRead: Infinity, reads: 0 }))
+const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0, paused: false }))
+/** When set, a read of the maintenance setting waits on it first, so a
+ *  test can order the run's gate after a step of the merge queue. */
+const settingRead = vi.hoisted(() => ({ hold: null as (() => Promise<void>) | null }))
 
 vi.mock("@/commands/fs", () => realFs)
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn(async () => ({
-    get: async <T>(key: string) => storage.get(key) as T | undefined,
+    get: async <T>(key: string) => {
+      if (key.startsWith("scheduledMaintenanceConfig:")) await settingRead.hold?.()
+      return storage.get(key) as T | undefined
+    },
     set: async (key: string, value: unknown) => {
       storage.set(key, value)
     },
@@ -40,19 +46,22 @@ vi.mock("@/lib/embedding", async (importOriginal) => ({
   getLastEmbeddingError: vi.fn(),
 }))
 
-// `busyFromRead` counts the tick's own reads of the summary. The merge
-// queue asks `isIngestActive`, which sees only `pending` and `processing`.
+// Like the real ones: `isIngestActive` does not count tasks pending in a
+// paused queue, which start nothing; `getQueueSummary` counts every task.
 vi.mock("@/lib/ingest-queue", () => ({
-  isIngestActive: () => ingestSummary.pending + ingestSummary.processing > 0,
-  getQueueSummary: () => {
-    ingestSummary.reads += 1
-    const busy = ingestSummary.reads >= ingestSummary.busyFromRead ? 1 : 0
-    return { pending: ingestSummary.pending + busy, processing: ingestSummary.processing }
-  },
+  isIngestActive: () => ingestSummary.processing > 0 || (!ingestSummary.paused && ingestSummary.pending > 0),
+  getQueueSummary: () => ({ pending: ingestSummary.pending, processing: ingestSummary.processing }),
 }))
+
+// The real lock, watched so a test can see the rebuild ask for it.
+vi.mock("@/lib/project-mutex", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./project-mutex")>()
+  return { ...real, withProjectLock: vi.fn(real.withProjectLock) }
+})
 
 import { buildDedupLlmCall, executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
 import { getLastEmbeddingError, searchByEmbedding } from "@/lib/embedding"
+import { withProjectLock } from "@/lib/project-mutex"
 import {
   clearQueueState,
   getQueue,
@@ -82,6 +91,7 @@ const mockMerge = vi.mocked(executeMerge)
 const mockBuildLlm = vi.mocked(buildDedupLlmCall)
 const mockSearch = vi.mocked(searchByEmbedding)
 const mockEmbeddingError = vi.mocked(getLastEmbeddingError)
+const mockLock = vi.mocked(withProjectLock)
 /** The model call the hub rebuild makes: (system, user) → reply. */
 const mockModel = vi.fn<(system: string, user: string) => Promise<string>>()
 
@@ -134,8 +144,9 @@ beforeEach(async () => {
   })
   ingestSummary.pending = 0
   ingestSummary.processing = 0
-  ingestSummary.busyFromRead = Infinity
-  ingestSummary.reads = 0
+  ingestSummary.paused = false
+  settingRead.hold = null
+  mockLock.mockClear()
   mockDetect.mockReset()
   mockMerge.mockReset()
   mockDetect.mockResolvedValue([])
@@ -571,13 +582,21 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     await setConfig(null)
     await writeFileRaw(`${tmp.path}/wiki/concepts/hook-a.md`, page("Hook", "2026-09-01", ["c.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/hook-b.md`, page("Hooks", "2026-10-01", ["d.md"]))
-    // Reads: 1 at the start, 2 before the first merge, 3 before the second.
-    ingestSummary.busyFromRead = 3
     mockDetect.mockResolvedValue([
       group(["agent-loop", "agent-loops"], "high"),
       group(["hook-a", "hook-b"], "high"),
     ])
-    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+    // An ingest starts while the first merge runs, and the run's check
+    // before the second group waits until that merge has started.
+    const firstMergeStarted = createDeferred()
+    mockMerge.mockImplementation(async () => {
+      ingestSummary.pending = 1
+      firstMergeStarted.resolve()
+      return { canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] }
+    })
+    settingRead.hold = async () => {
+      if (getQueue().length > 0) await firstMergeStarted.promise
+    }
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
 
@@ -858,6 +877,28 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(record).toMatchObject({ hubsRebuilt: [SECOND_HUB], hubsRejected: [] })
   })
 
+  it("records a hub whose vector-store search fails as failed with the store's error, and carries on with the next", async () => {
+    await writeFileRaw(`${tmp.path}/${SECOND_HUB}`, page("Loop Engineering", "2026-09-30", ["x.md"]))
+    await writeRequest([HUB, SECOND_HUB])
+    // searchByEmbedding answers a failed store search with no hits unless
+    // asked to throw.
+    mockSearch.mockImplementationOnce(async (_pp, _query, _cfg, _topK, options) => {
+      if (options?.throwOnStoreError) throw new Error("vector store: Table 'chunks' was not found")
+      return []
+    })
+    mockModel.mockResolvedValue(rewrite("Loop engineering wraps agent runs ([[learn-agent-arch-ext-addyosmani-loop-engineering]]).", "Loop Engineering"))
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: "search failed: vector store: Table 'chunks' was not found" },
+      { path: SECOND_HUB, result: "rebuilt" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [SECOND_HUB], hubsRejected: [] })
+  })
+
   it("records every hub as failed when embeddings are off, and a hub that is not on disk", async () => {
     await writeRequest([HUB, "wiki/concepts/merged-away.md"])
     useWikiStore.getState().setEmbeddingConfig({ enabled: false, endpoint: "", apiKey: "", model: "" })
@@ -924,6 +965,67 @@ describe("scheduled maintenance tick – hub rebuild", () => {
       { path: HUB, result: "failed", reason: "the page changed during the rebuild" },
     ])
     expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
+  it("reads the hub, backs it up and writes it under the project lock, so a writer holding the lock is not overwritten", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("More."))
+    const ingested = `${HUB_PAGE}\nA paragraph an ingest wrote under the project lock.\n`
+    const release = createDeferred()
+    const writer = withProjectLock(tmp.path, async () => {
+      await release.promise
+      await writeFileRaw(`${tmp.path}/${HUB}`, ingested)
+    })
+
+    const tick = runMaintenanceTick(project, { now: () => T0 })
+    // The rebuild has asked for the lock the writer holds.
+    await waitFor(() => mockLock.mock.calls.length === 2)
+    expect(mockLock.mock.calls[1][0]).toBe(tmp.path)
+    expect(await pageHistory()).toEqual([])
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+
+    release.resolve()
+    await writer
+    const record = await tick
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(ingested)
+    expect(await pageHistory()).toEqual([])
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "failed", reason: "the page changed during the rebuild" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
+  })
+
+  it("withholds the hub write when an ingest starts while the rebuild waits for the project lock", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("More."))
+    const release = createDeferred()
+    const writer = withProjectLock(tmp.path, () => release.promise)
+
+    const tick = runMaintenanceTick(project, { now: () => T0 })
+    await waitFor(() => mockLock.mock.calls.length === 2)
+    ingestSummary.pending = 1
+    release.resolve()
+    await writer
+    const record = await tick
+
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(await pageHistory()).toEqual([])
+    expect(await realFs.fileExists(`${tmp.path}/${REQUEST}`)).toBe(true)
+    expect(record).toMatchObject({ skipReason: "ingest-busy" })
+  })
+
+  it("runs and rebuilds while the ingest queue is paused with tasks pending, which start nothing", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("More."))
+    ingestSummary.paused = true
+    ingestSummary.pending = 2
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record).toMatchObject({ skipReason: null, hubsRebuilt: [HUB] })
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toContain("updated: 2026-10-05")
   })
 
   it("does not start the rebuild when an ingest started during the duplicate scan", async () => {
