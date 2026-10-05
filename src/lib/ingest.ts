@@ -1442,13 +1442,7 @@ async function autoIngestImpl(
     try {
       const logPath = `${pp}/wiki/log.md`
       const existingLog = await tryReadFile(logPath)
-      const createdKeys = new Set(createdPaths.map(normalizePath))
-      const details = formatCandidateLogDetails(
-        candidates.pages.length,
-        new Set(updatedPaths.map(normalizePath).filter((path) => !createdKeys.has(path))).size,
-        createdKeys.size,
-        candidates.searchSkipped,
-      )
+      const details = formatCandidateLogDetails(candidates, createdPaths, updatedPaths)
       if (writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md")) {
         await writeFile(logPath, `${existingLog.trimEnd()}\n\n${details.join("\n")}\n`)
       } else {
@@ -2822,26 +2816,38 @@ export interface ExistingPage {
 
 interface ExistingPageCandidates {
   pages: ExistingPage[]
-  /** Why the embedding search did not run or failed; null when it ran. */
-  searchSkipped: string | null
+  /** Log lines naming each candidate check that did not run, and why. */
+  skipped: string[]
 }
 
 function candidateBlockCap(maxContextSize: number | undefined): number {
   return Math.floor(computeContextBudget(maxContextSize).pageBudget * CANDIDATE_BLOCK_PAGE_BUDGET_SHARE)
 }
 
-/** The analysis's last `Topics` section: one name per line. */
+/**
+ * The analysis's last `Topics` section: one name per line, ended by a heading
+ * or by a blank line after the first name. Tolerates a bold heading, list
+ * markers and bold names, which models add despite the instruction.
+ */
 function parseAnalysisTopics(analysis: string): string[] {
   const lines = analysis.split("\n")
   let start = -1
   lines.forEach((line, position) => {
-    if (/^#{2,4}\s*Topics\s*$/i.test(line.trim())) start = position
+    if (/^(?:#{2,4}\s*Topics|\*\*Topics:?\*\*):?$/i.test(line.trim())) start = position
   })
   if (start < 0) return []
   const topics = new Map<string, string>()
   for (const line of lines.slice(start + 1)) {
-    if (/^#{1,6}\s/.test(line.trim())) break
-    const topic = line.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "").trim()
+    const trimmed = line.trim()
+    if (!trimmed) {
+      if (topics.size > 0) break
+      continue
+    }
+    if (/^#{1,6}\s/.test(trimmed)) break
+    const topic = trimmed
+      .replace(/^(?:[-*+]|\d+[.)])\s+/, "")
+      .replace(/^\*\*(.+)\*\*$/, "$1")
+      .trim()
     if (topic && !topics.has(topic.toLowerCase())) topics.set(topic.toLowerCase(), topic)
   }
   return [...topics.values()].slice(0, CANDIDATE_MAX_TOPICS)
@@ -2867,11 +2873,7 @@ async function wikiPagesBySlug(projectPath: string): Promise<Map<string, string[
       }
     }
   }
-  try {
-    walk(await listDirectory(`${projectPath}/wiki`))
-  } catch (err) {
-    console.warn(`[ingest] Wiki listing for existing pages failed:`, err instanceof Error ? err.message : err)
-  }
+  walk(await listDirectory(`${projectPath}/wiki`))
   return bySlug
 }
 
@@ -2894,17 +2896,21 @@ async function selectExistingPageCandidates(
     scores.set(relativePath, Math.max(scores.get(relativePath) ?? Number.NEGATIVE_INFINITY, score))
   }
 
+  const skipped: string[] = []
   if (topics.length > 0) {
-    const bySlug = await wikiPagesBySlug(projectPath)
-    for (const topic of topics) {
-      for (const relativePath of bySlug.get(makeQuerySlug(topic)) ?? []) offer(relativePath, EXACT_PATH_SCORE)
+    try {
+      const bySlug = await wikiPagesBySlug(projectPath)
+      for (const topic of topics) {
+        for (const relativePath of bySlug.get(makeQuerySlug(topic)) ?? []) offer(relativePath, EXACT_PATH_SCORE)
+      }
+    } catch (err) {
+      skipped.push(`Exact-path check skipped: wiki listing failed: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
-  let searchSkipped: string | null = null
   const embCfg = useWikiStore.getState().embeddingConfig
   if (!embCfg.enabled || !embCfg.model) {
-    searchSkipped = "embeddings are off"
+    skipped.push("Existing-page search skipped: embeddings are off")
   } else {
     const queries = topics.length > 0 ? topics : [analysis.trim().slice(0, CANDIDATE_FALLBACK_QUERY_MAX)]
     try {
@@ -2917,7 +2923,7 @@ async function selectExistingPageCandidates(
         for (const hit of hits) offer(`wiki/${hit.id}.md`, hit.score)
       }
     } catch (err) {
-      searchSkipped = `search failed: ${err instanceof Error ? err.message : String(err)}`
+      skipped.push(`Existing-page search skipped: search failed: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
@@ -2933,18 +2939,20 @@ async function selectExistingPageCandidates(
     pages.push(page)
     room -= page.content.length
   }
-  return { pages, searchSkipped }
+  return { pages, skipped }
 }
 
+/** Log lines for one ingest: candidate and write counts, then skipped checks. */
 function formatCandidateLogDetails(
-  offered: number,
-  updated: number,
-  created: number,
-  searchSkipped: string | null,
+  candidates: ExistingPageCandidates,
+  createdPaths: readonly string[],
+  updatedPaths: readonly string[],
 ): string[] {
+  const created = new Set(createdPaths.map(normalizePath))
+  const updated = new Set(updatedPaths.map(normalizePath).filter((path) => !created.has(path)))
   return [
-    `- Existing pages offered: ${offered}. Existing pages updated: ${updated}. Pages created: ${created}.`,
-    ...(searchSkipped ? [`- Existing-page search skipped: ${searchSkipped}.`] : []),
+    `- Existing pages offered: ${candidates.pages.length}. Existing pages updated: ${updated.size}. Pages created: ${created.size}.`,
+    ...candidates.skipped.map((line) => `- ${line}.`),
   ]
 }
 
@@ -3282,7 +3290,7 @@ export function buildChunkAnalysisSystemPrompt(
     "Entity handling rules:",
     ...LONG_SOURCE_ENTITY_RULES.map((rule) => `- ${rule}`),
     "Use schema-defined types only when the source actually supports them; never invent goals, habits, journal entries, decisions, or similar user-authored records that are not present in the source.",
-    "End the digest with a `### Topics` list: each entity and concept in the digest, one name per line, with no bullets, numbering or other text.",
+    "Begin the digest with a `### Topics` list, followed by a blank line: each entity and concept in the digest, one name per line, with no bullets, numbering or other text. It comes first so that trimming a long digest never cuts it.",
     "",
     "Stable project context follows. It changes rarely and should be treated as background:",
     purpose ? `## Wiki Purpose\n${purpose}` : "",

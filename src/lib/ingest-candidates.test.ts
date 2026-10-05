@@ -7,7 +7,14 @@ import { useReviewStore } from "@/stores/review-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 import { computeContextBudget } from "./context-budget"
 
-vi.mock("@/commands/fs", () => realFs)
+let listingFails = false
+vi.mock("@/commands/fs", () => ({
+  ...realFs,
+  listDirectory: async (p: string) => {
+    if (listingFails) throw new Error("permission denied")
+    return realFs.listDirectory(p)
+  },
+}))
 
 vi.mock("./mineru", () => ({
   parseWithMineru: vi.fn(),
@@ -38,6 +45,7 @@ vi.mock("@/lib/embedding", async (importOriginal) => {
 // The model fake routes on the system prompt and records every request.
 let analysisReply = ""
 let chunkDigestTopics = ""
+let chunkDigestPadding = ""
 let generationReply = ""
 let mergeCalls = 0
 const generationRequests: Array<{ system: string; user: string }> = []
@@ -63,8 +71,9 @@ vi.mock("./llm-client", () => ({
         `Chunk ${chunk} notes.`,
         "",
         "## Updated Global Digest",
-        `Digest after chunk ${chunk}.`,
         chunkDigestTopics,
+        "",
+        `Digest after chunk ${chunk}. ${chunkDigestPadding}`,
       ].join("\n"))
       cb.onDone()
       return
@@ -143,6 +152,8 @@ describe("autoIngest offers existing pages before generation", () => {
       "OpenClaw Gateway",
     ].join("\n")
     chunkDigestTopics = ""
+    chunkDigestPadding = ""
+    listingFails = false
     generationReply = summaryBlock
     mergeCalls = 0
     generationRequests.length = 0
@@ -272,6 +283,34 @@ describe("autoIngest offers existing pages before generation", () => {
     expect(searchQueries).toEqual([analysisReply])
   })
 
+  it.each([
+    ["bullets and numbering", "## Topics\n- Agent Harness Engineering\n2. OpenClaw Gateway", ["Agent Harness Engineering", "OpenClaw Gateway"]],
+    ["a bold heading with a colon and bold names", "**Topics:**\n**Agent Harness Engineering**\nOpenClaw Gateway", ["Agent Harness Engineering", "OpenClaw Gateway"]],
+    ["blank lines before the list and a duplicate", "## Topics\n\nAgent Harness Engineering\nagent harness engineering\nOpenClaw Gateway", ["Agent Harness Engineering", "OpenClaw Gateway"]],
+    ["prose after a blank line", "## Topics\nAgent Harness Engineering\n\nThat is all.", ["Agent Harness Engineering"]],
+    ["a heading after the list", "## Topics\nAgent Harness Engineering\n## Notes\nNot a topic", ["Agent Harness Engineering"]],
+    ["the last of two topics sections", "## Topics\nOld Topic\n\n## Topics\nOpenClaw Gateway", ["OpenClaw Gateway"]],
+    ["more than twenty topics", `## Topics\n${Array.from({ length: 25 }, (_, i) => `Topic ${i}`).join("\n")}`, Array.from({ length: 20 }, (_, i) => `Topic ${i}`)],
+  ])("reads a topics list with %s", async (_form, topics, expected) => {
+    analysisReply = `## Key Concepts\n- Agent Harness Engineering\n\n${topics}`
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(searchQueries).toEqual(expected)
+  })
+
+  it("records a failed wiki listing as a skipped exact-path check and still completes", async () => {
+    listingFails = true
+    searchHits = { "OpenClaw Gateway": [{ id: "entities/openclaw", score: 0.9 }] }
+
+    const written = await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(written).toContain("wiki/sources/harness-notes.md")
+    expect(lastGeneration().system).toContain('<existing-page path="wiki/entities/openclaw.md">')
+    const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
+    expect(log).toContain("Exact-path check skipped: wiki listing failed: permission denied.")
+  })
+
   it("caps the candidate block by page count and by text, and the source still fits", async () => {
     const maxContextSize = 60_000
     const { pageBudget, maxPageSize, responseReserve } = computeContextBudget(maxContextSize)
@@ -308,6 +347,8 @@ describe("autoIngest offers existing pages before generation", () => {
 
   it("gives a long source analysed in pieces the same candidate step", async () => {
     chunkDigestTopics = "### Topics\nAgent Harness Engineering\nOpenClaw Gateway"
+    // Longer than the digest cap, so the digest is trimmed from its end.
+    chunkDigestPadding = "Further digest detail. ".repeat(1_000)
     searchHits = { "OpenClaw Gateway": [{ id: "entities/openclaw", score: 0.9 }] }
     const paragraphs = Array.from({ length: 60 }, (_, i) => `## Part ${i}\n\n${"Harness engineering detail. ".repeat(60)}`)
     await writeFileRaw(`${tmp.path}/raw/sources/${SOURCE}`, `# Harness notes\n\n${paragraphs.join("\n\n")}`)
