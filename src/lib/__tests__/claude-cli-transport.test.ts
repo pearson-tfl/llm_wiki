@@ -426,24 +426,21 @@ describe("streamClaudeCodeCli", () => {
 // claude-opus-5-5 (#32). The two limit-hit runs went through a relay that
 // cut the request's output cap to 40 tokens: the first request only
 // (resumed), or every request (exhausted).
-async function replayClaudeCliStdout(
+const CLI_CONFIG = {
+  provider: "claude-code" as const,
+  apiKey: "",
+  model: "claude-opus-5-5",
+  ollamaUrl: "",
+  customEndpoint: "",
+  maxContextSize: 1000000,
+}
+
+/** Feed a recorded stdout to the CLI the caller just spawned, then its exit. */
+async function emitRecordedStdout(
   fixture: string,
   exitCode: number,
   edit: (line: string) => string = (line) => line,
 ) {
-  const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
-  const stream = streamClaudeCodeCli(
-    {
-      provider: "claude-code",
-      apiKey: "",
-      model: "claude-opus-5-5",
-      ollamaUrl: "",
-      customEndpoint: "",
-      maxContextSize: 1000000,
-    },
-    [{ role: "user", content: "Write a paragraph about rivers." }],
-    callbacks,
-  )
   await vi.waitFor(() => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("claude_cli_spawn", expect.anything())
   })
@@ -453,6 +450,20 @@ async function replayClaudeCliStdout(
     tauriMocks.emit(`claude-cli:${streamId}`, edit(line))
   }
   tauriMocks.emit(`claude-cli:${streamId}:done`, { code: exitCode, stderr: "" })
+}
+
+async function replayClaudeCliStdout(
+  fixture: string,
+  exitCode: number,
+  edit?: (line: string) => string,
+) {
+  const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+  const stream = streamClaudeCodeCli(
+    CLI_CONFIG,
+    [{ role: "user", content: "Write a paragraph about rivers." }],
+    callbacks,
+  )
+  await emitRecordedStdout(fixture, exitCode, edit)
   await stream
   return callbacks
 }
@@ -483,20 +494,8 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
   })
 
   it("has a duplicate merge reject the resumed reply, through the client (#32)", async () => {
-    const merge = buildDedupLlmCall(
-      { provider: "claude-code", apiKey: "", model: "claude-opus-5-5", ollamaUrl: "", customEndpoint: "", maxContextSize: 1000000 },
-      16384,
-      { completeReplyOnly: true },
-    )("system", "user")
-    await vi.waitFor(() => {
-      expect(tauriMocks.invoke).toHaveBeenCalledWith("claude_cli_spawn", expect.anything())
-    })
-    const { streamId } = tauriMocks.invoke.mock.calls[0]?.[1] as { streamId: string }
-    const stdout = readFileSync(new URL("./fixtures/claude-cli/limit-hit-resumed.jsonl", import.meta.url), "utf8")
-    for (const line of stdout.split("\n").filter(Boolean)) {
-      tauriMocks.emit(`claude-cli:${streamId}`, line)
-    }
-    tauriMocks.emit(`claude-cli:${streamId}:done`, { code: 0, stderr: "" })
+    const merge = buildDedupLlmCall(CLI_CONFIG, 16384, { completeReplyOnly: true })("system", "user")
+    await emitRecordedStdout("limit-hit-resumed.jsonl", 0)
 
     const rejection = await merge.catch((err: unknown) => err)
     expect(rejection).toBeInstanceOf(MergeReplyRejectedError)

@@ -159,12 +159,15 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
-  `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts` – a reply cut off at
-  the model's output limit is caught on the Claude Code CLI route
-  (pearson-tfl/llm_wiki#32). The CLI asks for its own output cap (128,000
-  tokens on `claude-opus-5-5`) and ignores the one the app asks for. At that
+  `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
+  – a reply cut off at the model's output limit is caught on the Claude
+  Code CLI route (pearson-tfl/llm_wiki#32). The CLI asks for its own
+  output cap (128,000 tokens on `claude-opus-5-5`) and ignores the one the
+  app asks for. At that
   limit it does not end the reply: it adds a user turn of its own ("Output
   token limit hit. Resume directly …") and resumes, up to three times. The
+  transport matches that wording as Claude Code 2.1.289 writes it: re-check
+  it when the CLI updates, since a reworded turn would go unflagged. The
   transport flags a reply during which the CLI did so as cut off, even
   when a resume finished it, since the join between the turns is
   unchecked, and passes on the CLI's stop reason (`stop_reason` on the
@@ -177,10 +180,10 @@ Keep this list current. Merge conflicts can only come from these files.
   would reach the app as an error, not as a reply. That is read from the
   binary; no live run has shown it. Every caller that reads the flag sees
   it on the Claude Code route too: the duplicate merge and the hub
-  rebuild reject the reply, naming no cap (the CLI routes never receive
-  one), and ingest and deep research treat it as they do on HTTP. A reply
-  with no finish reason is still taken as complete, because the Codex
-  route never sends one. Tests in
+  rebuild reject the reply, and ingest and deep research treat it as they
+  do on HTTP; the merge, hub and ingest messages name no cap, since the CLI
+  routes never receive one. A reply with no finish reason is still taken
+  as complete, because the Codex route never sends one. Tests in
   `src/lib/__tests__/claude-cli-transport.test.ts`, replaying stdout
   recorded from the live CLI in `src/lib/__tests__/fixtures/claude-cli/`,
   and in `src/lib/scheduled-maintenance.test.ts`.
