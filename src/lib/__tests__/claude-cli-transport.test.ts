@@ -562,8 +562,9 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
   })
 
   // Recorded isolated, as above, with a user, an assistant and a user turn
-  // piped in (#42). The CLI runs each piped user message as its own query,
-  // so it emits two `result` events, each counting one turn.
+  // piped in (#42), before the Rust side folded history into one turn (#46).
+  // The CLI runs each piped user message as its own query, so it emits two
+  // `result` events, each counting one turn.
   it("does not flag a complete reply cut off when several user messages are piped in, when isolated (#42)", async () => {
     const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
     const stream = streamClaudeCodeCli(
@@ -575,7 +576,7 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
       ],
       callbacks,
     )
-    await emitRecordedStdout("piped-history.jsonl", 0)
+    await emitRecordedStdout("piped-history-unfolded.jsonl", 0)
     await stream
 
     expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
@@ -593,10 +594,29 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
 })
 
 describe("streamClaudeCodeCli with chat history (#46)", () => {
-  it("passes on the CLI's answer to every piped question, joined (the defect, before the fold)", async () => {
-    const callbacks = await replayClaudeCliStdout("piped-history.jsonl", 0)
+  // Recorded isolated from the CLI fed `piped-history.stdin.jsonl`, the one
+  // user turn the Rust side folds this chat into. Before the fold the CLI
+  // answered each piped question afresh, and the caller got "Green.Mango.".
+  it("gives the caller one reply to a chat with history, which uses the history", async () => {
+    const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    const stream = streamClaudeCodeCli(
+      CLI_CONFIG,
+      [
+        {
+          role: "system",
+          content: "Use retrieved LLM Wiki context when available. If none was retrieved, answer directly and do not imply that general knowledge came from the project.",
+        },
+        { role: "user", content: "Reply with exactly one word: a colour." },
+        { role: "assistant", content: "Blue." },
+        { role: "user", content: "Now reply with exactly one word: a fruit of the colour you gave." },
+      ],
+      callbacks,
+    )
+    await emitRecordedStdout("piped-history.jsonl", 0)
+    await stream
 
-    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Green.Mango.")
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Blueberry.")
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
   })
 
   // The pre-fold recording: two queries, each with its own init and result.

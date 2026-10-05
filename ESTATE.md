@@ -203,6 +203,22 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/__tests__/claude-cli-transport.test.ts`, replaying stdout
   recorded from the live CLI in `src/lib/__tests__/fixtures/claude-cli/`,
   and in `src/lib/scheduled-maintenance.test.ts`.
+- `src-tauri/src/commands/claude_cli.rs`, `src/lib/claude-cli-transport.ts`
+  – on the Claude Code CLI route, a call with chat history gets one reply
+  that reads the history (pearson-tfl/llm_wiki#46). Claude Code 2.1.289
+  answers every piped user message as a query of its own and ignores piped
+  assistant turns, so the chat panel, editor selection follow-ups and the
+  interactive ingest write-out got every earlier question answered again,
+  joined in front of the reply. The app now sends the CLI one user turn:
+  the system text, then the earlier turns as a transcript tagged `<user>`
+  and `<assistant>`, then the latest message; an image in an earlier turn
+  keeps its place. Upstream pipes each turn separately. The stream parser
+  also starts afresh on each new query, result or message, so a reply that
+  begins with the previous reply's text is no longer clipped. Tests in
+  `claude_cli.rs` and `src/lib/__tests__/claude-cli-transport.test.ts`; the
+  fixture `piped-history.jsonl` is the live CLI's reply to
+  `piped-history.stdin.jsonl`, which a Rust test pins as the app's own
+  stdin for that chat.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
   failure reaches its log (#22), and the hub rebuild's search uses so the

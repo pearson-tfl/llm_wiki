@@ -4,7 +4,7 @@
  * Rust-side counterpart: src-tauri/src/commands/claude_cli.rs. The Rust
  * commands spawn `claude -p --output-format stream-json
  * --input-format stream-json --verbose --model <model>`, pipe the
- * serialized history over stdin, and emit stdout back as
+ * conversation over stdin as one user turn, and emit stdout back as
  * `claude-cli:{streamId}` events (one line per event). This module
  * listens for those events, parses each line as a stream-json event,
  * and forwards assistant text to `onToken`.
