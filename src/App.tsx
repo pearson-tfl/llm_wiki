@@ -498,10 +498,12 @@ function App() {
       }
       // Same handshake for the dedup-merge queue. The scheduled
       // maintenance job enqueues merges onto it, so it starts once the
-      // queue is this project's.
-      import("@/lib/dedup-queue").then(({ restoreQueue }) =>
-        restoreQueue(proj.id, proj.path)
-      ).catch((err) =>
+      // queue is this project's. A later switch may have overtaken this
+      // one: then the restore is skipped, here or once its turn comes.
+      import("@/lib/dedup-queue").then(({ restoreQueue }) => {
+        if (!isCurrentProject(proj)) return
+        return restoreQueue(proj.id, proj.path, () => isCurrentProject(proj))
+      }).catch((err) =>
         console.error("Failed to restore dedup queue:", err)
       ).then(async () => {
         // Started even when the restore failed: a run then records the
