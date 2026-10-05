@@ -1124,7 +1124,7 @@ async function autoIngestImpl(
     )
     if (analysisTruncated) {
       const message =
-        `Analysis was truncated after reaching the ${analysisRequest.maxTokens.toLocaleString()} token output limit. ` +
+        "Analysis was truncated at the model's output limit. " +
         "Wiki pages were not generated from the incomplete analysis. Split the source or use a model with a larger output limit."
       activity.updateItem(activityId, { status: "error", detail: message })
       throw new NonRetryableIngestError(message)
@@ -3433,8 +3433,8 @@ async function analyzeLongSourceInChunks(
     if (hadError) throw new Error("Chunk analysis stream failed")
     if (analysisTruncated) {
       const message =
-        `Chunk ${chunk.index}/${chunk.total} analysis was truncated after reaching the ` +
-        `${analysisRequest.maxTokens.toLocaleString()} token output limit; the saved checkpoint will be retried`
+        `Chunk ${chunk.index}/${chunk.total} analysis was truncated at the model's output limit; ` +
+        "the saved checkpoint will be retried"
       activity.updateItem(activityId, { status: "error", detail: message })
       throw new Error(message)
     }

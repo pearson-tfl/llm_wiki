@@ -139,8 +139,9 @@ Keep this list current. Merge conflicts can only come from these files.
   read to its last write. A merge reply that is empty, has no readable
   frontmatter, keeps under 70% of the longest page's body (the
   threshold `page-merge.ts` uses, shared from there), or that the model
-  client reports cut off at the merge's output cap (#29, in
-  `dedup-runner.ts`) is rejected before any write, by hand-queued and
+  client reports cut off at its output limit (#29, in `dedup-runner.ts`;
+  which routes report it: the Claude Code CLI entry below, #32) is
+  rejected before any write, by hand-queued and
   scheduled merges alike: no page changes, none is deleted, the task
   stays failed with the reason, a duplicate item goes to the review
   queue, and the run record counts it in `mergesRejected` with the group
@@ -160,6 +161,35 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-runner.test.ts`,
   `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
+- `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
+  `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
+  – a reply cut off at the model's output limit is caught on the Claude
+  Code CLI route (pearson-tfl/llm_wiki#32). The CLI asks for its own
+  output cap (128,000 tokens on `claude-opus-5-5`) and ignores the one the
+  app asks for. At that
+  limit it does not end the reply: it adds a user turn of its own ("Output
+  token limit hit. Resume directly …") and resumes, up to three times. The
+  transport matches that wording as Claude Code 2.1.289 writes it: re-check
+  it when the CLI updates, since a reworded turn would go unflagged. The
+  transport flags a reply during which the CLI did so as cut off, even
+  when a resume finished it, since the join between the turns is
+  unchecked, and passes on the CLI's stop reason (`stop_reason` on the
+  `result` event, `end_turn` on a normal reply). A reply whose resumes
+  ran out ends in a CLI error, as before. Which routes catch a cut-off
+  reply: the HTTP providers, from the finish reason; the Claude Code CLI,
+  as above; not the Codex CLI. Codex's output carries no finish reason,
+  and it ignores an output cap set from the app's side; the Codex binary
+  turns a reply the model cut short into a stream error, so such a reply
+  would reach the app as an error, not as a reply. That is read from the
+  binary; no live run has shown it. Every caller that reads the flag sees
+  it on the Claude Code route too: the duplicate merge and the hub
+  rebuild reject the reply, and ingest and deep research treat it as they
+  do on HTTP; the merge, hub and ingest messages name no cap, since the CLI
+  routes never receive one. A reply with no finish reason is still taken
+  as complete, because the Codex route never sends one. Tests in
+  `src/lib/__tests__/claude-cli-transport.test.ts`, replaying stdout
+  recorded from the live CLI in `src/lib/__tests__/fixtures/claude-cli/`,
+  and in `src/lib/scheduled-maintenance.test.ts`.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses so the
   failure reaches its log (#22), and the hub rebuild's search uses so the
@@ -179,7 +209,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `.llm-wiki/page-history/hub-rebuild-<time>/` before the write. A rewrite
   with no front matter, or whose body is under 0.7 of the old body (the
   same-path merge's ratio, now exported from `page-merge.ts` with its
-  front-matter setter), is rejected and the old page kept. Embeddings off, a
+  front-matter setter), or that the model client reports cut off at its
+  output limit (#32), is rejected and the old page kept. Embeddings off, a
   failed search (the embedding fetch, or the vector store, named as
   `search failed: vector store: …`), no summaries found, a missing page, a
   page with no front matter or a path not under `wiki/` fail that hub with

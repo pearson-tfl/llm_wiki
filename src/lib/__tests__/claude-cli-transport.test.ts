@@ -1,4 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from "vitest"
+import { readFileSync } from "node:fs"
 
 const tauriMocks = vi.hoisted(() => {
   const listeners: Record<string, (event: { payload: unknown }) => void> = {}
@@ -35,6 +36,8 @@ import {
   shouldCaptureClaudeDiagnostic,
   streamClaudeCodeCli,
 } from "../claude-cli-transport"
+import { buildDedupLlmCall } from "../dedup-runner"
+import { MergeReplyRejectedError } from "../dedup"
 import { useWikiStore } from "@/stores/wiki-store"
 
 beforeEach(() => {
@@ -416,6 +419,96 @@ describe("streamClaudeCodeCli", () => {
     expect(tauriMocks.listen).not.toHaveBeenCalled()
     expect(callbacks.onDone).toHaveBeenCalledTimes(1)
     expect(callbacks.onError).not.toHaveBeenCalled()
+  })
+})
+
+// Stdout recorded from claude 2.1.289 run with the app's flags on
+// claude-opus-5-5 (#32). The two limit-hit runs went through a relay that
+// cut the request's output cap to 40 tokens: the first request only
+// (resumed), or every request (exhausted).
+const CLI_CONFIG = {
+  provider: "claude-code" as const,
+  apiKey: "",
+  model: "claude-opus-5-5",
+  ollamaUrl: "",
+  customEndpoint: "",
+  maxContextSize: 1000000,
+}
+
+/** Feed a recorded stdout to the CLI the caller just spawned, then its exit. */
+async function emitRecordedStdout(
+  fixture: string,
+  exitCode: number,
+  edit: (line: string) => string = (line) => line,
+) {
+  await vi.waitFor(() => {
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("claude_cli_spawn", expect.anything())
+  })
+  const { streamId } = tauriMocks.invoke.mock.calls[0]?.[1] as { streamId: string }
+  const stdout = readFileSync(new URL(`./fixtures/claude-cli/${fixture}`, import.meta.url), "utf8")
+  for (const line of stdout.split("\n").filter(Boolean)) {
+    tauriMocks.emit(`claude-cli:${streamId}`, edit(line))
+  }
+  tauriMocks.emit(`claude-cli:${streamId}:done`, { code: exitCode, stderr: "" })
+}
+
+async function replayClaudeCliStdout(
+  fixture: string,
+  exitCode: number,
+  edit?: (line: string) => string,
+) {
+  const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+  const stream = streamClaudeCodeCli(
+    CLI_CONFIG,
+    [{ role: "user", content: "Write a paragraph about rivers." }],
+    callbacks,
+  )
+  await emitRecordedStdout(fixture, exitCode, edit)
+  await stream
+  return callbacks
+}
+
+describe("streamClaudeCodeCli output limit (#32)", () => {
+  it("reports the result event's stop reason on a normal reply, not cut off", async () => {
+    const callbacks = await replayClaudeCliStdout("normal-reply.jsonl", 0)
+
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("the river runs.")
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
+    expect(callbacks.onError).not.toHaveBeenCalled()
+  })
+
+  it("flags a reply cut off when the CLI hit its output limit and resumed", async () => {
+    const callbacks = await replayClaudeCliStdout("limit-hit-resumed.jsonl", 0)
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
+    expect(callbacks.onError).not.toHaveBeenCalled()
+  })
+
+  it("flags a reply cut off when the result event stops at max_tokens", async () => {
+    // The normal reply with the result's stop reason set to the Anthropic
+    // API's own term for an output-limit stop.
+    const callbacks = await replayClaudeCliStdout("normal-reply.jsonl", 0, (line) =>
+      line.replace('"stop_reason":"end_turn"', '"stop_reason":"max_tokens"'))
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "max_tokens", truncated: true })
+  })
+
+  it("has a duplicate merge reject the resumed reply, through the client (#32)", async () => {
+    const merge = buildDedupLlmCall(CLI_CONFIG, 16384, { completeReplyOnly: true })("system", "user")
+    await emitRecordedStdout("limit-hit-resumed.jsonl", 0)
+
+    const rejection = await merge.catch((err: unknown) => err)
+    expect(rejection).toBeInstanceOf(MergeReplyRejectedError)
+    expect((rejection as Error).message).toBe("Merge reply rejected: the model's reply was cut off at its output limit")
+  })
+
+  it("fails a reply whose resumes ran out, as the CLI exits 1", async () => {
+    const callbacks = await replayClaudeCliStdout("limit-hit-exhausted.jsonl", 1)
+
+    expect(callbacks.onDone).not.toHaveBeenCalled()
+    expect(callbacks.onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringMatching(/exceeded the 128000 output token maximum/) }),
+    )
   })
 })
 

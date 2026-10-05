@@ -361,7 +361,7 @@ describe("a merge reply that fails the guard changes nothing (#24)", () => {
 
     const [task] = dedupQueue.getQueue()
     expect(task.status).toBe("failed")
-    expect(task.error).toMatch(/Merge reply rejected: the model's reply was cut off at the 16384-token output cap/)
+    expect(task.error).toMatch(/Merge reply rejected: the model's reply was cut off at its output limit/)
     expect(useReviewStore.getState().items.map((i) => i.description)).toEqual([
       expect.stringContaining(task.error!),
     ])

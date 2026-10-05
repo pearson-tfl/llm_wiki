@@ -123,9 +123,8 @@ export function buildDedupLlmCall(
     }
     if (streamError) throw streamError
     if (options.completeReplyOnly && cutOff) {
-      throw new MergeReplyRejectedError(
-        `the model's reply was cut off at the ${maxTokens}-token output cap`,
-      )
+      // Not the cap asked for: the CLI routes ignore it and stop at their own.
+      throw new MergeReplyRejectedError("the model's reply was cut off at its output limit")
     }
     return result
   }
