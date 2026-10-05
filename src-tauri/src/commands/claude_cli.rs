@@ -184,22 +184,21 @@ fn push_content_blocks(content: &mut Vec<serde_json::Value>, message: &ClaudeCon
 /// in as a transcript that keeps who said what, then the latest message;
 /// images keep their place. The system preamble leads.
 fn fold_conversation_into_one_turn(
-    conversation: &[&ClaudeMessage],
+    earlier: &[&ClaudeMessage],
+    latest: &ClaudeMessage,
     system_preamble: &str,
 ) -> Vec<serde_json::Value> {
     let mut content = Vec::new();
-    if let Some((latest, earlier)) = conversation.split_last() {
-        if !earlier.is_empty() {
-            push_text_block(&mut content, "The conversation so far, oldest first:\n\n");
-            for message in earlier {
-                push_text_block(&mut content, &format!("<{}>\n", message.role));
-                push_content_blocks(&mut content, &message.content);
-                push_text_block(&mut content, &format!("\n</{}>\n\n", message.role));
-            }
-            push_text_block(&mut content, "The latest message, to reply to now:\n\n");
+    if !earlier.is_empty() {
+        push_text_block(&mut content, "The conversation so far, oldest first:\n\n");
+        for message in earlier {
+            push_text_block(&mut content, &format!("<{}>\n", message.role));
+            push_content_blocks(&mut content, &message.content);
+            push_text_block(&mut content, &format!("\n</{}>\n\n", message.role));
         }
-        push_content_blocks(&mut content, &latest.content);
+        push_text_block(&mut content, "The latest message, to reply to now:\n\n");
     }
+    push_content_blocks(&mut content, &latest.content);
     merge_system_preamble_into_user_content(&mut content, system_preamble);
     content
 }
@@ -222,9 +221,9 @@ fn build_claude_stdin(messages: &[ClaudeMessage]) -> Result<String, String> {
         .filter(|m| m.role == "user" || m.role == "assistant")
         .collect();
 
-    if conversation.is_empty() {
+    let Some((latest, earlier)) = conversation.split_last() else {
         return Err("No user/assistant messages to send to claude CLI".to_string());
-    }
+    };
 
     // `content` MUST be an array of blocks, not a plain string. The CLI
     // iterates content blocks looking for `tool_use_id` and crashes with
@@ -234,7 +233,7 @@ fn build_claude_stdin(messages: &[ClaudeMessage]) -> Result<String, String> {
         "type": "user",
         "message": {
             "role": "user",
-            "content": fold_conversation_into_one_turn(&conversation, &system_preamble),
+            "content": fold_conversation_into_one_turn(earlier, latest, &system_preamble),
         }
     });
     Ok(format!("{event}\n"))

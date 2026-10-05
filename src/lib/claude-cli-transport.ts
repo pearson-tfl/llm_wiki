@@ -66,14 +66,15 @@ export function createClaudeCodeStreamParser() {
       return null
     }
 
-    // Full assistant message (older CLI versions or when deltas are
-    // unavailable). Ship only the portion we haven't already emitted
-    // via stream_event deltas, so streaming still works smoothly.
+    // A query starts or ends: no text, but the next reply starts afresh.
     if ((type === "system" && obj.subtype === "init") || type === "result") {
       emittedFromAssistant = ""
       return null
     }
 
+    // Full assistant message (older CLI versions or when deltas are
+    // unavailable). Ship only the portion we haven't already emitted
+    // via stream_event deltas, so streaming still works smoothly.
     if (type === "assistant") {
       const message = obj.message as Record<string, unknown> | undefined
       if (typeof message?.id === "string" && message.id !== messageId) {
@@ -105,7 +106,7 @@ export function createClaudeCodeStreamParser() {
       return text
     }
 
-    // Ignore session init, tool_use, result summary, unknown types.
+    // Ignore tool_use, other system events and unknown types.
     return null
   }
 }
