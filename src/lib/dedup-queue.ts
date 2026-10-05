@@ -391,6 +391,7 @@ export function clearQueueState(): void {
   currentAbortController = null
   switchStepInFlight = null
   timedOutRestore = null
+  dismissRestoreTimeoutNotice()
   newestLandedSaves = new Map()
 }
 
@@ -466,8 +467,18 @@ export async function retryTimedOutRestore(): Promise<void> {
   }
   // The restore this retry waited behind may have been cut off too and
   // filed the notice again, for its own Retry (#52).
-  if (!timedOutRestore) {
-    useReviewStore.getState().dismissItem(reviewIdFor(RESTORE_TIMEOUT_NOTICE))
+  if (!timedOutRestore) dismissRestoreTimeoutNotice()
+}
+
+/**
+ * Dismiss the time-out notice once `projectId`'s merge queue is open, with
+ * no pause or restore running. Project open calls it once it has loaded
+ * the project's saved review items, which hold any notice filed before
+ * the reopen, perhaps after its restore has opened the queue (#59).
+ */
+export function dismissStaleRestoreNotice(projectId: string): void {
+  if (currentProjectId === projectId && !switchStepInFlight) {
+    dismissRestoreTimeoutNotice()
   }
 }
 
@@ -483,7 +494,11 @@ async function restoreWhile(
       await pauseActiveQueue()
       if (abandoned.aborted || !stillWanted()) return
       await loadProjectQueue(restore.projectId, restore.projectPath, abandoned)
-      if (!abandoned.aborted) timedOutRestore = null
+      if (abandoned.aborted) return
+      // Any notice the open review items show is stale once the queue is
+      // open (#59).
+      timedOutRestore = null
+      dismissRestoreTimeoutNotice()
     })
   } catch (err) {
     // The review queue open now is another project's once the user has
@@ -510,8 +525,18 @@ function recordRestoreTimeout(): void {
     options: [{ label: "Retry", action: RETRY_RESTORE_ACTION }],
   }
   // A resolved notice from an earlier time-out would hide this one.
-  useReviewStore.getState().dismissItem(reviewIdFor(item))
+  dismissRestoreTimeoutNotice()
   useReviewStore.getState().addItem(item)
+}
+
+/** Dismiss the time-out notice if the review items hold one. With none, the
+ *  items are left as they are: a change fires the review auto-save, which
+ *  during project open could save the emptied items over the project's
+ *  saved ones (#59). */
+function dismissRestoreTimeoutNotice(): void {
+  const id = reviewIdFor(RESTORE_TIMEOUT_NOTICE)
+  const { items, dismissItem } = useReviewStore.getState()
+  if (items.some((item) => item.id === id)) dismissItem(id)
 }
 
 async function loadProjectQueue(
