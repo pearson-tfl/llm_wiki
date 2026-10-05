@@ -139,6 +139,28 @@ describe("createClaudeCodeStreamParser", () => {
     expect(parse(JSON.stringify({ type: "future_type_we_dont_know" }))).toBeNull()
   })
 
+  // A new query or a new message starts its text afresh, so a reply that
+  // begins with the previous one's text is passed on whole (#46).
+  it.each([
+    ["an init event", { type: "system", subtype: "init" }],
+    ["a result event", { type: "result", subtype: "success", stop_reason: "end_turn" }],
+    ["nothing between, but a new message id", null],
+  ])("emits a second reply whole after %s, though it starts with the first", (_, between) => {
+    const parse = createClaudeCodeStreamParser()
+    const reply = (id: string, text: string) =>
+      JSON.stringify({ type: "assistant", message: { id, content: [{ type: "text", text }] } })
+    // Only the event under test separates the replies: the id changes only
+    // when no event comes between them.
+    const id = (n: number) => (between === null ? `msg_${n}` : "msg_1")
+
+    expect(parse(reply(id(1), "Green."))).toBe("Green.")
+    if (between) parse(JSON.stringify(between))
+    expect(parse(reply(id(2), "Green. Mango."))).toBe("Green. Mango.")
+    // An identical reply is passed on too, not dropped.
+    if (between) parse(JSON.stringify(between))
+    expect(parse(reply(id(3), "Green. Mango."))).toBe("Green. Mango.")
+  })
+
   it("returns null for malformed JSON or blank lines", () => {
     const parse = createClaudeCodeStreamParser()
     expect(parse("")).toBeNull()
@@ -540,8 +562,9 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
   })
 
   // Recorded isolated, as above, with a user, an assistant and a user turn
-  // piped in (#42). The CLI runs each piped user message as its own query,
-  // so it emits two `result` events, each counting one turn.
+  // piped in (#42), before the Rust side folded history into one turn (#46).
+  // The CLI runs each piped user message as its own query, so it emits two
+  // `result` events, each counting one turn.
   it("does not flag a complete reply cut off when several user messages are piped in, when isolated (#42)", async () => {
     const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
     const stream = streamClaudeCodeCli(
@@ -553,7 +576,7 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
       ],
       callbacks,
     )
-    await emitRecordedStdout("piped-history.jsonl", 0)
+    await emitRecordedStdout("piped-history-unfolded.jsonl", 0)
     await stream
 
     expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
@@ -567,6 +590,52 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
     expect(callbacks.onError).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringMatching(/exceeded the 128000 output token maximum/) }),
     )
+  })
+})
+
+describe("streamClaudeCodeCli with chat history (#46)", () => {
+  // Recorded isolated from the CLI fed `piped-history.stdin.jsonl`, the one
+  // user turn the Rust side folds this chat into. Before the fold the CLI
+  // answered each piped question afresh, and the caller got "Green.Mango.".
+  it("gives the caller one reply to a chat with history, which uses the history", async () => {
+    const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    const stream = streamClaudeCodeCli(
+      CLI_CONFIG,
+      [
+        {
+          role: "system",
+          content: "Use retrieved LLM Wiki context when available. If none was retrieved, answer directly and do not imply that general knowledge came from the project.",
+        },
+        { role: "user", content: "Reply with exactly one word: a colour." },
+        { role: "assistant", content: "Blue." },
+        { role: "user", content: "Now reply with exactly one word: a fruit of the colour you gave." },
+      ],
+      callbacks,
+    )
+    await emitRecordedStdout("piped-history.jsonl", 0)
+    await stream
+
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Blueberry.")
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
+  })
+
+  // The pre-fold recording: two queries, each with its own init and result.
+  it("passes on a second query's reply whole when it starts with the first's", async () => {
+    const callbacks = await replayClaudeCliStdout("piped-history-unfolded.jsonl", 0, (line) =>
+      line.replace('"text":"Mango."', '"text":"Green. Mango."'))
+
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Green.Green. Mango.")
+  })
+
+  it("reports the last result's stop reason when the CLI emits two results", async () => {
+    let results = 0
+    const callbacks = await replayClaudeCliStdout("piped-history-unfolded.jsonl", 0, (line) =>
+      line.includes('"type":"result"') && results++ === 0
+        ? line.replace('"stop_reason":"end_turn"', '"stop_reason":"stop_sequence"')
+        : line)
+
+    expect(results).toBe(2)
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
   })
 })
 

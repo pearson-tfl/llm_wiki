@@ -4,7 +4,7 @@
  * Rust-side counterpart: src-tauri/src/commands/claude_cli.rs. The Rust
  * commands spawn `claude -p --output-format stream-json
  * --input-format stream-json --verbose --model <model>`, pipe the
- * serialized history over stdin, and emit stdout back as
+ * conversation over stdin as one user turn, and emit stdout back as
  * `claude-cli:{streamId}` events (one line per event). This module
  * listens for those events, parses each line as a stream-json event,
  * and forwards assistant text to `onToken`.
@@ -32,8 +32,10 @@ export function createClaudeCodeStreamParser() {
   let sawDelta = false
   // Track the running text we have emitted for the current assistant
   // turn via `assistant` events so we can diff new content off the end
-  // and only emit what wasn't already streamed.
+  // and only emit what wasn't already streamed. A new query (`init`), a
+  // finished one (`result`) or a new message id starts it afresh (#46).
   let emittedFromAssistant = ""
+  let messageId: unknown
 
   return function parseLine(rawLine: string): string | null {
     const line = rawLine.trim()
@@ -64,11 +66,21 @@ export function createClaudeCodeStreamParser() {
       return null
     }
 
+    // A query starts or ends: no text, but the next reply starts afresh.
+    if ((type === "system" && obj.subtype === "init") || type === "result") {
+      emittedFromAssistant = ""
+      return null
+    }
+
     // Full assistant message (older CLI versions or when deltas are
     // unavailable). Ship only the portion we haven't already emitted
     // via stream_event deltas, so streaming still works smoothly.
     if (type === "assistant") {
       const message = obj.message as Record<string, unknown> | undefined
+      if (typeof message?.id === "string" && message.id !== messageId) {
+        messageId = message.id
+        emittedFromAssistant = ""
+      }
       const content = message?.content
       if (!Array.isArray(content)) return null
       const text = content
@@ -94,7 +106,7 @@ export function createClaudeCodeStreamParser() {
       return text
     }
 
-    // Ignore session init, tool_use, result summary, unknown types.
+    // Ignore tool_use, other system events and unknown types.
     return null
   }
 }

@@ -5,8 +5,10 @@
 //! Wiki reuse that subscription instead of requiring a separate API key.
 //! We treat `claude` purely as a text-completion engine — its agent
 //! tools, MCPs, file-edit abilities, and --resume session state are all
-//! out of scope. Multi-turn history is reconstructed from `messages`
-//! on every call, symmetric with every other provider.
+//! out of scope. Each call sends the whole of `messages`, as every other
+//! provider does, but as one user turn: the CLI answers every piped user
+//! message afresh and ignores piped assistant turns, so earlier turns go
+//! in as a transcript (#46).
 //!
 //! Why tokio::process directly (not tauri-plugin-shell): the plugin's
 //! scope model is designed for sidecars or fixed absolute paths; scoping
@@ -155,6 +157,88 @@ fn merge_system_preamble_into_user_content(
     );
 }
 
+/// Append text to the last block when it is a text block, else as a new one.
+fn push_text_block(content: &mut Vec<serde_json::Value>, text: &str) {
+    if let Some(last) = content.last_mut() {
+        if let Some(existing) = last.get("text").and_then(serde_json::Value::as_str) {
+            *last = serde_json::json!({ "type": "text", "text": format!("{existing}{text}") });
+            return;
+        }
+    }
+    content.push(serde_json::json!({ "type": "text", "text": text }));
+}
+
+fn push_content_blocks(content: &mut Vec<serde_json::Value>, message: &ClaudeContent) {
+    for block in claude_content_blocks(message) {
+        match block.get("text").and_then(serde_json::Value::as_str) {
+            Some(text) => push_text_block(content, text),
+            None => content.push(block),
+        }
+    }
+}
+
+/// Fold the conversation into the content of one user turn. Claude Code
+/// 2.1.289 runs a separate query for each piped user message (or queued
+/// batch of them) and ignores piped assistant turns, so piped history gets
+/// every earlier question answered again (#46). Earlier turns therefore go
+/// in as a transcript that keeps who said what, then the latest message;
+/// images keep their place. The system preamble leads.
+fn fold_conversation_into_one_turn(
+    earlier: &[&ClaudeMessage],
+    latest: &ClaudeMessage,
+    system_preamble: &str,
+) -> Vec<serde_json::Value> {
+    let mut content = Vec::new();
+    if !earlier.is_empty() {
+        push_text_block(&mut content, "The conversation so far, oldest first:\n\n");
+        for message in earlier {
+            push_text_block(&mut content, &format!("<{}>\n", message.role));
+            push_content_blocks(&mut content, &message.content);
+            push_text_block(&mut content, &format!("\n</{}>\n\n", message.role));
+        }
+        push_text_block(&mut content, "The latest message, to reply to now:\n\n");
+    }
+    push_content_blocks(&mut content, &latest.content);
+    merge_system_preamble_into_user_content(&mut content, system_preamble);
+    content
+}
+
+/// The stdin `claude_cli_spawn` writes: one stream-json `user` event holding
+/// the whole conversation, newline-terminated.
+fn build_claude_stdin(messages: &[ClaudeMessage]) -> Result<String, String> {
+    // Fold any system messages into a preamble rather than using a CLI
+    // flag, because --system-prompt / --append-system-prompt availability
+    // varies across claude CLI versions. Inlining works on every version.
+    let system_preamble: String = messages
+        .iter()
+        .filter(|m| m.role == "system")
+        .map(|m| claude_content_text_only(&m.content))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let conversation: Vec<&ClaudeMessage> = messages
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .collect();
+
+    let Some((latest, earlier)) = conversation.split_last() else {
+        return Err("No user/assistant messages to send to claude CLI".to_string());
+    };
+
+    // `content` MUST be an array of blocks, not a plain string. The CLI
+    // iterates content blocks looking for `tool_use_id` and crashes with
+    // `W is not an Object. (evaluating '"tool_use_id"in W')` if it
+    // encounters a raw string.
+    let event = serde_json::json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": fold_conversation_into_one_turn(earlier, latest, &system_preamble),
+        }
+    });
+    Ok(format!("{event}\n"))
+}
+
 async fn find_claude_command() -> Result<PathBuf, String> {
     find_cli_command("claude", &["claude.cmd", "claude.exe"]).await
 }
@@ -245,7 +329,7 @@ pub async fn claude_cli_detect() -> Result<DetectResult, String> {
 /// Spawn `claude -p --output-format stream-json --input-format stream-json
 /// --verbose --model <model>` and pipe stdout back to the frontend as
 /// `claude-cli:{stream_id}` events (one line per event). Closes stdin
-/// after writing the serialized history so claude starts processing.
+/// after writing the conversation as one user turn so claude starts.
 /// Emits a final `claude-cli:{stream_id}:done` event with `{ code }`
 /// when the child exits.
 #[tauri::command]
@@ -258,40 +342,7 @@ pub async fn claude_cli_spawn(
     isolate_local_config: bool,
     working_directory: Option<String>,
 ) -> Result<(), String> {
-    // Build the turn list: fold any system messages into a preamble on
-    // the first user turn rather than using a CLI flag, because
-    // --system-prompt / --append-system-prompt availability varies
-    // across claude CLI versions. Inlining works on every version.
-    let system_preamble: String = messages
-        .iter()
-        .filter(|m| m.role == "system")
-        .map(|m| claude_content_text_only(&m.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    let conversation: Vec<&ClaudeMessage> = messages
-        .iter()
-        .filter(|m| m.role == "user" || m.role == "assistant")
-        .collect();
-
-    if conversation.is_empty() {
-        return Err("No user/assistant messages to send to claude CLI".to_string());
-    }
-
-    // Synthesize turns with the preamble merged into the first user turn.
-    let mut first_user_seen = false;
-    let turns: Vec<(String, Vec<serde_json::Value>)> = conversation
-        .iter()
-        .map(|m| {
-            let role = m.role.clone();
-            let mut content = claude_content_blocks(&m.content);
-            if !first_user_seen && role == "user" && !system_preamble.is_empty() {
-                merge_system_preamble_into_user_content(&mut content, &system_preamble);
-                first_user_seen = true;
-            }
-            (role, content)
-        })
-        .collect();
+    let stdin_line = build_claude_stdin(&messages)?;
 
     let working_directory = resolve_claude_working_directory(working_directory).await?;
     let claude = find_claude_command().await?;
@@ -331,30 +382,11 @@ pub async fn claude_cli_spawn(
         .take()
         .ok_or_else(|| "Missing stderr handle".to_string())?;
 
-    // Serialize turns to stdin then close. stream-json input format
-    // expects one JSON event per line. Conversation history is laid out
-    // in order; the final user turn triggers claude's response.
-    //
-    // `content` MUST be an array of blocks, not a plain string. The CLI
-    // iterates content blocks looking for `tool_use_id` and crashes with
-    // `W is not an Object. (evaluating '"tool_use_id"in W')` if it
-    // encounters a raw string. User turns silently tolerated a string
-    // in light testing, but assistant turns reject it immediately, so
-    // we normalize both roles to the block-array form.
-    for (role, content) in &turns {
-        let event = serde_json::json!({
-            "type": role,
-            "message": {
-                "role": role,
-                "content": content,
-            }
-        });
-        let line = format!("{}\n", event);
-        stdin
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write to claude stdin: {e}"))?;
-    }
+    // Write the one user turn to stdin then close, so claude starts.
+    stdin
+        .write_all(stdin_line.as_bytes())
+        .await
+        .map_err(|e| format!("Failed to write to claude stdin: {e}"))?;
     stdin
         .flush()
         .await
@@ -635,6 +667,125 @@ mod tests {
         assert_eq!(
             blocks[1].get("type").and_then(serde_json::Value::as_str),
             Some("image")
+        );
+    }
+
+    fn messages(value: serde_json::Value) -> Vec<ClaudeMessage> {
+        serde_json::from_value(value).expect("messages should deserialize")
+    }
+
+    fn stdin_event(messages: &[ClaudeMessage]) -> serde_json::Value {
+        let line = build_claude_stdin(messages).expect("stdin should build");
+        assert_eq!(line.matches('\n').count(), 1, "one line: {line}");
+        serde_json::from_str(&line).expect("stdin line should be JSON")
+    }
+
+    #[test]
+    fn stdin_sends_a_lone_message_with_the_preamble_merged_in() {
+        let event = stdin_event(&messages(serde_json::json!([
+            { "role": "system", "content": "Be brief." },
+            { "role": "user", "content": "Name a colour." }
+        ])));
+
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Be brief.\n\nName a colour." }],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn stdin_folds_history_into_one_user_turn_as_a_transcript() {
+        let event = stdin_event(&messages(serde_json::json!([
+            { "role": "system", "content": "Be brief." },
+            { "role": "user", "content": "Name a colour." },
+            { "role": "assistant", "content": "Blue." },
+            { "role": "user", "content": "Name a fruit of that colour." }
+        ])));
+
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": "Be brief.\n\n\
+                            The conversation so far, oldest first:\n\n\
+                            <user>\nName a colour.\n</user>\n\n\
+                            <assistant>\nBlue.\n</assistant>\n\n\
+                            The latest message, to reply to now:\n\n\
+                            Name a fruit of that colour.",
+                    }],
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn stdin_keeps_an_earlier_image_in_its_place_in_the_transcript() {
+        let event = stdin_event(&messages(serde_json::json!([
+            { "role": "user", "content": [
+                { "type": "text", "text": "What is this?" },
+                { "type": "image", "mediaType": "image/png", "dataBase64": "abc123" }
+            ] },
+            { "role": "assistant", "content": "A cat." },
+            { "role": "user", "content": "What colour is it?" }
+        ])));
+
+        assert_eq!(
+            event["message"]["content"],
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "The conversation so far, oldest first:\n\n<user>\nWhat is this?",
+                },
+                {
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": "image/png", "data": "abc123" },
+                },
+                {
+                    "type": "text",
+                    "text": "\n</user>\n\n<assistant>\nA cat.\n</assistant>\n\n\
+                        The latest message, to reply to now:\n\nWhat colour is it?",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn stdin_refuses_a_conversation_with_no_user_or_assistant_message() {
+        let only_system = messages(serde_json::json!([{ "role": "system", "content": "Be brief." }]));
+
+        assert_eq!(
+            build_claude_stdin(&only_system),
+            Err("No user/assistant messages to send to claude CLI".to_string())
+        );
+    }
+
+    /// The live run recorded in `piped-history.jsonl` was fed this file (#46),
+    /// so it is the stdin the app writes for the chat-panel chat below.
+    #[test]
+    fn stdin_for_a_chat_with_history_is_the_one_the_live_run_was_fed() {
+        let chat = messages(serde_json::json!([
+            {
+                "role": "system",
+                "content": "Use retrieved LLM Wiki context when available. If none was retrieved, answer directly and do not imply that general knowledge came from the project.",
+            },
+            { "role": "user", "content": "Reply with exactly one word: a colour." },
+            { "role": "assistant", "content": "Blue." },
+            { "role": "user", "content": "Now reply with exactly one word: a fruit of the colour you gave." }
+        ]));
+
+        assert_eq!(
+            build_claude_stdin(&chat).expect("stdin should build"),
+            include_str!("../../../src/lib/__tests__/fixtures/claude-cli/piped-history.stdin.jsonl")
         );
     }
 
