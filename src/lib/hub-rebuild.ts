@@ -6,6 +6,7 @@
  * hub's result.
  */
 import { deleteFile, fileExists, readFile, writeFile } from "@/commands/fs"
+import { MergeReplyRejectedError } from "@/lib/dedup"
 import { buildDedupLlmCall } from "@/lib/dedup-runner"
 import { computeContextBudget } from "@/lib/context-budget"
 import { parseFrontmatter } from "@/lib/frontmatter"
@@ -65,7 +66,8 @@ export async function runHubRebuildRequest(
   })
   const pages = parseRequest(raw)
 
-  const llm = buildDedupLlmCall(llmConfig, HUB_REBUILD_MAX_TOKENS)
+  // The rewrite is written to disk: a reply cut off at the output limit is rejected.
+  const llm = buildDedupLlmCall(llmConfig, HUB_REBUILD_MAX_TOKENS, { completeReplyOnly: true })
   const results: HubResult[] = []
   for (const path of pages) {
     const step = await rebuildHub(pp, path, llmConfig, today, llm, blocker)
@@ -173,6 +175,7 @@ async function rebuildHub(
       return { path, result: "rebuilt" }
     })
   } catch (err) {
+    if (err instanceof MergeReplyRejectedError) return { path, result: "rejected", reason: err.reason }
     return failed(err instanceof Error ? err.message : String(err))
   }
 }

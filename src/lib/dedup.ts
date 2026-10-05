@@ -100,7 +100,7 @@ export interface MergeResult {
  * written: every page stays as it was and nothing is deleted.
  */
 export class MergeReplyRejectedError extends Error {
-  constructor(reason: string) {
+  constructor(readonly reason: string) {
     super(`Merge reply rejected: ${reason}`)
     this.name = "MergeReplyRejectedError"
   }

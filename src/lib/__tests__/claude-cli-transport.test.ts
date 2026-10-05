@@ -36,6 +36,8 @@ import {
   shouldCaptureClaudeDiagnostic,
   streamClaudeCodeCli,
 } from "../claude-cli-transport"
+import { buildDedupLlmCall } from "../dedup-runner"
+import { MergeReplyRejectedError } from "../dedup"
 import { useWikiStore } from "@/stores/wiki-store"
 
 beforeEach(() => {
@@ -478,6 +480,27 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
       line.replace('"stop_reason":"end_turn"', '"stop_reason":"max_tokens"'))
 
     expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "max_tokens", truncated: true })
+  })
+
+  it("has a duplicate merge reject the resumed reply, through the client (#32)", async () => {
+    const merge = buildDedupLlmCall(
+      { provider: "claude-code", apiKey: "", model: "claude-opus-5-5", ollamaUrl: "", customEndpoint: "", maxContextSize: 1000000 },
+      16384,
+      { completeReplyOnly: true },
+    )("system", "user")
+    await vi.waitFor(() => {
+      expect(tauriMocks.invoke).toHaveBeenCalledWith("claude_cli_spawn", expect.anything())
+    })
+    const { streamId } = tauriMocks.invoke.mock.calls[0]?.[1] as { streamId: string }
+    const stdout = readFileSync(new URL("./fixtures/claude-cli/limit-hit-resumed.jsonl", import.meta.url), "utf8")
+    for (const line of stdout.split("\n").filter(Boolean)) {
+      tauriMocks.emit(`claude-cli:${streamId}`, line)
+    }
+    tauriMocks.emit(`claude-cli:${streamId}:done`, { code: 0, stderr: "" })
+
+    const rejection = await merge.catch((err: unknown) => err)
+    expect(rejection).toBeInstanceOf(MergeReplyRejectedError)
+    expect((rejection as Error).message).toBe("Merge reply rejected: the model's reply was cut off at its output limit")
   })
 
   it("fails a reply whose resumes ran out, as the CLI exits 1", async () => {

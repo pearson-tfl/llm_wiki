@@ -219,7 +219,7 @@ describe("buildDedupLlmCall", () => {
 
     await expect(
       buildDedupLlmCall(cfg, 16384, { completeReplyOnly: true })("s", "u", undefined),
-    ).rejects.toThrow(/Merge reply rejected: the model's reply was cut off at the 16384-token output cap/)
+    ).rejects.toThrow(/Merge reply rejected: the model's reply was cut off at its output limit/)
   })
 
   it("refuses a merge reply whose signal fired, though the client ended it as done (#29)", async () => {

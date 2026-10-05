@@ -857,6 +857,26 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     expect(record).not.toHaveProperty("hubsRebuilt")
   })
 
+  it("asks for a complete reply, rejects a hub whose reply was cut off, and carries on with the next (#32)", async () => {
+    await writeFileRaw(`${tmp.path}/${SECOND_HUB}`, page("Loop Engineering", "2026-09-30", ["x.md"]))
+    await writeRequest([HUB, SECOND_HUB])
+    mockModel
+      .mockRejectedValueOnce(new MergeReplyRejectedError("the model's reply was cut off at its output limit"))
+      .mockResolvedValueOnce(rewrite("Loop engineering wraps agent runs ([[learn-agent-arch-ext-addyosmani-loop-engineering]]).", "Loop Engineering"))
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockBuildLlm).toHaveBeenCalledWith(expect.anything(), 16_384, { completeReplyOnly: true })
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toBe(HUB_PAGE)
+    expect(await readFileRaw(`${tmp.path}/${SECOND_HUB}`)).toContain("updated: 2026-10-05")
+    const [archive] = await archives()
+    expect(archive.results).toEqual([
+      { path: HUB, result: "rejected", reason: "the model's reply was cut off at its output limit" },
+      { path: SECOND_HUB, result: "rebuilt" },
+    ])
+    expect(record).toMatchObject({ hubsRebuilt: [SECOND_HUB], hubsRejected: [HUB] })
+  })
+
   it("records a hub whose search fails as failed with the reason, and carries on with the next", async () => {
     await writeFileRaw(`${tmp.path}/${SECOND_HUB}`, page("Loop Engineering", "2026-09-30", ["x.md"]))
     await writeRequest([HUB, SECOND_HUB])
