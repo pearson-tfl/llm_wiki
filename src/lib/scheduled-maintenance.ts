@@ -11,6 +11,7 @@ import {
   type ScheduledMaintenanceConfig,
 } from "@/lib/project-store"
 import { runDuplicateDetection } from "@/lib/dedup-runner"
+import { sweepResolvedReviews } from "@/lib/sweep-reviews"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getQueueSummary as getIngestQueueSummary } from "@/lib/ingest-queue"
@@ -99,6 +100,10 @@ export async function runMaintenanceTick(
     }
     const settled = await Promise.all(outcomes)
     const mergesDone = settled.filter((o) => o === "done").length
+    // Close review items whose pages the merges removed.
+    if (mergesDone > 0) await sweepResolvedReviews(pp)
+
+    // Later steps run here, after the duplicate scan.
 
     await saveScheduledMaintenanceConfig(pp, { ...config, lastRun: startedAt })
     return await appendRunRecord(pp, {

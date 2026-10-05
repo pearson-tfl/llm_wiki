@@ -293,3 +293,85 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([holdsPair])
   })
 })
+
+describe("scheduled maintenance tick – after merges", () => {
+  it("closes the open duplicate review item whose page was merged away", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["a.md", "b.md"]))
+    useReviewStore.getState().setItems([
+      {
+        id: "review-dup-1",
+        type: "duplicate",
+        title: "Agent Loop and Agent Loops overlap",
+        description: "Two pages on one topic.",
+        affectedPages: ["wiki/concepts/agent-loop.md", "wiki/concepts/agent-loops.md"],
+        options: [],
+        resolved: false,
+        createdAt: T0,
+      },
+    ])
+    mockDetect.mockResolvedValue([group(["agent-loop", "agent-loops"], "high")])
+    mockMerge.mockImplementation(async (pp) => {
+      await realFs.deleteFile(`${pp}/wiki/concepts/agent-loop.md`)
+      return { canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] }
+    })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(useReviewStore.getState().items[0]).toMatchObject({
+      resolved: true,
+      resolvedAction: "auto-resolved",
+    })
+  })
+
+  it("appends one record per tick with start and finish times", async () => {
+    await setConfig(null, true, 24)
+    let clock = T0
+    const now = () => clock++
+    mockDetect.mockResolvedValue([group(["a", "b"], "low")])
+
+    await runMaintenanceTick(project, { now })
+    clock = T0 + 25 * HOUR
+    await runMaintenanceTick(project, { now })
+
+    const records = await runRecords()
+    expect(records).toHaveLength(2)
+    expect(records[0]).toEqual({
+      startedAt: "2026-10-05T09:00:00.000Z",
+      finishedAt: "2026-10-05T09:00:00.001Z",
+      skipReason: null,
+      groupsFound: { high: 0, medium: 0, low: 1 },
+      mergesEnqueued: 0,
+      mergesDone: 0,
+      mergesFailed: 0,
+    })
+    expect(records[1].startedAt).toBe("2026-10-06T10:00:00.000Z")
+  })
+})
+
+describe("scheduled maintenance setting", () => {
+  it("is on by default at 24 hours, and is held per project", async () => {
+    expect(await loadScheduledMaintenanceConfig(tmp.path)).toEqual({
+      enabled: true,
+      intervalHours: 24,
+      lastRun: null,
+    })
+
+    await saveScheduledMaintenanceConfig(tmp.path, { enabled: false, intervalHours: 6, lastRun: T0 })
+
+    expect(await loadScheduledMaintenanceConfig(tmp.path)).toEqual({
+      enabled: false,
+      intervalHours: 6,
+      lastRun: T0,
+    })
+    expect((await loadScheduledMaintenanceConfig(`${tmp.path}-other`)).enabled).toBe(true)
+  })
+
+  it("does not run while switched off, however overdue", async () => {
+    await setConfig(null, false)
+
+    expect(await runMaintenanceTick(project, { now: () => T0 })).toBeNull()
+    expect(mockDetect).not.toHaveBeenCalled()
+  })
+})

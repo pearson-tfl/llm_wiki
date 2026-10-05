@@ -429,6 +429,50 @@ describe("dedup-queue — pauseQueue / restoreQueue", () => {
     expect(getQueue()).toHaveLength(0)
   })
 
+  it("runs a restored scheduled merge with no resume while a restored hand merge still waits", async () => {
+    const persisted = JSON.stringify([
+      {
+        id: "dedup-by-hand",
+        projectId: TEST_ID,
+        group: { slugs: ["hand-a", "hand-b"], confidence: "medium", reason: "x" },
+        canonicalSlug: "hand-a",
+        status: "pending",
+        addedAt: 1,
+        error: null,
+        retryCount: 0,
+      },
+      {
+        id: "dedup-scheduled",
+        projectId: TEST_ID,
+        group: { slugs: ["sched-a", "sched-b"], confidence: "high", reason: "x" },
+        canonicalSlug: "sched-a",
+        status: "processing",
+        addedAt: 2,
+        error: null,
+        retryCount: 0,
+        scheduled: true,
+      },
+    ])
+    mockReadFile.mockImplementation(async (path: string) =>
+      path.startsWith(TEST_PATH) ? persisted : Promise.reject(new Error("ENOENT")),
+    )
+    mockExecuteMerge.mockResolvedValue({
+      canonicalContent: "",
+      canonicalPath: "",
+      rewrites: [],
+      pagesToDelete: [],
+      backup: [],
+    })
+
+    await restoreQueue(TEST_ID, TEST_PATH)
+    await flushMicrotasks(20)
+
+    expect(mockExecuteMerge).toHaveBeenCalledOnce()
+    expect(mockExecuteMerge.mock.calls[0][2]).toBe("sched-a")
+    expect(getQueue().map((t) => [t.id, t.status])).toEqual([["dedup-by-hand", "pending"]])
+    expect(getQueueSummary().restoredBacklogWaiting).toBe(true)
+  })
+
   it("does not leak tasks across project switch", async () => {
     mockExecuteMerge.mockImplementation(() => new Promise(() => {}))
 
