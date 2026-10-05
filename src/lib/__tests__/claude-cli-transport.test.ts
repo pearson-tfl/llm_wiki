@@ -539,6 +539,27 @@ describe("streamClaudeCodeCli output limit (#32)", () => {
     expect(asRecorded.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: true })
   })
 
+  // Recorded isolated, as above, with a user, an assistant and a user turn
+  // piped in (#42). The CLI runs each piped user message as its own query,
+  // so it emits two `result` events, each counting one turn.
+  it("does not flag a complete reply cut off when several user messages are piped in, when isolated (#42)", async () => {
+    const callbacks = { onToken: vi.fn(), onDone: vi.fn(), onError: vi.fn() }
+    const stream = streamClaudeCodeCli(
+      CLI_CONFIG,
+      [
+        { role: "user", content: "Reply with exactly one word: a colour." },
+        { role: "assistant", content: "Blue." },
+        { role: "user", content: "Now reply with exactly one word: a fruit." },
+      ],
+      callbacks,
+    )
+    await emitRecordedStdout("piped-history.jsonl", 0)
+    await stream
+
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
+    expect(callbacks.onError).not.toHaveBeenCalled()
+  })
+
   it("fails a reply whose resumes ran out, as the CLI exits 1", async () => {
     const callbacks = await replayClaudeCliStdout("limit-hit-exhausted.jsonl", 1)
 
