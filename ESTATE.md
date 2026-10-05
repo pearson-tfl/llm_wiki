@@ -108,7 +108,7 @@ Keep this list current. Merge conflicts can only come from these files.
   the real merge prompt.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
-  `src/lib/page-merge.ts`, `src/lib/ingest-queue.ts`, `src/App.tsx`,
+  `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`, `src/lib/ingest-queue.ts`, `src/App.tsx`,
   `src/components/settings/sections/maintenance-section.tsx`,
   `src/i18n/{en,it,ru,zh}.json` – a scheduled
   maintenance job per wiki project runs the duplicate scan with no click
@@ -136,13 +136,20 @@ Keep this list current. Merge conflicts can only come from these files.
   again every 5 seconds, so it carries on with no click; a running merge
   holds the project write lock every ingest write takes, from its first
   read to its last write. A merge reply that is empty, has no readable
-  frontmatter, or keeps under 70% of the longest page's body (the
-  threshold `page-merge.ts` uses, shared from there) is rejected before
-  any write, by hand-queued and scheduled merges alike: no page changes,
-  none is deleted, the task stays failed with the reason and is not
-  retried, a duplicate item goes to the review queue, and the run record
-  counts it in `mergesRejected` with the group and reason in
-  `rejectedMerges`. Upstream edits to the dedup queue, the dedup merge,
+  frontmatter, keeps under 70% of the longest page's body (the
+  threshold `page-merge.ts` uses, shared from there), or that the model
+  client reports cut off at the merge's output cap (#29, in
+  `dedup-runner.ts`) is rejected before any write, by hand-queued and
+  scheduled merges alike: no page changes, none is deleted, the task
+  stays failed with the reason, a duplicate item goes to the review
+  queue, and the run record counts it in `mergesRejected` with the group
+  and reason in `rejectedMerges`. A rejected merge is not retried within
+  the run, but the next scheduled scan (daily by default) queues the
+  group again if it still finds it with high confidence, which resets the
+  failed task. A merge cancelled or cut short
+  by a project switch while the model replies writes nothing (#29): the
+  client ends a cancelled request as done with the text so far, so the
+  merge checks its cancel signal before the reply. Upstream edits to the dedup queue, the dedup merge,
   the ingest queue, the Maintenance screen or project open in `App.tsx`
   need re-checking against this. Tests in
   `src/lib/scheduled-maintenance.test.ts`, `src/lib/dedup-queue.test.ts`,

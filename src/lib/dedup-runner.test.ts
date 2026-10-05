@@ -201,6 +201,39 @@ describe("buildDedupLlmCall", () => {
       /HTTP 500: model unavailable/,
     )
   })
+
+  it("returns a detection reply the client reports cut off at the cap", async () => {
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onToken('{"groups": [')
+      cb.onDone({ finishReason: "length", truncated: true })
+    })
+
+    await expect(buildDedupLlmCall(cfg, 8192)("s", "u", undefined)).resolves.toBe('{"groups": [')
+  })
+
+  it("refuses a merge reply the client reports cut off at the cap (#29)", async () => {
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onToken("---\ntitle: foo\n---\nfoo body")
+      cb.onDone({ finishReason: "length", truncated: true })
+    })
+
+    await expect(
+      buildDedupLlmCall(cfg, 16384, { completeReplyOnly: true })("s", "u", undefined),
+    ).rejects.toThrow(/Merge reply rejected: the model's reply was cut off at the 16384-token output cap/)
+  })
+
+  it("refuses a merge reply whose signal fired, though the client ended it as done (#29)", async () => {
+    const controller = new AbortController()
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onToken("---\ntitle: foo\n---\nfoo body")
+      controller.abort()
+      cb.onDone()
+    })
+
+    await expect(
+      buildDedupLlmCall(cfg, 16384, { completeReplyOnly: true })("s", "u", controller.signal),
+    ).rejects.toThrow("Duplicate merge cancelled before the model's reply finished")
+  })
 })
 
 describe("runDuplicateDetection embedding prefilter", () => {
