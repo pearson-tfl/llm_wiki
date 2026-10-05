@@ -131,13 +131,13 @@ Keep this list current. Merge conflicts can only come from these files.
   hub it searches by meaning on the hub's title and text (200 pages deep),
   takes the source summaries (`wiki/sources/`) found, within the page
   budget left after the hub, and has one model call rewrite the hub as a
-  synthesis linking the summaries it draws on. The hub keeps its own front matter; its sources
-  list gains the sources of each summary the rewrite links, and `updated`
-  is stamped. The old page goes to `.llm-wiki/page-history/hub-rebuild-<time>/`
-  before the write. A rewrite with no front matter, or whose body is under
-  0.7 of the old body (the same-path merge's ratio, now exported from
-  `page-merge.ts` with its front-matter setter), is rejected and the old page
-  kept. Embeddings off, a failed search, no summaries found, a missing
+  synthesis linking the summaries it draws on. The hub keeps its own front
+  matter; its sources list gains the sources of each summary the rewrite
+  links, and `updated` is stamped. The old page goes to
+  `.llm-wiki/page-history/hub-rebuild-<time>/` before the write. A rewrite
+  with no front matter, or whose body is under 0.7 of the old body (the
+  same-path merge's ratio, now exported from `page-merge.ts` with its
+  front-matter setter), is rejected and the old page kept. Embeddings off, a failed search, no summaries found, a missing
   page, a page with no front matter or a path not under `wiki/` fail that
   hub with the reason, and the next hub runs. The request is
   then moved to `.llm-wiki/hub-rebuild-archive/<time>.json` with each hub's

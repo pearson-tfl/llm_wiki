@@ -117,7 +117,7 @@ async function rebuildHub(
   const before = await blocker()
   if (before) return { withheld: before }
   // The request is agent-written: only a page under wiki/ is rewritten.
-  if (!/^wiki\/(?:[^/]+\/)*[^/]+\.md$/.test(path) || path.split("/").includes("..")) {
+  if (!/^wiki\/(?:[^/\\]+\/)*[^/\\]+\.md$/.test(path) || path.split("/").includes("..")) {
     return failed("not a wiki page path")
   }
   const hubPath = `${pp}/${path}`
@@ -223,7 +223,7 @@ function linkedSlugs(body: string): Set<string> {
   const slugs = new Set<string>()
   for (const match of body.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)) {
     const target = match[1].trim().toLowerCase().replace(/\.md$/, "").replace(/^(?:wiki\/)?sources\//, "")
-    if (!target.includes("/")) slugs.add(target)
+    slugs.add(target)
   }
   return slugs
 }

@@ -732,7 +732,8 @@ describe("scheduled maintenance tick – hub rebuild", () => {
   })
 
   it("counts a summary as drawn on for each live link form, and not for a link to another folder", async () => {
-    // Slugs and link forms copied from the live vault's concept pages.
+    // Slugs from the live vault; the dotted-slug alias and folder link forms are
+    // the live ones, and the `wiki/sources/<slug>.md` form is made up to pin the stripping.
     await writeFileRaw(
       `${tmp.path}/wiki/sources/learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md`,
       summary("Selective Classification", "learn-agent-arch-ext-arxiv-1705.08500-selective-classification.md", "Abstain when unsure."),
@@ -767,7 +768,7 @@ describe("scheduled maintenance tick – hub rebuild", () => {
   it("fails a hub with no front matter on disk, one the search finds no summaries for, and a path outside wiki/", async () => {
     await writeFileRaw(`${tmp.path}/wiki/concepts/bare.md`, "# Bare\n\nNo front matter here.\n")
     await writeFileRaw(`${tmp.path}/raw/outside.md`, HUB_PAGE)
-    await writeRequest(["wiki/concepts/bare.md", HUB, "raw/outside.md", "wiki/../raw/outside.md"])
+    await writeRequest(["wiki/concepts/bare.md", HUB, "raw/outside.md", "wiki/../raw/outside.md", "wiki/..\\raw\\outside.md"])
     // The first search (for the hub) finds only a concept page.
     mockSearch.mockResolvedValueOnce([{ id: "concepts/loop-engineering", score: 0.9 }])
 
@@ -781,6 +782,7 @@ describe("scheduled maintenance tick – hub rebuild", () => {
       { path: HUB, result: "failed", reason: "the search found no source summaries" },
       { path: "raw/outside.md", result: "failed", reason: "not a wiki page path" },
       { path: "wiki/../raw/outside.md", result: "failed", reason: "not a wiki page path" },
+      { path: "wiki/..\\raw\\outside.md", result: "failed", reason: "not a wiki page path" },
     ])
     expect(record).toMatchObject({ hubsRebuilt: [], hubsRejected: [] })
   })
