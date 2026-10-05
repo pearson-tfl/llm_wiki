@@ -89,13 +89,15 @@ export class SwitchStepTimeoutError extends Error {
 /** The review option that retries a restore cut off by its time limit. */
 export const RETRY_RESTORE_ACTION = "retry-dedup-queue-restore"
 
-/** The restore last cut off by its time limit, until a restore opens a
- *  project's queue (#48). */
-let timedOutRestore: {
+interface QueueRestore {
   projectId: string
   projectPath: string
   stillOpening: () => boolean
-} | null = null
+}
+
+/** The restore last cut off by its time limit while its project was still
+ *  the one opening, until a restore opens a project's queue (#48, #52). */
+let timedOutRestore: QueueRestore | null = null
 
 /**
  * Run a pause or restore once the one in flight has finished. One step
@@ -443,43 +445,67 @@ function stopActiveQueue(): void {
  * longer the one being opened (#43). A project still open is paused
  * first: its merge stopped and its queue saved.
  */
-export async function restoreQueue(
+export function restoreQueue(
   projectId: string,
   projectPath: string,
   stillOpening: () => boolean = () => true,
 ): Promise<void> {
+  return restoreWhile({ projectId, projectPath, stillOpening }, stillOpening)
+}
+
+/**
+ * Run again the restore last cut off by its time limit, unless a restore
+ * has opened a project's queue since, checked when its turn comes (#52).
+ * Like any restore, it does nothing once its project is no longer the one
+ * being opened. The time-out notice goes once no restore is left cut off.
+ */
+export async function retryTimedOutRestore(): Promise<void> {
+  const cutOff = timedOutRestore
+  if (cutOff) {
+    await restoreWhile(cutOff, () => timedOutRestore === cutOff && cutOff.stillOpening())
+  }
+  // The restore this retry waited behind may have been cut off too and
+  // filed the notice again, for its own Retry (#52).
+  if (!timedOutRestore) {
+    useReviewStore.getState().dismissItem(reviewIdFor(RESTORE_TIMEOUT_NOTICE))
+  }
+}
+
+/** Restore a project's queue if `stillWanted` holds at its turn and after
+ *  the open project is paused. */
+async function restoreWhile(
+  restore: QueueRestore,
+  stillWanted: () => boolean,
+): Promise<void> {
   try {
     await oneSwitchStepAtATime(async (abandoned) => {
-      if (!stillOpening()) return
+      if (!stillWanted()) return
       await pauseActiveQueue()
-      if (abandoned.aborted || !stillOpening()) return
-      await loadProjectQueue(projectId, projectPath, abandoned)
+      if (abandoned.aborted || !stillWanted()) return
+      await loadProjectQueue(restore.projectId, restore.projectPath, abandoned)
       if (!abandoned.aborted) timedOutRestore = null
     })
   } catch (err) {
-    if (err instanceof SwitchStepTimeoutError) {
-      timedOutRestore = { projectId, projectPath, stillOpening }
+    // The review queue open now is another project's once the user has
+    // moved on, so that project's notice, if any, keeps its Retry (#52).
+    if (err instanceof SwitchStepTimeoutError && restore.stillOpening()) {
+      timedOutRestore = restore
       recordRestoreTimeout()
     }
     throw err
   }
 }
 
-/**
- * Run again the restore last cut off by its time limit, unless a restore
- * has opened a project's queue since. Like any restore, it does nothing
- * once its project is no longer the one being opened.
- */
-export async function retryTimedOutRestore(): Promise<void> {
-  const cutOff = timedOutRestore
-  if (cutOff) await restoreQueue(cutOff.projectId, cutOff.projectPath, cutOff.stillOpening)
+/** Every time-out notice has this type and title, so one id. */
+const RESTORE_TIMEOUT_NOTICE = {
+  type: "confirm" as const,
+  title: "Duplicate merge queue did not open",
 }
 
 /** Tell the user, in the review queue, that the merge queue did not open. */
 function recordRestoreTimeout(): void {
   const item = {
-    type: "confirm" as const,
-    title: "Duplicate merge queue did not open",
+    ...RESTORE_TIMEOUT_NOTICE,
     description: `Opening this project's duplicate merge queue took over ${SWITCH_STEP_TIMEOUT_MS / 1000} seconds and was stopped. Until it opens, no duplicate merge runs in this project. Retry to open it again; reopening the project also opens it.`,
     options: [{ label: "Retry", action: RETRY_RESTORE_ACTION }],
   }
@@ -618,6 +644,7 @@ async function processNext(projectId: string): Promise<void> {
   if (!hasUsableLlm(llmConfig)) {
     next.status = "failed"
     next.error = "LLM not configured — set API key in Settings"
+    currentAbortController = null
     processing = false
     notifyScheduledOutcome(next, "failed")
     await saveQueue(pp)

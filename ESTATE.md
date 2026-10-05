@@ -173,13 +173,19 @@ Keep this list current. Merge conflicts can only come from these files.
   when another project has been opened since (#43). A queue save that
   lands after a newer save to the same file is overwritten again with
   the newer one, so a finished merge does not come back as pending. A
-  restore cut off at 30 seconds files a review item whose Retry, on the
-  Review screen, opens the project's merge queue again. A merge run whose
-  last save lands after a project switch leaves the "a merge is running"
-  flag and the ingest wait to the project now open (#48). Upstream edits
-  to the dedup queue, the dedup merge, the ingest queue, the Maintenance
-  screen, the Review screen or project open in `App.tsx` need re-checking
-  against this.
+  restore cut off at 30 seconds while its project is still the one
+  opening files a review item whose Retry, on the Review screen, opens
+  the project's merge queue again. A merge run whose last save lands
+  after a project switch leaves the "a merge is running" flag and the
+  ingest wait to the project now open (#48). A restore cut off after the
+  user has opened another project files no review item, so a Retry on the
+  screen always belongs to the project open. A Retry that waits behind
+  another restore does nothing if that restore opened the queue; if that
+  restore was cut off too, the notice it filed stays, and its own Retry
+  runs it. The notice goes only once no restore is left cut off (#52).
+  Upstream edits to the dedup queue, the dedup merge, the ingest queue,
+  the Maintenance screen, the Review screen or project open in `App.tsx`
+  need re-checking against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`,
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and

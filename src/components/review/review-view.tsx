@@ -117,12 +117,13 @@ export function ReviewView() {
     }
 
     // The duplicate merge queue did not open in time: open it again (#48).
+    // The retry dismisses the notice itself, once no restore is left cut off
+    // (#52).
     if (action === RETRY_RESTORE_ACTION) {
       try {
         setReviewWorking(id, true)
         setReviewError(id, null)
         await retryTimedOutRestore()
-        dismissItem(id)
       } catch (err) {
         setReviewError(id, err)
       } finally {
@@ -329,7 +330,7 @@ export function ReviewView() {
     } else {
       resolveItem(id, action)
     }
-  }, [appDialog, project, items, resolveItem, dismissItem, setReviewError, setReviewWorking, t])
+  }, [appDialog, project, items, resolveItem, setReviewError, setReviewWorking, t])
 
   const pending = items.filter((i) => !i.resolved)
   const resolved = items.filter((i) => i.resolved)

@@ -1183,6 +1183,135 @@ describe("dedup-queue — overlapping project switches (#39)", () => {
       expect(getQueue().filter((t) => t.status === "processing")).toHaveLength(1)
     })
   })
+
+  describe("follow-ups from the #48 gate (#52)", () => {
+    let consoleError: ReturnType<typeof vi.spyOn>
+
+    /** The notices whose option retries a restore cut off by its time limit. */
+    function retryNotices() {
+      return useReviewStore.getState().items.filter((item) =>
+        item.options.some((option) => option.action === RETRY_RESTORE_ACTION)
+      )
+    }
+
+    /** The queue file reads made for `file` so far. */
+    function readsOf(file: string): number {
+      return mockReadFile.mock.calls.filter(([path]) => path === file).length
+    }
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+      consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+      useReviewStore.setState({ items: [] })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      consoleError.mockRestore()
+    })
+
+    it("a retry that waits behind a restore of the same project reads nothing once that restore has opened the queue", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOff = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOff).toBeInstanceOf(SwitchStepTimeoutError)
+
+      // The user reopens project B, then clicks Retry while that restore
+      // is still saving.
+      const save = holdNextWrite()
+      const reopened = restoreQueue(TEST_ID_B, TEST_PATH_B)
+      await flushMicrotasks(20)
+      const retried = retryTimedOutRestore()
+      save.resolve()
+      await Promise.all([reopened, retried])
+
+      // The cut-off read and the reopen's: the retry made none.
+      expect(readsOf(FILE_B)).toBe(2)
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+    })
+
+    it("a restore cut off after its project stopped being the one opening files no notice", async () => {
+      let opening = TEST_ID_B
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOff = restoreQueue(TEST_ID_B, TEST_PATH_B, () => opening === TEST_ID_B)
+        .catch((err: unknown) => err)
+      await flushMicrotasks(20)
+      // The user moved on while project B's read hung.
+      opening = TEST_ID
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOff).toBeInstanceOf(SwitchStepTimeoutError)
+
+      expect(retryNotices()).toHaveLength(0)
+    })
+
+    it("a restore cut off after its project stopped being the one opening leaves an earlier notice's retry opening its own project", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOffB = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOffB).toBeInstanceOf(SwitchStepTimeoutError)
+
+      // Project A's restore is then cut off too, after the user went back
+      // to project B.
+      let opening = TEST_ID
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOffA = restoreQueue(TEST_ID, TEST_PATH, () => opening === TEST_ID)
+        .catch((err: unknown) => err)
+      await flushMicrotasks(20)
+      opening = TEST_ID_B
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOffA).toBeInstanceOf(SwitchStepTimeoutError)
+
+      expect(retryNotices()).toHaveLength(1)
+      await retryTimedOutRestore()
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+    })
+
+    it("a retry whose turn comes after the restore it waited behind was cut off too leaves that restore's notice, and a retry that opens the queue clears it", async () => {
+      await pauseQueue()
+      files.set(FILE_B, queueFileWith(TEST_ID_B, ["c", "d"]))
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const cutOff = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await cutOff).toBeInstanceOf(SwitchStepTimeoutError)
+
+      // The user reopens project B, whose read hangs too, then clicks Retry.
+      mockReadFile.mockImplementationOnce(() => new Promise(() => {}))
+      const reopened = restoreQueue(TEST_ID_B, TEST_PATH_B).catch((err: unknown) => err)
+      await flushMicrotasks(20)
+      const retried = retryTimedOutRestore()
+      await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+      expect(await reopened).toBeInstanceOf(SwitchStepTimeoutError)
+      await retried
+
+      expect(retryNotices().filter((item) => !item.resolved)).toHaveLength(1)
+
+      await retryTimedOutRestore()
+      expect(getQueue().map((t) => t.group.slugs)).toEqual([["c", "d"]])
+      expect(retryNotices()).toHaveLength(0)
+    })
+
+    it("a merge stopped because no model is set leaves no cancel handle for the next pause to abort", async () => {
+      useWikiStore.getState().setLlmConfig({
+        ...useWikiStore.getState().llmConfig,
+        apiKey: "",
+      })
+      await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a")
+      await flushMicrotasks(20)
+      expect(getQueue()[0].error).toContain("LLM not configured")
+      const abort = vi.spyOn(AbortController.prototype, "abort")
+
+      try {
+        await pauseQueue()
+        expect(abort).not.toHaveBeenCalled()
+      } finally {
+        abort.mockRestore()
+      }
+    })
+  })
 })
 
 describe("dedup-queue — outcomes a scheduled run waits for", () => {
