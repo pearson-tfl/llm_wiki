@@ -139,6 +139,28 @@ describe("createClaudeCodeStreamParser", () => {
     expect(parse(JSON.stringify({ type: "future_type_we_dont_know" }))).toBeNull()
   })
 
+  // A new query or a new message starts its text afresh, so a reply that
+  // begins with the previous one's text is passed on whole (#46).
+  it.each([
+    ["an init event", { type: "system", subtype: "init" }],
+    ["a result event", { type: "result", subtype: "success", stop_reason: "end_turn" }],
+    ["nothing between, but a new message id", null],
+  ])("emits a second reply whole after %s, though it starts with the first", (_, between) => {
+    const parse = createClaudeCodeStreamParser()
+    const reply = (id: string, text: string) =>
+      JSON.stringify({ type: "assistant", message: { id, content: [{ type: "text", text }] } })
+    // Only the event under test separates the replies: the id changes only
+    // when no event comes between them.
+    const id = (n: number) => (between === null ? `msg_${n}` : "msg_1")
+
+    expect(parse(reply(id(1), "Green."))).toBe("Green.")
+    if (between) parse(JSON.stringify(between))
+    expect(parse(reply(id(2), "Green. Mango."))).toBe("Green. Mango.")
+    // An identical reply is passed on too, not dropped.
+    if (between) parse(JSON.stringify(between))
+    expect(parse(reply(id(3), "Green. Mango."))).toBe("Green. Mango.")
+  })
+
   it("returns null for malformed JSON or blank lines", () => {
     const parse = createClaudeCodeStreamParser()
     expect(parse("")).toBeNull()
@@ -575,6 +597,25 @@ describe("streamClaudeCodeCli with chat history (#46)", () => {
     const callbacks = await replayClaudeCliStdout("piped-history.jsonl", 0)
 
     expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Green.Mango.")
+  })
+
+  // The pre-fold recording: two queries, each with its own init and result.
+  it("passes on a second query's reply whole when it starts with the first's", async () => {
+    const callbacks = await replayClaudeCliStdout("piped-history-unfolded.jsonl", 0, (line) =>
+      line.replace('"text":"Mango."', '"text":"Green. Mango."'))
+
+    expect(callbacks.onToken.mock.calls.map(([token]) => token).join("")).toBe("Green.Green. Mango.")
+  })
+
+  it("reports the last result's stop reason when the CLI emits two results", async () => {
+    let results = 0
+    const callbacks = await replayClaudeCliStdout("piped-history-unfolded.jsonl", 0, (line) =>
+      line.includes('"type":"result"') && results++ === 0
+        ? line.replace('"stop_reason":"end_turn"', '"stop_reason":"stop_sequence"')
+        : line)
+
+    expect(results).toBe(2)
+    expect(callbacks.onDone).toHaveBeenCalledWith({ finishReason: "end_turn", truncated: false })
   })
 })
 

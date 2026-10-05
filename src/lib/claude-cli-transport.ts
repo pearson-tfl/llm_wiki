@@ -32,8 +32,10 @@ export function createClaudeCodeStreamParser() {
   let sawDelta = false
   // Track the running text we have emitted for the current assistant
   // turn via `assistant` events so we can diff new content off the end
-  // and only emit what wasn't already streamed.
+  // and only emit what wasn't already streamed. A new query (`init`), a
+  // finished one (`result`) or a new message id starts it afresh (#46).
   let emittedFromAssistant = ""
+  let messageId: unknown
 
   return function parseLine(rawLine: string): string | null {
     const line = rawLine.trim()
@@ -67,8 +69,17 @@ export function createClaudeCodeStreamParser() {
     // Full assistant message (older CLI versions or when deltas are
     // unavailable). Ship only the portion we haven't already emitted
     // via stream_event deltas, so streaming still works smoothly.
+    if ((type === "system" && obj.subtype === "init") || type === "result") {
+      emittedFromAssistant = ""
+      return null
+    }
+
     if (type === "assistant") {
       const message = obj.message as Record<string, unknown> | undefined
+      if (typeof message?.id === "string" && message.id !== messageId) {
+        messageId = message.id
+        emittedFromAssistant = ""
+      }
       const content = message?.content
       if (!Array.isArray(content)) return null
       const text = content
