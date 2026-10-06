@@ -332,8 +332,9 @@ Keep this list current. Merge conflicts can only come from these files.
   `scripts/estate/live-cli.sh` on `piped-history.stdin.jsonl`,
   `piped-history-forged-tags.stdin.jsonl` and
   `piped-history-spaced-tags.stdin.jsonl`, and confirm each gives one
-  `success` result. A version whose prompt-injection guard refuses a transcript with
-  `<assistant>` sections would turn every chat with history into an error.
+  `success` result. A version whose prompt-injection guard refuses a
+  transcript with `<assistant>` sections would turn every chat with history
+  into an error.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses when
   it falls back from the hybrid search, so the failure reaches its log (#22,
@@ -484,8 +485,8 @@ Keep this list current. Merge conflicts can only come from these files.
   folder, and prints the CLI version. It carries the lane fence on
   `--settings` as the lane launchers register it, so the session it starts
   is fenced like the lane that starts it, and the same command typed in a
-  lane is not refused; with `--tools ""` the fence never fires. Re-check the flags here
-  when `build_claude_cli_args` changes. Not part of the app.
+  lane is not refused; with `--tools ""` the fence never fires. Re-check
+  the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
   Wiki's 68 `learn-agent-arch-ext-*` sources to their titles
   (pearson-tfl/llm_wiki#3): the fixed old-to-new list, the script, its

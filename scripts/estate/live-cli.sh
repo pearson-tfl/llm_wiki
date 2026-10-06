@@ -18,7 +18,8 @@ output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 # The lane fence as the lane launchers register it, so the nested session is
 # bound by the fence that binds its caller (Agent-Harness-Reconfig,
 # ops/hooks/lane-fence.py). With --tools "" it never fires.
-fence='{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|NotebookEdit","hooks":[{"type":"command","command":"python3 /Users/johnp/Code/Agent-Harness-Reconfig/ops/hooks/lane-fence.py"}]}]}}'
+fence_hook=/Users/johnp/Code/Agent-Harness-Reconfig/ops/hooks/lane-fence.py
+fence='{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|NotebookEdit","hooks":[{"type":"command","command":"python3 '"$fence_hook"'"}]}]}}'
 
 # The arguments build_claude_cli_args("claude-opus-5-5", true) builds
 # (src-tauri/src/commands/claude_cli.rs), --mcp-config last as there.

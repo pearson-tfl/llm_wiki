@@ -35,18 +35,26 @@ EOF
 }
 
 # Runs live-cli.sh from the caller folder with relative paths, as a lane
-# would from its worktree. Extra variables go in front, as VAR=value.
+# would from its worktree. Variables come first, as VAR=value, then the
+# script's arguments; with none, in.stdin.jsonl out.jsonl.
 run() {
-  (cd "$case_dir/caller" && env -i HOME="$case_dir/home" PATH="$case_dir/stubs:/usr/bin:/bin" "$@" \
-    bash "$here/live-cli.sh" in.stdin.jsonl out.jsonl > "$case_dir/out.log" 2>&1)
+  local vars=()
+  while [ $# -gt 0 ] && [[ "$1" == *=* ]]; do vars+=("$1"); shift; done
+  [ $# -gt 0 ] || set -- in.stdin.jsonl out.jsonl
+  (cd "$case_dir/caller" && env -i HOME="$case_dir/home" PATH="$case_dir/stubs:/usr/bin:/bin" \
+    ${vars[@]+"${vars[@]}"} bash "$here/live-cli.sh" "$@" > "$case_dir/out.log" 2>&1)
 }
 
 # Wrong argument counts stop before claude runs.
 setup usage
 for args in "" "in.stdin.jsonl" "in.stdin.jsonl out.jsonl extra"; do
-  # shellcheck disable=SC2086 # the split is the point
-  (cd "$case_dir/caller" && PATH="$case_dir/stubs:/usr/bin:/bin" bash "$here/live-cli.sh" $args \
-    > "$case_dir/out.log" 2>&1)
+  if [ -z "$args" ]; then
+    (cd "$case_dir/caller" && env -i PATH="$case_dir/stubs:/usr/bin:/bin" \
+      bash "$here/live-cli.sh" > "$case_dir/out.log" 2>&1)
+  else
+    # shellcheck disable=SC2086 # the split is the point
+    run $args
+  fi
   [ $? -eq 2 ] || fail "usage '$args': did not exit 2"
   grep -q "usage: " "$case_dir/out.log" || fail "usage '$args': no usage line"
   [ -e "$case_dir/argv" ] && fail "usage '$args': claude ran"
@@ -83,15 +91,14 @@ grep -q "9.9.9 (Claude Code)" "$case_dir/out.log" || fail "ok: output does not n
 
 # An output folder that does not exist yet is made.
 setup new-folder
-(cd "$case_dir/caller" && env -i HOME="$case_dir/home" PATH="$case_dir/stubs:/usr/bin:/bin" \
-  bash "$here/live-cli.sh" in.stdin.jsonl new/deeper/out.jsonl > "$case_dir/out.log" 2>&1) \
-  || fail "new folder: exited non-zero: $(cat "$case_dir/out.log")"
+run in.stdin.jsonl new/deeper/out.jsonl || fail "new folder: exited non-zero: $(cat "$case_dir/out.log")"
 [ -s "$case_dir/caller/new/deeper/out.jsonl" ] || fail "new folder: no output"
 
 # The CLI's exit status is the script's.
 setup exit-status
 run STUB_EXIT=3
 [ $? -eq 3 ] || fail "exit status: claude's 3 not passed on"
+[ -e "$(cat "$case_dir/cwd")" ] && fail "exit status: scratch folder left behind"
 
 # Like the app (claude_cli.rs), CLAUDE_CONFIG_DIR is ~/.claude unless the
 # caller names one; the lane marker reaches claude unchanged.
