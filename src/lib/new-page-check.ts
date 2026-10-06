@@ -1,8 +1,9 @@
 /**
  * The check after an ingest's writes (#69): each concept or entity page the
  * ingest created is compared by meaning with the existing concept and entity
- * pages, and with the other pages the same ingest created (#75). One scoring at or above the threshold is flagged – logged and raised
- * as a duplicate review item – never refused, so no content is lost.
+ * pages, and with the other pages the same ingest created (#75). One scoring
+ * at or above the threshold is flagged – logged and raised as a duplicate
+ * review item – never refused, so no content is lost.
  *
  * The score is the duplicate scan's own: the cosine of the two pages' summary
  * embeddings (title, tags and description), the text `dedup-runner.ts`
@@ -60,9 +61,9 @@ export function summaryText(path: string, content: string): string {
 /**
  * Compares each created concept or entity page with its nearest existing
  * concept and entity pages, and with the created pages before it: new pages
- * are embedded into the store only after the check. Never throws: embeddings off, a failed embedding
- * call, a vector-store error or an unreadable page ends the check with the
- * reason in `skipped`.
+ * are embedded into the store only after the check. Never throws: embeddings
+ * off, a failed embedding call, a vector-store error or an unreadable page
+ * ends the check with the reason in `skipped`.
  */
 export async function checkNewPages(
   projectPath: string,
