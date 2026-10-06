@@ -496,7 +496,9 @@ async function restoreWhile(
       await loadProjectQueue(restore.projectId, restore.projectPath, abandoned)
       if (abandoned.aborted) return
       // Any notice the open review items show is stale once the queue is
-      // open (#59).
+      // open (#59). They are this project's without a project check: a
+      // switch pauses the queue first (reset-project-state.ts), and that
+      // pause waits behind this step (#62).
       timedOutRestore = null
       dismissRestoreTimeoutNotice()
     })
