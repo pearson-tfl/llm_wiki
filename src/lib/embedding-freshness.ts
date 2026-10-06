@@ -21,6 +21,7 @@ import {
   removeEmbeddedHashes,
   removePageEmbedding,
   removeVectorPageId,
+  vectorWriteNumber,
   wikiPageIdFromPath,
 } from "@/lib/embedding"
 import { sha256 } from "@/lib/ingest-cache"
@@ -80,7 +81,7 @@ export async function runEmbeddingBackfill(
   const pages = contentPagesInTree(pp, await listDirectory(`${pp}/wiki`))
   const stored = new Set(await listVectorPageIds(pp))
   const hashes = await loadEmbeddedHashes(pp)
-  const orphansRemoved = await removeOrphanVectors(pp, pages, stored)
+  const orphansRemoved = await removeOrphans(pp, pages, stored, hashes)
 
   let covered = 0
   let failed = 0
@@ -138,33 +139,44 @@ async function endpointAnswers(cfg: EmbeddingConfig): Promise<boolean> {
 /**
  * Remove the rows of each stored page id that names no content page and
  * whose file is confirmed gone, and then, in one write, the recorded hash
- * of each id whose rows went (#80). A bare-slug id whose name a page still
- * owns is kept: its page's own embed clears it once safe. An empty listing
- * removes nothing. Returns the number removed.
+ * of each id whose rows went (#80) and of each recorded id with no rows
+ * that names no content page and whose file is confirmed gone (#82). A
+ * bare-slug id whose name a page still owns is kept: its page's own embed
+ * clears it once safe. A page whose vectors are written after its file
+ * check keeps its hash (#82). An empty listing removes nothing. Returns the
+ * number of ids whose rows were removed.
  */
-async function removeOrphanVectors(
+async function removeOrphans(
   pp: string,
   pages: { id: string }[],
   stored: Set<string>,
+  recorded: Record<string, string>,
 ): Promise<number> {
   if (pages.length === 0) return 0
   const ids = new Set(pages.map((p) => p.id))
   const stems = new Set(pages.map((p) => (p.id.split("/").pop() ?? "").toLowerCase()))
-  const removed: string[] = []
-  for (const id of stored) {
+  const gone: Record<string, number> = {}
+  let removed = 0
+  for (const id of new Set([...stored, ...Object.keys(recorded)])) {
     if (ids.has(id)) continue
-    if (!id.includes("/") && stems.has(id.toLowerCase())) continue
+    const hasRows = stored.has(id)
+    if (hasRows && !id.includes("/") && stems.has(id.toLowerCase())) continue
+    const write = vectorWriteNumber(pp, id)
     // A page written since the listing still has its file.
     if (await fileExists(`${pp}/wiki/${id}.md`)) continue
-    try {
-      await removeVectorPageId(pp, id)
-      removed.push(id)
-    } catch (err) {
-      console.warn(`[Embedding] backfill: could not remove the vectors of ${id}: ${errorText(err)}`)
+    if (hasRows) {
+      try {
+        await removeVectorPageId(pp, id)
+        removed++
+      } catch (err) {
+        console.warn(`[Embedding] backfill: could not remove the vectors of ${id}: ${errorText(err)}`)
+        continue
+      }
     }
+    gone[id] = write
   }
-  await removeEmbeddedHashes(pp, removed)
-  return removed.length
+  await removeEmbeddedHashes(pp, gone)
+  return removed
 }
 
 /**

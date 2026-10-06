@@ -431,13 +431,18 @@ Keep this list current. Merge conflicts can only come from these files.
   pages themselves failed and the run carries on. Before embedding, the backfill removes the vectors of every
   stored page id that names no content page and whose file is gone
   (`orphansRemoved`), then, in one write, those ids' entries in
-  `.llm-wiki/embedded-pages.json` (since #80, `removeEmbeddedHashes`); a
+  `.llm-wiki/embedded-pages.json` (since #80, `removeEmbeddedHashes`),
+  and in the same write, since #82, the entry of every recorded id with no
+  vectors that names no content page and whose file is gone, such as one
+  left by a delete before #80 or by a merge (whose
+  `removeWikiPageEmbeddings` removes vectors only); an entry whose page's
+  vectors are written again after its file check is kept (#82). A
   bare-slug id whose name a page still owns is kept, an id the Mac's
   case-insensitive lookup still finds keeps its vectors and its entry,
   and an empty listing removes nothing.
   `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
   `.llm-wiki/embedded-pages.json` is written once per backfill run (twice
-  when it removed orphans), merge re-embed, hub re-embed and ingest, not
+  when it removed entries of gone pages), merge re-embed, hub re-embed and ingest, not
   once per page (`embedPage`'s
   `hashes` option and the exported `recordEmbeddedHashes`). Each page's
   vector writes are numbered in the order they land, and a batch records
@@ -448,7 +453,9 @@ Keep this list current. Merge conflicts can only come from these files.
   so a cancel meanwhile finds nothing to cancel, and the next merge waits
   for the re-embed; since #80 an error in that re-embed is only logged,
   so it cannot bump the finished merge's retry count or report it failed
-  after done. Tests in
+  after done, and since #82 the same holds for the re-embed after a
+  cancel or project switch, whose error is no longer logged as the
+  cancel. Tests in
   `src/lib/embedding-freshness.test.ts`,
   `src/lib/dedup-queue.reembed-error.test.ts`,
   `src/lib/dedup-runner.reembed.test.ts`,

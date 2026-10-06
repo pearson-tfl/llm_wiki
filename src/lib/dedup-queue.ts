@@ -29,7 +29,7 @@ import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { executeMerge, reembedMergedPages } from "@/lib/dedup-runner"
-import { MergeReplyRejectedError, type DuplicateGroup } from "@/lib/dedup"
+import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "@/lib/dedup"
 import { withProjectLock } from "@/lib/project-mutex"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { reviewIdFor, useReviewStore } from "@/stores/review-store"
@@ -620,6 +620,17 @@ function recordRejection(task: DedupTask, reason: string): void {
   })
 }
 
+/** Re-embed the pages a merge wrote. An error is only logged: the merge
+ *  itself is done or cancelled, and its outcome stands (#80, #82). */
+async function reembedAfterMerge(pp: string, task: DedupTask, result: MergeResult): Promise<void> {
+  try {
+    await reembedMergedPages(pp, result)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.warn(`[Dedup Queue] Re-embed after merging ${task.group.slugs.join(",")} failed: ${message}`)
+  }
+}
+
 async function processNext(projectId: string): Promise<void> {
   if (processing) return
   if (currentProjectId !== projectId) return
@@ -700,7 +711,7 @@ async function processNext(projectId: string): Promise<void> {
     if (currentProjectId !== projectId || signal.aborted) {
       // A cancel or switch has taken the queue over; the pages the merge
       // wrote still get fresh vectors.
-      if (merged) await reembedMergedPages(pp, result)
+      if (merged) await reembedAfterMerge(pp, next, result)
       return
     }
     if (!merged) {
@@ -723,12 +734,7 @@ async function processNext(projectId: string): Promise<void> {
     // cancel; the next merge waits for it. It runs after the lock is
     // released: a hung embedding endpoint must not hold an ingest's write
     // (#73). A failure here cannot fail the finished merge (#80).
-    try {
-      await reembedMergedPages(pp, result)
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      console.warn(`[Dedup Queue] Re-embed after merging ${next.group.slugs.join(",")} failed: ${message}`)
-    }
+    await reembedAfterMerge(pp, next, result)
   } catch (err) {
     if (currentProjectId !== projectId) return
     const message = err instanceof Error ? err.message : String(err)

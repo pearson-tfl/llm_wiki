@@ -1,5 +1,6 @@
 /**
  * #80: a merge already reported done stays done when its re-embed throws.
+ * #82: a re-embed that throws after a cancel is logged as its own failure.
  * Runs the real merge queue and the real `reembedMergedPages` against a
  * real temporary project; only `executeMerge` is replaced, the Tauri
  * vector-store and embedding commands are an in-memory store, and the
@@ -8,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
-import { flushIO, waitFor } from "@/test-helpers/deferred"
+import { createDeferred, flushIO, waitFor } from "@/test-helpers/deferred"
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof createFakeVectorStore> | null }))
 const project = vi.hoisted(() => ({ path: "" }))
@@ -35,7 +36,7 @@ vi.mock("@/lib/project-identity", () => ({
   loadRegistry: vi.fn(),
 }))
 
-import { clearQueueState, enqueueMerge, restoreQueue, waitForTask } from "./dedup-queue"
+import { cancelTask, clearQueueState, enqueueMerge, restoreQueue, waitForTask } from "./dedup-queue"
 import { executeMerge } from "./dedup-runner"
 import { recordEmbeddedHashes } from "@/lib/embedding"
 import { __resetProjectLocksForTesting } from "./project-mutex"
@@ -114,5 +115,35 @@ describe("dedup-queue – a re-embed that throws after the merge is done (#80)",
     expect(warn.mock.calls.map(([m]) => String(m))).toContain(
       "[Dedup Queue] Re-embed after merging echo-loop,echo-loops failed: EACCES: permission denied, open '.llm-wiki/embedded-pages.json'",
     )
+  })
+
+  it("logs a re-embed that throws after a cancel as the re-embed's failure, not the cancel (#82)", async () => {
+    const log = vi.spyOn(console, "log")
+    const warn = vi.spyOn(console, "warn")
+    const merging = createDeferred<void>()
+    mockExecuteMerge.mockImplementation(async () => {
+      await merging.promise
+      return {
+        canonicalContent: "",
+        canonicalPath: "wiki/concepts/echo-loop.md",
+        rewrites: [],
+        pagesToDelete: [],
+        backup: [],
+      }
+    })
+
+    const id = await enqueueMerge(PROJECT_ID, { slugs: ["echo-loop", "echo-loops"], confidence: "high", reason: "test" }, "echo-loop")
+    await waitFor(() => mockExecuteMerge.mock.calls.length > 0)
+    // The cancel lands while the merge writes; the pages it wrote are
+    // still re-embedded.
+    await cancelTask(id)
+    merging.resolve()
+    await waitFor(() => mockRecord.mock.calls.length > 0)
+    await flushIO(20)
+
+    expect(warn.mock.calls.map(([m]) => String(m))).toContain(
+      "[Dedup Queue] Re-embed after merging echo-loop,echo-loops failed: EACCES: permission denied, open '.llm-wiki/embedded-pages.json'",
+    )
+    expect(log.mock.calls.map(([m]) => String(m)).filter((m) => m.startsWith("[Dedup Queue] Cancelled"))).toEqual([])
   })
 })
