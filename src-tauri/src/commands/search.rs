@@ -2651,4 +2651,34 @@ mod tests {
         assert_eq!(out.results[0].path, "wiki/entities/openclaw.md");
         let _ = fs::remove_dir_all(root);
     }
+
+    #[tokio::test]
+    async fn search_project_keeps_graph_neighbours_by_default() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent Runtime\n---\n\n# Agent Runtime\n\nagent runtime details. [[Tool Registry]]",
+        );
+        write_page(
+            &root,
+            "wiki/concepts/tool-registry.md",
+            "---\ntitle: Tool Registry\n---\n\n# Tool Registry\n\nDefines callable tools.",
+        );
+
+        let out = search_project(
+            root.to_string_lossy().to_string(),
+            "agent runtime".into(),
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.graph_hits, 1);
+        let _ = fs::remove_dir_all(root);
+    }
 }

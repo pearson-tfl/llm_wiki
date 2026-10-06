@@ -22,7 +22,8 @@ vi.mock("./mineru", () => ({
   parseWithMineruResult: vi.fn(),
 }))
 
-// The embedding search runs for real; the Tauri commands under it are faked.
+// The embedding search, which ingest falls back to, runs for real; the Tauri
+// commands under it are faked.
 // A query's vector is its position in `searchQueries`, and the vector store
 // answers it with one chunk per page listed for that query in `searchHits`.
 // Either command can fail instead, rejecting with a string as a Tauri

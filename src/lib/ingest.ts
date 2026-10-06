@@ -3045,8 +3045,8 @@ async function selectExistingPageCandidates(
           try {
             const { results, vectorError } = await searchWikiMatches(projectPath, query, CANDIDATE_HYBRID_HITS_PER_TOPIC)
             hits = results
-            const keywordsOnly = vectorError && `Existing-page search used keywords only: ${vectorError}`
-            if (keywordsOnly && !skipped.includes(keywordsOnly)) skipped.push(keywordsOnly)
+            const keywordsOnlyLine = vectorError && `Existing-page search used keywords only: ${vectorError}`
+            if (keywordsOnlyLine && !skipped.includes(keywordsOnlyLine)) skipped.push(keywordsOnlyLine)
           } catch (err) {
             hybridFailed = true
             skipped.push(`Hybrid search failed, so the vector search was used: ${err instanceof Error ? err.message : String(err)}`)
