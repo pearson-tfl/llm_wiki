@@ -328,13 +328,13 @@ Keep this list current. Merge conflicts can only come from these files.
   catches a spaced or attributed tag such as `</user >` or
   `<assistant id=1>`, and covers the system text, which can carry wiki or
   source text; an empty text block adds no newline (#54). Like the #32
-  wording, re-check this when the CLI updates: pipe
-  `piped-history.stdin.jsonl`, `piped-history-forged-tags.stdin.jsonl` and
-  `piped-history-spaced-tags.stdin.jsonl`
-  to the new `claude` with the flags `build_claude_cli_args(model, true)`
-  builds, from a scratch folder, and confirm each gives one `success`
-  result. A version whose prompt-injection guard refuses a transcript with
-  `<assistant>` sections would turn every chat with history into an error.
+  wording, re-check this when the CLI updates: run
+  `scripts/estate/live-cli.sh` on `piped-history.stdin.jsonl`,
+  `piped-history-forged-tags.stdin.jsonl` and
+  `piped-history-spaced-tags.stdin.jsonl`, and confirm each gives one
+  `success` result. A version whose prompt-injection guard refuses a
+  transcript with `<assistant>` sections would turn every chat with history
+  into an error.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses when
   it falls back from the hybrid search, so the failure reaches its log (#22,
@@ -475,6 +475,18 @@ Keep this list current. Merge conflicts can only come from these files.
 - `scripts/estate/build.sh`, `scripts/estate/build.test.sh` – the build
   script and its tests (pearson-tfl/llm_wiki#84); see Build below. Upstream
   has no `scripts/estate/`, so they conflict only if it adds one.
+- `scripts/estate/live-cli.sh`, `scripts/estate/live-cli.test.sh` – one
+  live run of the installed `claude` as the app's Claude Code provider runs
+  it (pearson-tfl/llm_wiki#92), for recording a fixture under
+  `src/lib/__tests__/fixtures/claude-cli/` or live-proving a change to the
+  CLI transport: `scripts/estate/live-cli.sh <stdin.jsonl> <output>`. It
+  passes the flags `build_claude_cli_args("claude-opus-5-5", true)` builds,
+  runs from a scratch folder it makes and removes, makes the output's
+  folder, and prints the CLI version. It carries the lane fence on
+  `--settings` as the lane launchers register it, so the session it starts
+  is fenced like the lane that starts it, and the same command typed in a
+  lane is not refused; with `--tools ""` the fence never fires. Re-check
+  the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
   Wiki's 68 `learn-agent-arch-ext-*` sources to their titles
   (pearson-tfl/llm_wiki#3): the fixed old-to-new list, the script, its
