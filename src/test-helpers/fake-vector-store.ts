@@ -29,14 +29,18 @@ export function fakeEmbedding(text: string): number[] {
 export function createFakeVectorStore() {
   const pages = new Map<string, StoredChunk[]>()
   // `hung`: while set, an embedding request for text holding `matching`
-  // waits on `until`, as on an endpoint that never answers.
+  // waits on `until`, as on an endpoint that never answers. `rejecting`:
+  // while set, a request for text holding it is refused, as a page the
+  // endpoint cannot embed.
   const state = {
     endpointDown: false,
     hung: null as { matching: string; until: Promise<void> } | null,
+    rejecting: null as string | null,
   }
   async function answer(texts: string[]): Promise<void> {
     if (state.hung && texts.some((t) => t.includes(state.hung!.matching))) await state.hung.until
     if (state.endpointDown) throw new Error("connection refused")
+    if (state.rejecting && texts.some((t) => t.includes(state.rejecting!))) throw new Error("HTTP 400: input rejected")
   }
   const calls: { cmd: string; args: Record<string, unknown> }[] = []
 

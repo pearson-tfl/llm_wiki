@@ -10,6 +10,7 @@ import {
   contentPagesInTree,
   embedPage,
   extractEmbeddingTitle,
+  fetchEmbedding,
   getLastEmbeddingError,
   hasEmbeddableText,
   isContentPagePath,
@@ -30,8 +31,10 @@ const FAILURE_LOG_PATH = ".llm-wiki/embedding-failures.jsonl"
  *  A page is a few chunks, so this is a few thousand embedding calls. */
 export const BACKFILL_MAX_PAGES = 500
 
-/** Failed embeds in a row after which a backfill stops: the endpoint is
- *  taken to be down, and the rest wait for the next tick (#73). */
+/** Failed embeds in a row after which a backfill checks the endpoint with
+ *  one request, and stops if that fails too: the rest wait for the next
+ *  tick (#73). If the endpoint answers, the pages themselves failed, and
+ *  the run carries on. */
 export const BACKFILL_STOP_AFTER_FAILURES = 5
 
 /** Lines the failures file keeps; the oldest go first (#73). */
@@ -61,8 +64,8 @@ let failureWrites: Promise<unknown> = Promise.resolve()
  * `limit`, the content pages that have no vectors under their
  * folder-qualified id (missing, or stored under the old bare slug only),
  * then those whose file changed since they were embedded. Stops after
- * BACKFILL_STOP_AFTER_FAILURES failed embeds in a row. Returns null while
- * embeddings are off.
+ * BACKFILL_STOP_AFTER_FAILURES failed embeds in a row when the endpoint
+ * does not answer a check. Returns null while embeddings are off.
  */
 export async function runEmbeddingBackfill(
   projectPath: string,
@@ -108,10 +111,13 @@ export async function runEmbeddingBackfill(
         continue
       }
       failed++
-      if (++failedInARow >= BACKFILL_STOP_AFTER_FAILURES) {
-        stoppedEarly = `stopped after ${failedInARow} failed embeds in a row: ${failure}`
-        break
+      if (++failedInARow < BACKFILL_STOP_AFTER_FAILURES) continue
+      if (await endpointAnswers(cfg)) {
+        failedInARow = 0
+        continue
       }
+      stoppedEarly = `stopped after ${failedInARow} failed embeds in a row: ${failure}`
+      break
     }
   } finally {
     await recordEmbeddedHashes(pp, embeddedHashes)
@@ -119,6 +125,11 @@ export async function runEmbeddingBackfill(
   const coverage: VectorCoverage = { pages: pages.length, covered: covered + embedded, embedded, failed, orphansRemoved }
   if (stoppedEarly) coverage.stoppedEarly = stoppedEarly
   return coverage
+}
+
+/** One short request, no retries: does the endpoint embed anything? */
+async function endpointAnswers(cfg: EmbeddingConfig): Promise<boolean> {
+  return (await fetchEmbedding("embedding endpoint check", cfg, 0)) !== null
 }
 
 /**

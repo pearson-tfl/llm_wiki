@@ -242,6 +242,22 @@ describe("vector backfill – an endpoint that is down (#73)", () => {
     expect(lines).toHaveLength(BACKFILL_STOP_AFTER_FAILURES)
   })
 
+  it("carries on past a run of pages the endpoint refuses while the endpoint itself answers", async () => {
+    // Listed first, so without the endpoint check they would stop every run.
+    for (let i = 0; i < BACKFILL_STOP_AFTER_FAILURES + 1; i++) {
+      await writePage(`concepts/a-bad-${i}.md`, page(`Bad ${i}`, `Poison text ${i}.`))
+    }
+    await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
+    await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
+    fake.state.rejecting = "Poison"
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage).toEqual({ pages: 8, covered: 2, embedded: 2, failed: 6, orphansRemoved: 0 })
+    expect(fake.pages.has("entities/relay")).toBe(true)
+    expect(fake.pages.has("entities/inbox")).toBe(true)
+  })
+
   it("keeps only the newest lines of the failures file", async () => {
     const old = Array.from({ length: FAILURE_LOG_MAX_LINES }, (_, n) => JSON.stringify({ n })).join("\n")
     await writeFileRaw(`${tmp.path}/.llm-wiki/embedding-failures.jsonl`, `${old}\n`)
