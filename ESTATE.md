@@ -394,6 +394,27 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts` and the Rust
   `v2_list_page_ids_returns_each_page_once`; the in-memory store they
   share is `src/test-helpers/fake-vector-store.ts`.
+- `src/lib/embedding-freshness.ts`, `src/lib/embedding.ts`,
+  `src/lib/dedup-runner.ts`, `src/lib/dedup-queue.ts`, `src/lib/ingest.ts`
+  – vector freshness follow-ups (pearson-tfl/llm_wiki#73, from the #67
+  gate). A merge's re-embed of the canonical and rewritten pages runs in
+  the merge queue after the project write lock is released, so an
+  embedding endpoint that hangs no longer holds an ingest's write; the
+  merged-away pages' vectors are still removed inside the lock. The
+  backfill stops after 5 failed embeds in a row and the run's
+  `vectorCoverage` says why (`stoppedEarly`); the rest wait for the next
+  tick. Before embedding, the backfill removes the vectors of every
+  stored page id that names no content page and whose file is gone
+  (`orphansRemoved`); a bare-slug id whose name a page still owns is
+  kept, and an empty listing removes nothing.
+  `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
+  `.llm-wiki/embedded-pages.json` is written once per backfill run, merge
+  re-embed, hub re-embed and ingest, not once per page (`embedPage`'s
+  `hashes` option and the exported `recordEmbeddedHashes`). Tests in
+  `src/lib/embedding-freshness.test.ts`,
+  `src/lib/dedup-runner.reembed.test.ts`,
+  `src/lib/merge-ingest-safety.test.ts` and
+  `src/lib/ingest-embed-record.test.ts`.
 - `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
   the test-only `clearQueueState()` cannot stop an ingest queue save that
   is already writing, so it hands back a promise that settles once that
