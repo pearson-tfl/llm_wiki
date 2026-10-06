@@ -3,6 +3,7 @@ import { createDeferred, flushMicrotasks, type Deferred } from "@/test-helpers/d
 
 vi.mock("./dedup-runner", () => ({
   executeMerge: vi.fn(),
+  reembedMergedPages: vi.fn(),
 }))
 
 vi.mock("@/commands/fs", () => ({

@@ -28,7 +28,7 @@ import { normalizePath } from "@/lib/path-utils"
 import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
-import { executeMerge } from "@/lib/dedup-runner"
+import { executeMerge, reembedMergedPages } from "@/lib/dedup-runner"
 import { MergeReplyRejectedError, type DuplicateGroup } from "@/lib/dedup"
 import { withProjectLock } from "@/lib/project-mutex"
 import { isIngestActive } from "@/lib/ingest-queue"
@@ -689,15 +689,20 @@ async function processNext(projectId: string): Promise<void> {
     // last write, so an ingest that reaches its write meanwhile waits for
     // it. Ingest may have started during the waits above: re-check once
     // the lock is held, and hand the turn back if it has.
-    const merged = await withProjectLock(pp, async () => {
-      if (isIngestActive()) return false
-      await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
-      return true
+    const result = await withProjectLock(pp, async () => {
+      if (isIngestActive()) return null
+      return await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
     })
+    const merged = result !== null
+    if (merged) {
+      // Tell the rest of the app the wiki tree changed, even if a cancel
+      // landed while the merge wrote.
+      if (currentProjectId === projectId) useWikiStore.getState().bumpDataVersion()
+      // After the lock is released: a hung embedding endpoint must not hold
+      // an ingest's write (#73).
+      await reembedMergedPages(pp, result)
+    }
     if (currentProjectId !== projectId) return
-    // Tell the rest of the app the wiki tree changed, even if a cancel
-    // landed while the merge wrote.
-    if (merged) useWikiStore.getState().bumpDataVersion()
     if (signal.aborted) return
     if (!merged) {
       currentAbortController = null

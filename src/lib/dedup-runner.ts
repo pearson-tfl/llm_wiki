@@ -409,9 +409,10 @@ function isEmbeddingCoverageError(err: unknown): boolean {
  *   7. Apply index.md rewrite (separate pass — index isn't in
  *      otherWikiPages because removing references is a different
  *      operation than slug-rewriting them)
- *   8. Re-embed the canonical and rewritten pages, and remove the
- *      merged-away pages' vectors (#67); a failed embed is recorded,
- *      not thrown
+ *   8. Remove the merged-away pages' vectors (#67)
+ *
+ * The caller re-embeds the pages it wrote with `reembedMergedPages`, once
+ * it has released the project write lock (#73).
  */
 export async function executeMerge(
   projectPath: string,
@@ -506,8 +507,19 @@ export async function executeMerge(
     }
   }
 
-  // 7. Re-embed the pages just written.
-  await reembedWikiPages(pp, [result.canonicalPath, ...result.rewrites.map((r) => r.path)], "merge")
-
   return result
+}
+
+/**
+ * Re-embed the canonical page and every page a merge rewrote (#67). It
+ * waits on the embedding endpoint, so it runs outside the project write
+ * lock (#73). A failed embed is recorded, not thrown, and the page keeps
+ * its old hash, so the next backfill tries it again.
+ */
+export async function reembedMergedPages(projectPath: string, result: MergeResult): Promise<void> {
+  await reembedWikiPages(
+    normalizePath(projectPath),
+    [result.canonicalPath, ...result.rewrites.map((r) => r.path)],
+    "merge",
+  )
 }

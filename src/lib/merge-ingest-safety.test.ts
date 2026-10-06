@@ -8,9 +8,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
 import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { createDeferred, flushIO, type Deferred } from "@/test-helpers/deferred"
+import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { ingestScenarios } from "@/test-helpers/scenarios/ingest-scenarios"
 
 vi.mock("@/commands/fs", () => realFs)
+
+/** The Tauri vector-store and embedding commands, for the tests that turn
+ *  embeddings on; elsewhere a call fails, as with no app behind it. */
+const vectors = vi.hoisted(() => ({ current: null as null | { invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown> } }))
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (cmd: string, args?: Record<string, unknown>) =>
+    vectors.current ? vectors.current.invoke(cmd, args) : Promise.reject(new Error(`no app to run ${cmd}`)),
+}))
 
 const PROJECT_ID = "merge-safety-project"
 const registry = vi.hoisted(() => ({ path: "" }))
@@ -219,6 +228,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.useRealTimers()
+  vectors.current = null
+  useWikiStore.getState().setEmbeddingConfig({ enabled: false, endpoint: "", apiKey: "", model: "" })
   ingestQueue.clearQueueState()
   dedupQueue.clearQueueState()
   await tmp.cleanup()
@@ -312,6 +323,41 @@ describe("ingest and the duplicate merge never write at once (#24)", () => {
     expect(model.mergeCalls).toBe(1)
     expect(await read("wiki/index.md")).toContain("rope")
     expect(await read("wiki/index.md")).not.toContain("transformer-attention")
+  })
+})
+
+describe("a merge's re-embed holds no ingest write (#73)", () => {
+  it("an ingest writes its pages while the merge's re-embed waits on an embedding endpoint that never answers", async () => {
+    const fake = createFakeVectorStore()
+    vectors.current = fake
+    const endpoint = createDeferred<void>()
+    // Only the merged page's text hangs, so the ingest's own embedding
+    // search answers.
+    fake.state.hung = { matching: "In the transformer it is scaled dot-product attention", until: endpoint.promise }
+    useWikiStore.getState().setEmbeddingConfig({
+      enabled: true,
+      endpoint: "http://127.0.0.1:1234/v1/embeddings",
+      apiKey: "",
+      model: "test-embedder",
+    })
+    model.mergeReply = reply(MERGED)
+    model.ingestReplies = [reply(scenario.analysisResponse), reply(scenario.generationResponse)]
+
+    await dedupQueue.enqueueMerge(PROJECT_ID, GROUP, "attention")
+    // The merge has written, and its re-embed is waiting on the endpoint.
+    await waitUntil(() => fake.calls.some((c) =>
+      [String(c.args.text ?? ""), ...((c.args.texts as string[] | undefined) ?? [])]
+        .some((t) => t.includes("In the transformer it is scaled dot-product attention"))))
+    expect(await fileExists(`${tmp.path}/wiki/concepts/transformer-attention.md`)).toBe(false)
+
+    await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
+    await waitUntil(async () => (await read("wiki/index.md")).includes("rope"))
+    expect(await fileExists(`${tmp.path}/wiki/concepts/rope.md`)).toBe(true)
+    expect(dedupQueue.getQueue().map((t) => t.status)).toEqual(["processing"])
+
+    endpoint.resolve()
+    await waitUntil(bothQueuesIdle)
+    expect(fake.pages.has("concepts/attention")).toBe(true)
   })
 })
 

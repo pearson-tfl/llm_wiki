@@ -15,7 +15,9 @@ import {
   isContentPagePath,
   listVectorPageIds,
   loadEmbeddedHashes,
+  recordEmbeddedHashes,
   removePageEmbedding,
+  removeVectorPageId,
   wikiPageIdFromPath,
 } from "@/lib/embedding"
 import { sha256 } from "@/lib/ingest-cache"
@@ -28,6 +30,13 @@ const FAILURE_LOG_PATH = ".llm-wiki/embedding-failures.jsonl"
  *  A page is a few chunks, so this is a few thousand embedding calls. */
 export const BACKFILL_MAX_PAGES = 500
 
+/** Failed embeds in a row after which a backfill stops: the endpoint is
+ *  taken to be down, and the rest wait for the next tick (#73). */
+export const BACKFILL_STOP_AFTER_FAILURES = 5
+
+/** Lines the failures file keeps; the oldest go first (#73). */
+export const FAILURE_LOG_MAX_LINES = 1_000
+
 export type EmbedTrigger = "backfill" | "merge" | "hub-rebuild"
 
 export interface VectorCoverage {
@@ -38,16 +47,22 @@ export interface VectorCoverage {
   covered: number
   embedded: number
   failed: number
+  /** Pages whose file is gone, whose vectors this run removed. */
+  orphansRemoved: number
+  /** Why the run stopped before embedding every page due, when it did. */
+  stoppedEarly?: string
 }
 
 /** Failure-log appends, one at a time, so two cannot overwrite each other. */
 let failureWrites: Promise<unknown> = Promise.resolve()
 
 /**
- * Embed, up to `limit`, the content pages that have no vectors under their
+ * Remove the vectors of pages whose file is gone, then embed, up to
+ * `limit`, the content pages that have no vectors under their
  * folder-qualified id (missing, or stored under the old bare slug only),
- * then those whose file changed since they were embedded. Returns null
- * while embeddings are off.
+ * then those whose file changed since they were embedded. Stops after
+ * BACKFILL_STOP_AFTER_FAILURES failed embeds in a row. Returns null while
+ * embeddings are off.
  */
 export async function runEmbeddingBackfill(
   projectPath: string,
@@ -59,6 +74,7 @@ export async function runEmbeddingBackfill(
   const pages = contentPagesInTree(pp, await listDirectory(`${pp}/wiki`))
   const stored = new Set(await listVectorPageIds(pp))
   const hashes = await loadEmbeddedHashes(pp)
+  const orphansRemoved = await removeOrphanVectors(pp, pages, stored)
 
   let covered = 0
   let failed = 0
@@ -80,11 +96,59 @@ export async function runEmbeddingBackfill(
   }
 
   let embedded = 0
-  for (const page of [...missing, ...stale].slice(0, limit)) {
-    if (await embedOne(pp, page, cfg, "backfill")) embedded++
-    else failed++
+  let failedInARow = 0
+  let stoppedEarly: string | undefined
+  const embeddedHashes: Record<string, string> = {}
+  try {
+    for (const page of [...missing, ...stale].slice(0, limit)) {
+      const failure = await embedOne(pp, page, cfg, "backfill", embeddedHashes)
+      if (failure === null) {
+        embedded++
+        failedInARow = 0
+        continue
+      }
+      failed++
+      if (++failedInARow >= BACKFILL_STOP_AFTER_FAILURES) {
+        stoppedEarly = `stopped after ${failedInARow} failed embeds in a row: ${failure}`
+        break
+      }
+    }
+  } finally {
+    await recordEmbeddedHashes(pp, embeddedHashes)
   }
-  return { pages: pages.length, covered: covered + embedded, embedded, failed }
+  const coverage: VectorCoverage = { pages: pages.length, covered: covered + embedded, embedded, failed, orphansRemoved }
+  if (stoppedEarly) coverage.stoppedEarly = stoppedEarly
+  return coverage
+}
+
+/**
+ * Remove the rows of each stored page id that names no content page and
+ * whose file is confirmed gone. A bare-slug id whose name a page still
+ * owns is kept: its page's own embed clears it once safe. An empty listing
+ * removes nothing. Returns the number removed.
+ */
+async function removeOrphanVectors(
+  pp: string,
+  pages: { id: string }[],
+  stored: Set<string>,
+): Promise<number> {
+  if (pages.length === 0) return 0
+  const ids = new Set(pages.map((p) => p.id))
+  const stems = new Set(pages.map((p) => (p.id.split("/").pop() ?? "").toLowerCase()))
+  let removed = 0
+  for (const id of stored) {
+    if (ids.has(id)) continue
+    if (!id.includes("/") && stems.has(id.toLowerCase())) continue
+    // A page written since the listing still has its file.
+    if (await fileExists(`${pp}/wiki/${id}.md`)) continue
+    try {
+      await removeVectorPageId(pp, id)
+      removed++
+    } catch (err) {
+      console.warn(`[Embedding] backfill: could not remove the vectors of ${id}: ${errorText(err)}`)
+    }
+  }
+  return removed
 }
 
 /**
@@ -101,18 +165,20 @@ export async function reembedWikiPages(
   if (!cfg.enabled || !cfg.model) return 0
   const pp = normalizePath(projectPath)
   let failed = 0
+  const embeddedHashes: Record<string, string> = {}
   for (const path of paths) {
     const pageId = wikiPageIdFromPath(pp, path)
     if (!pageId || !isContentPagePath(path)) continue
     try {
       const content = await readFile(`${pp}/${path}`)
       if (!hasEmbeddableText(content, cfg)) continue
-      if (!(await embedOne(pp, { id: pageId, path, content }, cfg, trigger))) failed++
+      if ((await embedOne(pp, { id: pageId, path, content }, cfg, trigger, embeddedHashes)) !== null) failed++
     } catch (err) {
       failed++
       await recordFailure(pp, trigger, path, errorText(err))
     }
   }
+  await recordEmbeddedHashes(pp, embeddedHashes)
   return failed
 }
 
@@ -131,17 +197,25 @@ interface Due {
   content: string
 }
 
-async function embedOne(pp: string, page: Due, cfg: EmbeddingConfig, trigger: EmbedTrigger): Promise<boolean> {
+/** Embed one page, its hash into `hashes`. Returns null on success, else
+ *  the reason, which it records. */
+async function embedOne(
+  pp: string,
+  page: Due,
+  cfg: EmbeddingConfig,
+  trigger: EmbedTrigger,
+  hashes: Record<string, string>,
+): Promise<string | null> {
   let reason: string
   try {
     const title = extractEmbeddingTitle(page.content, page.id)
-    if (await embedPage(pp, page.id, title, page.content, cfg)) return true
+    if (await embedPage(pp, page.id, title, page.content, cfg, { hashes })) return null
     reason = getLastEmbeddingError() ?? "no chunk could be embedded"
   } catch (err) {
     reason = errorText(err)
   }
   await recordFailure(pp, trigger, relativePath(pp, page.path), reason)
-  return false
+  return reason
 }
 
 async function recordFailure(pp: string, trigger: EmbedTrigger, page: string, reason: string): Promise<void> {
@@ -150,7 +224,8 @@ async function recordFailure(pp: string, trigger: EmbedTrigger, page: string, re
   const line = `${JSON.stringify({ at: new Date().toISOString(), trigger, page, reason })}\n`
   const write = failureWrites.then(async () => {
     const existing = (await fileExists(path)) ? await readFile(path) : ""
-    await writeFile(path, `${existing}${line}`)
+    const kept = existing.split("\n").filter(Boolean).slice(-(FAILURE_LOG_MAX_LINES - 1))
+    await writeFile(path, `${kept.map((l) => `${l}\n`).join("")}${line}`)
   })
   failureWrites = write.catch(() => undefined)
   await write.catch((err) => console.warn(`[Embedding] Could not record the failure: ${err}`))

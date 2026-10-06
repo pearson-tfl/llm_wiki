@@ -384,8 +384,10 @@ export function loadEmbeddedHashes(projectPath: string): Promise<Record<string, 
   return pending
 }
 
-/** Record the hash of each page's embedded text, by page id. */
-async function recordEmbeddedHashes(
+/** Record the hash of each page's embedded text, by page id. One call is
+ *  one write of the whole record, so a caller embedding many pages
+ *  collects their hashes and records them once (#73). */
+export async function recordEmbeddedHashes(
   projectPath: string,
   hashes: Record<string, string>,
 ): Promise<void> {
@@ -548,7 +550,12 @@ export async function embedPage(
   title: string,
   content: string,
   cfg: EmbeddingConfig,
-  options?: { deferOptimization?: boolean },
+  options?: {
+    deferOptimization?: boolean
+    /** Collect the page's hash here for the caller to record with
+     *  `recordEmbeddedHashes`, instead of writing the record now. */
+    hashes?: Record<string, string>
+  },
 ): Promise<boolean> {
   const t0 = performance.now()
   const prepared = await preparePageEmbeddingRows(pageId, title, content, cfg)
@@ -563,7 +570,9 @@ export async function embedPage(
   }
 
   await vectorUpsertPageChunks(projectPath, pageId, prepared.page.rows)
-  await recordEmbeddedHashes(projectPath, { [pageId]: await sha256(content) })
+  const hash = await sha256(content)
+  if (options?.hashes) options.hashes[pageId] = hash
+  else await recordEmbeddedHashes(projectPath, { [pageId]: hash })
   if (!options?.deferOptimization) {
     await noteIncrementalVectorWrite(projectPath)
   }
@@ -964,6 +973,15 @@ export async function removePageEmbedding(
   } catch {
     // non-critical
   }
+}
+
+/**
+ * Remove the rows stored under exactly `pageId`, leaving any bare-slug rows
+ * of the same name alone: for a page that no longer exists, another page
+ * may own that name.
+ */
+export async function removeVectorPageId(projectPath: string, pageId: string): Promise<void> {
+  await vectorDeletePage(projectPath, pageId)
 }
 
 /**

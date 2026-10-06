@@ -44,6 +44,7 @@ vi.mock("@tauri-apps/plugin-store", () => ({
 vi.mock("@/lib/dedup-runner", () => ({
   runDuplicateDetection: vi.fn(),
   executeMerge: vi.fn(),
+  reembedMergedPages: vi.fn(),
   buildDedupLlmCall: vi.fn(),
 }))
 
@@ -490,7 +491,7 @@ describe("scheduled maintenance tick – after merges", () => {
       mergesDone: 0,
       mergesFailed: 0,
       mergesRejected: 0,
-      vectorCoverage: { pages: 0, covered: 0, embedded: 0, failed: 0 },
+      vectorCoverage: { pages: 0, covered: 0, embedded: 0, failed: 0, orphansRemoved: 0 },
     })
     expect(records[1].startedAt).toBe("2026-10-06T10:00:00.000Z")
   })
@@ -511,7 +512,7 @@ describe("scheduled maintenance tick – vector coverage (#67)", () => {
     expect([...vectors.store!.pages.keys()].sort()).toEqual(["concepts/echo-loop", "entities/relay"])
     expect((await runRecords()).slice(-1)[0]).toMatchObject({
       skipReason: null,
-      vectorCoverage: { pages: 2, covered: 2, embedded: 2, failed: 0 },
+      vectorCoverage: { pages: 2, covered: 2, embedded: 2, failed: 0, orphansRemoved: 0 },
     })
     expect(mockDetect).toHaveBeenCalled()
   })

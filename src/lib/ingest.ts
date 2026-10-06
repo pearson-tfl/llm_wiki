@@ -1708,7 +1708,9 @@ async function autoIngestImpl(
   const embCfg = useWikiStore.getState().embeddingConfig
   if (embCfg.enabled && embCfg.model && writtenPaths.length > 0) {
     try {
-      const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
+      const { embedPage, recordEmbeddedHashes, wikiPageIdFromPath } = await import("@/lib/embedding")
+      // One write of the embedded-pages record for the whole ingest (#73).
+      const hashes: Record<string, string> = {}
       for (const wpath of writtenPaths) {
         const pageId = wikiPageIdFromPath(pp, wpath)
         const pageStem = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""
@@ -1717,11 +1719,12 @@ async function autoIngestImpl(
           const content = await readFile(`${pp}/${wpath}`)
           const fmTitle = parseFrontmatter(content).frontmatter?.title
           const title = typeof fmTitle === "string" && fmTitle.trim() ? fmTitle.trim() : pageId
-          await embedPage(pp, pageId, title, content, embCfg)
+          await embedPage(pp, pageId, title, content, embCfg, { hashes })
         } catch {
           // non-critical
         }
       }
+      await recordEmbeddedHashes(pp, hashes)
     } catch {
       // embedding module not available
     }
