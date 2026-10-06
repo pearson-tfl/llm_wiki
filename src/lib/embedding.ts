@@ -415,21 +415,43 @@ export async function recordEmbeddedHashes(
 ): Promise<void> {
   if (Object.keys(hashes).length === 0) return
   const pp = normalizePath(projectPath)
-  // One write at a time per project, each of the whole record as it then is.
-  const write = (embeddedHashWrites.get(pp) ?? Promise.resolve()).then(async () => {
+  await updateEmbeddedHashes(pp, (record) => {
     const latest = Object.entries(hashes).filter(
       ([pageId, { write }]) => latestVectorWrite.get(`${pp}\0${pageId}`) === write,
     )
-    if (latest.length === 0) return
-    const record = await loadEmbeddedHashes(pp)
     for (const [pageId, { hash }] of latest) record[pageId] = hash
-    await writeFile(`${pp}/${EMBEDDED_HASHES_PATH}`, JSON.stringify(record))
+    return latest.length > 0
+  })
+}
+
+/** Remove the recorded hashes of pages whose vectors were removed, in one
+ *  write of the record (#80). */
+export async function removeEmbeddedHashes(projectPath: string, pageIds: string[]): Promise<void> {
+  if (pageIds.length === 0) return
+  const pp = normalizePath(projectPath)
+  await updateEmbeddedHashes(pp, (record) => {
+    const recorded = pageIds.filter((pageId) => Object.prototype.hasOwnProperty.call(record, pageId))
+    for (const pageId of recorded) delete record[pageId]
+    return recorded.length > 0
+  })
+}
+
+/** Apply `update` to the record, then write it if `update` changed it. One
+ *  write at a time per project, each of the whole record as it then is. */
+async function updateEmbeddedHashes(
+  pp: string,
+  update: (record: Record<string, string>) => boolean,
+): Promise<void> {
+  const write = (embeddedHashWrites.get(pp) ?? Promise.resolve()).then(async () => {
+    const record = await loadEmbeddedHashes(pp)
+    if (update(record)) await writeFile(`${pp}/${EMBEDDED_HASHES_PATH}`, JSON.stringify(record))
   })
   embeddedHashWrites.set(pp, write.catch(() => undefined))
   try {
     await write
   } catch (err) {
-    // The vectors are written; a missing entry only re-embeds the page.
+    // The vectors are written or removed: a missing entry only re-embeds
+    // its page, and a leftover one names no page.
     console.warn(`[Embedding] Could not record embedded content: ${err}`)
   }
 }
