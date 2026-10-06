@@ -404,9 +404,10 @@ Keep this list current. Merge conflicts can only come from these files.
   the merge queue after the project write lock is released, so an
   embedding endpoint that hangs no longer holds an ingest's write; the
   merged-away pages' vectors are still removed inside the lock. The
-  backfill stops after 5 failed embeds in a row and the run's
-  `vectorCoverage` says why (`stoppedEarly`); the rest wait for the next
-  tick. Before embedding, the backfill removes the vectors of every
+  backfill, after 5 failed embeds in a row, checks the endpoint with one
+  request: if that fails too it stops, the run's `vectorCoverage` says why
+  (`stoppedEarly`) and the rest wait for the next tick; if it answers, the
+  pages themselves failed and the run carries on. Before embedding, the backfill removes the vectors of every
   stored page id that names no content page and whose file is gone
   (`orphansRemoved`); a bare-slug id whose name a page still owns is
   kept, and an empty listing removes nothing.
