@@ -1,5 +1,5 @@
 /**
- * The #73 and #80 follow-ups on a real embedding endpoint. The merge
+ * The #73, #80 and #82 follow-ups on a real embedding endpoint. The merge
  * queue, the ingest queue, `executeMerge`, `autoIngest` and the backfill
  * are real and write a real temporary project; the model's replies are
  * scripted, and the vector store is the in-memory store (LanceDB is not
@@ -69,7 +69,7 @@ vi.mock("./llm-client", () => ({
 import * as dedupQueue from "./dedup-queue"
 import * as ingestQueue from "./ingest-queue"
 import { embedPage, recordEmbeddedHashes, resetEmbeddingOptimizeAccountingForTests, type EmbeddedHashes } from "./embedding"
-import { BACKFILL_STOP_AFTER_FAILURES, reembedWikiPages, runEmbeddingBackfill } from "./embedding-freshness"
+import { BACKFILL_STOP_AFTER_FAILURES, reembedWikiPages, removeWikiPageEmbeddings, runEmbeddingBackfill } from "./embedding-freshness"
 import { sha256 } from "./ingest-cache"
 import { useReviewStore } from "@/stores/review-store"
 import { useWikiStore, type EmbeddingConfig } from "@/stores/wiki-store"
@@ -145,7 +145,7 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, limitMs = 
   }
 }
 
-describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73, #80)", () => {
+describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73, #80, #82)", () => {
   const cfg: EmbeddingConfig = {
     enabled: true,
     endpoint: process.env.EMBEDDING_ENDPOINT ?? "",
@@ -257,6 +257,31 @@ describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73, #
     const after = Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
     console.log(`[#80 live] with entities/Relay stored beside entities/relay.md: vectorCoverage ${JSON.stringify(third)}; embedded-pages.json ids ${JSON.stringify(after)}`)
     expect(third?.orphansRemoved).toBe(0)
+    expect(after).toEqual(["concepts/sweep", "entities/Relay", "entities/relay"])
+  }, 60_000)
+
+  it("prunes embedded-pages.json by its own ids, keeping an id the Mac's file system still finds (#82)", async () => {
+    await writeFileRaw(`${tmp.path}/wiki/entities/relay.md`, concept("Relay", "The relay carries voice messages."))
+    await writeFileRaw(`${tmp.path}/wiki/entities/inbox.md`, concept("Inbox", "The inbox holds messages."))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/sweep.md`, concept("Sweep", "The sweep runs nightly."))
+    expect((await runEmbeddingBackfill(tmp.path, cfg))?.embedded).toBe(3)
+    // A merge removes the merged-away page's vectors, then its file.
+    await removeWikiPageEmbeddings(tmp.path, ["wiki/entities/inbox.md"])
+    await realFs.deleteFile(`${tmp.path}/wiki/entities/inbox.md`)
+    // An entry left by a delete before #80, and an id differing only in
+    // case from a page; neither has vectors.
+    const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
+    await writeFileRaw(
+      `${tmp.path}/.llm-wiki/embedded-pages.json`,
+      JSON.stringify({ ...record, "entities/gone": await sha256("old text"), "entities/Relay": record["entities/relay"] }),
+    )
+    resetEmbeddingOptimizeAccountingForTests()
+    const before = Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    const after = Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
+    console.log(`[#82 live] stored ids ${JSON.stringify([...store.current!.pages.keys()].sort())}; embedded-pages.json ids before ${JSON.stringify(before)}, after one backfill ${JSON.stringify(after)}; vectorCoverage ${JSON.stringify(coverage)}`)
     expect(after).toEqual(["concepts/sweep", "entities/Relay", "entities/relay"])
   }, 60_000)
 
