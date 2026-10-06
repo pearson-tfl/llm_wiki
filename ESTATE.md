@@ -117,7 +117,9 @@ Keep this list current. Merge conflicts can only come from these files.
   carries start and finish times, the source as `wiki/log.md` names it, the
   ingest cache's SHA-256 of the source text, the ingest preset id and model,
   the analysis's topics, each existing page offered and whether an exact
-  file-name match or the embedding search found it, why a check was skipped,
+  file-name match, the hybrid search or the embedding search found it
+  (`exact-slug`, `hybrid-search`, `vector-search`; #70), why a check was
+  skipped,
   the pages updated and created (the same counts as the log entry), and each
   merge that fell back because its model reply was rejected or the call
   failed, with why. A run that fails early has only the fields it reached.
