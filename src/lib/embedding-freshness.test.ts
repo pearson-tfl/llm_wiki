@@ -92,6 +92,17 @@ describe("vector backfill – which pages it embeds", () => {
     expect(fake.pages.has("entities/relay")).toBe(true)
   })
 
+  it("embeds a page whose recorded hash matches its file but whose vectors are gone", async () => {
+    const content = page("Inbox", "The inbox holds messages.")
+    await writePage("entities/inbox.md", content)
+    await recordHashes({ "entities/inbox": await sha256(content) })
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage).toEqual({ pages: 1, covered: 1, embedded: 1, failed: 0 })
+    expect(fake.pages.has("entities/inbox")).toBe(true)
+  })
+
   it("re-embeds a page whose file changed since it was embedded, so a search finds its new text", async () => {
     const before = page("Sweep", "The sweep runs nightly.")
     const after = page("Sweep", "The sweep now runs hourly with quartz scheduling.")
@@ -147,8 +158,9 @@ describe("vector backfill – which pages it embeds", () => {
 
 describe("vector backfill – the per-run bound", () => {
   it("embeds at most the bound, pages with no vectors first, and leaves the rest for the next run", async () => {
-    await writePage("concepts/stale.md", page("Stale", "Changed text."))
-    fake.pages.set("concepts/stale", storedRow("Old text."))
+    // Listed first, so only the priority puts it last.
+    await writePage("concepts/a-stale.md", page("Stale", "Changed text."))
+    fake.pages.set("concepts/a-stale", storedRow("Old text."))
     await writePage("concepts/missing-a.md", page("Missing A", "No vectors yet."))
     await writePage("concepts/missing-b.md", page("Missing B", "No vectors either."))
 
@@ -159,7 +171,7 @@ describe("vector backfill – the per-run bound", () => {
     fake.calls.length = 0
     const second = await runEmbeddingBackfill(tmp.path, cfg, 2)
     expect(second).toEqual({ pages: 3, covered: 3, embedded: 1, failed: 0 })
-    expect(await upserted()).toEqual(["concepts/stale"])
+    expect(await upserted()).toEqual(["concepts/a-stale"])
   })
 })
 
