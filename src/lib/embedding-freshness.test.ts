@@ -142,6 +142,19 @@ describe("vector backfill – which pages it embeds", () => {
     expect(await upserted()).toEqual([])
   })
 
+  it("treats every page as changed when the embedded-pages record cannot be parsed, and rewrites it", async () => {
+    const fresh = page("Fresh", "Already embedded.")
+    await writePage("concepts/fresh.md", fresh)
+    fake.pages.set("concepts/fresh", storedRow("Already embedded."))
+    await writeFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`, "{not json")
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage).toEqual({ pages: 1, covered: 1, embedded: 1, failed: 0 })
+    const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
+    expect(record["concepts/fresh"]).toBe(await sha256(fresh))
+  })
+
   it("records the hash of each page it embeds, so the next run embeds nothing", async () => {
     await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
     await runEmbeddingBackfill(tmp.path, cfg)
