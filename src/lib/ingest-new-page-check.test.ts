@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import fs from "node:fs/promises"
 import { createTempProject, realFs, readFileRaw, writeFileRaw } from "@/test-helpers/fs-temp"
 import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore } from "@/stores/review-store"
@@ -269,6 +270,19 @@ describe("autoIngest checks each new concept or entity page against existing pag
     expect(await log()).toContain(
       "- New-page check skipped: search failed: vector store: table wiki_chunks_v2 not found.",
     )
+    expect((await lastRecord()).outcome).toBe("done")
+  })
+
+  it("completes the ingest and logs the skip when an existing page cannot be read", async () => {
+    // A folder where the search hit's page file should be: it exists, but
+    // reading it fails.
+    await fs.mkdir(`${tmp.path}/wiki/entities/todo-list.md`, { recursive: true })
+    vectorIndex = [{ id: "entities/todo-list", text: "Todo List" }]
+
+    const written = await ingest()
+
+    expect(written).toContain("wiki/entities/todowrite.md")
+    expect(await log()).toMatch(/- New-page check skipped: .*EISDIR.*\./)
     expect((await lastRecord()).outcome).toBe("done")
   })
 
