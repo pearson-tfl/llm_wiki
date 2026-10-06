@@ -1924,6 +1924,7 @@ fn handle_search(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
         top_k,
         req.include_content.unwrap_or(false),
         query_embedding,
+        true,
     )) {
         Ok(search) => ok(json!({
             "ok": true,

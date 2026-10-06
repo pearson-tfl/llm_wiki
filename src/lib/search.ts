@@ -25,6 +25,8 @@ interface BackendSearchResponse {
   tokenHits: number
   vectorHits: number
   graphHits?: number
+  /** Why the vector half did not run; the keyword hits still stand. */
+  vectorError?: string
 }
 
 const STOP_WORDS = new Set([
@@ -80,4 +82,29 @@ export async function searchWiki(
     ...result,
     path: `${pp}/${normalizePath(result.path).replace(/^\/+/, "")}`,
   }))
+}
+
+/**
+ * The wiki's best keyword-and-vector matches for a query, with no graph
+ * neighbours: project-relative paths, best first, and why the vector half
+ * failed when it did. Rejects when the search itself fails.
+ */
+export async function searchWikiMatches(
+  projectPath: string,
+  query: string,
+  topK: number,
+): Promise<{ results: Array<{ path: string; score: number }>; vectorError?: string }> {
+  const response = await invoke<BackendSearchResponse>("search_project", {
+    projectPath,
+    query,
+    topK,
+    includeContent: false,
+    queryEmbedding: null,
+    embeddingConfig: useWikiStore.getState().embeddingConfig,
+    includeGraph: false,
+  })
+  return {
+    results: response.results.map(({ path, score }) => ({ path: normalizePath(path).replace(/^\/+/, ""), score })),
+    vectorError: response.vectorError,
+  }
 }
