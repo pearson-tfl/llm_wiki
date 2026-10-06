@@ -472,6 +472,9 @@ Keep this list current. Merge conflicts can only come from these files.
   restore (pearson-tfl/llm_wiki#58). Production switches projects through
   `pauseQueue()`, which already waits for every save. Tests in
   `src/lib/ingest-queue.test.ts`.
+- `scripts/estate/build.sh`, `scripts/estate/build.test.sh` – the build
+  script and its tests (pearson-tfl/llm_wiki#84); see Build below. Upstream
+  has no `scripts/estate/`, so they conflict only if it adds one.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain
@@ -487,19 +490,23 @@ Agent-Harness-Reconfig, kept out of git by `.git/info/exclude`.
 
 ## Build
 
-Needs Node 20 or later (built here with 22), Rust (installed at
-`~/.cargo/bin`, not on the agent PATH) and protoc, which upstream's README
-lists (`brew install protobuf`; installed at `/opt/homebrew/bin/protoc`).
+Build only through the script, never by typing its steps:
 
 ```sh
-cd /Users/johnp/Code/llm_wiki
-export PATH="$HOME/.cargo/bin:$PATH"
-npm ci
-npx tauri build --bundles app
+/Users/johnp/Code/llm_wiki/scripts/estate/build.sh
 ```
 
-Output: `src-tauri/target/release/bundle/macos/LLM Wiki.app`. First build about
-10 minutes, later builds faster. `--bundles app` skips the `.dmg`: making it
+It builds the checkout it lives in. It puts Rust (`~/.cargo/bin`) and protoc
+(`/opt/homebrew/bin`) on PATH itself, since neither is on the agent PATH;
+stops before building, naming the tool, if node, cargo or protoc is missing;
+runs `npm ci` and `npx tauri build --bundles app`; and ends by printing the
+commit it built (the value Settings > About will show) and the bundle path,
+`src-tauri/target/release/bundle/macos/LLM Wiki.app`. Tests:
+`scripts/estate/build.test.sh`.
+
+Needs Node 20 or later (built here with 22), Rust and protoc, which
+upstream's README lists (`brew install protobuf`). First build about 10
+minutes, later builds faster. `--bundles app` skips the `.dmg`: making it
 scripts Finder, which can raise a macOS permission dialog.
 
 ## Install
