@@ -292,6 +292,11 @@ function noteVectorWrite(projectPath: string, pageId: string): number {
   return vectorWriteCount
 }
 
+/** The number of the page's latest vector write, 0 if none this session. */
+export function vectorWriteNumber(projectPath: string, pageId: string): number {
+  return latestVectorWrite.get(`${normalizePath(projectPath)}\0${pageId}`) ?? 0
+}
+
 async function vectorCountChunks(projectPath: string): Promise<number> {
   return await invoke("vector_count_chunks", {
     projectPath: normalizePath(projectPath),
@@ -424,14 +429,19 @@ export async function recordEmbeddedHashes(
   })
 }
 
-/** Remove the recorded hashes of pages whose vectors were removed, in one
- *  write of the record (#80). */
-export async function removeEmbeddedHashes(projectPath: string, pageIds: string[]): Promise<void> {
-  if (pageIds.length === 0) return
+/** Remove the recorded hashes of pages that are gone, in one write of the
+ *  record (#80). `gone` maps each page id to its `vectorWriteNumber` when
+ *  it was found gone; a page whose vectors have been written since keeps
+ *  its hash (#82). */
+export async function removeEmbeddedHashes(projectPath: string, gone: Record<string, number>): Promise<void> {
+  if (Object.keys(gone).length === 0) return
   const pp = normalizePath(projectPath)
   await updateEmbeddedHashes(pp, (record) => {
-    const recorded = pageIds.filter((pageId) => Object.prototype.hasOwnProperty.call(record, pageId))
-    for (const pageId of recorded) delete record[pageId]
+    const recorded = Object.entries(gone).filter(
+      ([pageId, write]) =>
+        Object.prototype.hasOwnProperty.call(record, pageId) && vectorWriteNumber(pp, pageId) === write,
+    )
+    for (const [pageId] of recorded) delete record[pageId]
     return recorded.length > 0
   })
 }

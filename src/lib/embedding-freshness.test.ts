@@ -41,6 +41,7 @@ import {
   BACKFILL_STOP_AFTER_FAILURES,
   FAILURE_LOG_MAX_LINES,
   reembedWikiPages,
+  removeWikiPageEmbeddings,
   runEmbeddingBackfill,
 } from "./embedding-freshness"
 import { useWikiStore, type EmbeddingConfig } from "@/stores/wiki-store"
@@ -81,6 +82,10 @@ function storedRow(text: string) {
 
 async function recordHashes(hashes: Record<string, string>): Promise<void> {
   await writeFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`, JSON.stringify(hashes))
+}
+
+async function recordedIds(): Promise<string[]> {
+  return Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
 }
 
 async function upserted(): Promise<string[]> {
@@ -344,10 +349,6 @@ describe("vector backfill – the embedded-pages record (#73)", () => {
 })
 
 describe("vector backfill – recorded hashes of pages that are gone (#80)", () => {
-  async function recordedIds(): Promise<string[]> {
-    return Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
-  }
-
   it("removes the recorded hash of a page deleted since the last run", async () => {
     await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
     await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
@@ -389,6 +390,85 @@ describe("vector backfill – recorded hashes of pages that are gone (#80)", () 
 
     expect(coverage?.orphansRemoved).toBe(0)
     expect(await recordedIds()).toEqual(["entities/inbox", "entities/relay"])
+  })
+})
+
+describe("vector backfill – recorded hashes pruned by the record's own ids (#82)", () => {
+  it("removes the recorded hash of a page that has neither vectors nor a file", async () => {
+    const content = page("Relay", "The relay carries voice messages.")
+    await writePage("entities/relay.md", content)
+    fake.pages.set("entities/relay", storedRow(content))
+    // Left by a delete before #80, which removed the vectors only.
+    await recordHashes({ "entities/relay": await sha256(content), "entities/inbox": await sha256("old inbox text") })
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage).toEqual({ pages: 1, covered: 1, embedded: 0, failed: 0, orphansRemoved: 0 })
+    expect(await recordedIds()).toEqual(["entities/relay"])
+  })
+
+  it("removes the recorded hash of a page a merge deleted", async () => {
+    await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
+    await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
+    await runEmbeddingBackfill(tmp.path, cfg)
+    // The merge removes the merged-away page's vectors, then its file.
+    await removeWikiPageEmbeddings(tmp.path, ["wiki/entities/inbox.md"])
+    await realFs.deleteFile(`${tmp.path}/wiki/entities/inbox.md`)
+    expect(await recordedIds()).toEqual(["entities/inbox", "entities/relay"])
+
+    await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(await recordedIds()).toEqual(["entities/relay"])
+  })
+
+  it("keeps the recorded hash of an id with no vectors differing only in case from a page, whose file the Mac still finds", async () => {
+    lookup.ignoresCase = true
+    const content = page("Relay", "The relay carries voice messages.")
+    await writePage("entities/relay.md", content)
+    fake.pages.set("entities/relay", storedRow(content))
+    await recordHashes({ "entities/relay": await sha256(content), "entities/Relay": await sha256(content) })
+
+    await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(await recordedIds()).toEqual(["entities/Relay", "entities/relay"])
+  })
+
+  it("keeps every recorded hash when the wiki lists no content pages", async () => {
+    await recordHashes({ "entities/inbox": await sha256("old inbox text") })
+
+    await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(await recordedIds()).toEqual(["entities/inbox"])
+  })
+
+  it("keeps the recorded hash of a page whose vectors land again after its old ones are removed", async () => {
+    await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
+    await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
+    await runEmbeddingBackfill(tmp.path, cfg)
+    await realFs.deleteFile(`${tmp.path}/wiki/entities/inbox.md`)
+    // An ingest writes the page again, and embeds it, just after the
+    // backfill removes its old vectors.
+    const rewritten = page("Inbox", "The inbox now queues voice notes.")
+    let relanded = false
+    store.current = {
+      ...fake,
+      invoke: async (cmd: string, args?: Record<string, unknown>) => {
+        const out = await fake.invoke(cmd, args)
+        if (cmd === "vector_delete_page" && args?.pageId === "entities/inbox" && !relanded) {
+          relanded = true
+          await writePage("entities/inbox.md", rewritten)
+          expect(await embedPage(tmp.path, "entities/inbox", "Inbox", rewritten, cfg)).toBe(true)
+        }
+        return out
+      },
+    }
+
+    await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(relanded).toBe(true)
+    expect(fake.pages.get("entities/inbox")?.[0].chunk_text).toContain("queues voice notes")
+    const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
+    expect(record["entities/inbox"]).toBe(await sha256(rewritten))
   })
 })
 
