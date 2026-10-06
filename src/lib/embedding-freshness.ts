@@ -64,10 +64,11 @@ export interface VectorCoverage {
 let failureWrites: Promise<unknown> = Promise.resolve()
 
 /**
- * Remove the vectors and recorded hash of pages whose file is gone, then
- * embed, up to `limit`, the content pages that have no vectors under their
- * folder-qualified id (missing, or stored under the old bare slug only),
- * then those whose file changed since they were embedded. Stops after
+ * Remove the vectors and recorded hash of pages whose file is gone, and
+ * the recorded hash of any other gone page the record still names (#82),
+ * then embed, up to `limit`, the content pages that have no vectors under
+ * their folder-qualified id (missing, or stored under the old bare slug
+ * only), then those whose file changed since they were embedded. Stops after
  * BACKFILL_STOP_AFTER_FAILURES failed embeds in a row when the endpoint
  * does not answer a check. Returns null while embeddings are off.
  */

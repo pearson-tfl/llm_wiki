@@ -442,8 +442,8 @@ Keep this list current. Merge conflicts can only come from these files.
   and an empty listing removes nothing.
   `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
   `.llm-wiki/embedded-pages.json` is written once per backfill run (twice
-  when it removed entries of gone pages), merge re-embed, hub re-embed and ingest, not
-  once per page (`embedPage`'s
+  when it removed entries of gone pages), merge re-embed, hub re-embed
+  and ingest, not once per page (`embedPage`'s
   `hashes` option and the exported `recordEmbeddedHashes`). Each page's
   vector writes are numbered in the order they land, and a batch records
   a page's hash only if its own write is still the page's latest, so a
