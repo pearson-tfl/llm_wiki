@@ -71,3 +71,16 @@ export function getTaskLlmConfig(task: LlmTaskKind, fallback?: LlmConfig): LlmCo
     state.customLlmPresets,
   )
 }
+
+/**
+ * The preset id behind getTaskLlmConfig("ingest"): the project override's,
+ * else the ingest route's, when that preset exists; otherwise the globally
+ * active preset, which the fallback config was resolved from.
+ */
+export function getIngestLlmPresetId(): string | null {
+  const state = useWikiStore.getState()
+  const routed = state.projectLlmOverride.enabled
+    ? state.projectLlmOverride.presetId
+    : state.taskModelRouting.ingestPresetId
+  return routed && findLlmPreset(routed, state.customLlmPresets) ? routed : state.activePresetId
+}

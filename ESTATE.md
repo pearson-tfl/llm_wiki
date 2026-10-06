@@ -106,6 +106,22 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/ingest-candidates.test.ts` and `src/lib/ingest.prompt.test.ts`.
   `src/lib/ingest-source-path-collision.test.ts` had its merge fake matched to
   the real merge prompt.
+- `src/lib/ingest.ts`, `src/lib/page-merge.ts`, `src/lib/ingest-cache.ts`,
+  `src/lib/llm-task-routing.ts` – each ingest attempt appends one JSON line to
+  `.llm-wiki/ingest-runs.jsonl` (pearson-tfl/llm_wiki#68), whether it was
+  done, skipped as a cache hit, or failed, with the reason or error. The line
+  carries start and finish times, the source as `wiki/log.md` names it, the
+  ingest cache's SHA-256 of the source text, the ingest preset id and model,
+  the analysis's topics, each existing page offered and whether an exact
+  file-name match or the embedding search found it, why a check was skipped,
+  the pages updated and created (the same counts as the log entry), and each
+  merge that fell back because its model reply was rejected or the call
+  failed, with why. A run that fails early has only the fields it reached.
+  Writes go one at a time, and a write that fails is logged, never failing
+  the ingest. `page-merge.ts` gains an optional fall-back callback,
+  `ingest-cache.ts` exports its hash and `llm-task-routing.ts` gains
+  `getIngestLlmPresetId`. No screen shows the file yet. Tests in
+  `src/lib/ingest-run-record.test.ts` and `src/lib/llm-task-routing.test.ts`.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`,

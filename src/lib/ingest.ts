@@ -24,7 +24,8 @@ import {
   sourceSummarySlugFromIdentity,
 } from "@/lib/source-identity"
 import { parseSources, writeSources } from "@/lib/sources-merge"
-import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
+import { checkIngestCache, saveIngestCache, sha256 } from "@/lib/ingest-cache"
+import { getIngestLlmPresetId } from "@/lib/llm-task-routing"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
 import { withProjectLock } from "@/lib/project-mutex"
@@ -83,6 +84,41 @@ const CANDIDATE_MIN_PAGE_CHARS = 1_000
 const CANDIDATE_FALLBACK_QUERY_MAX = 2_000
 // An exact title-path match outranks any similarity score.
 const EXACT_PATH_SCORE = Number.POSITIVE_INFINITY
+const INGEST_RUN_RECORD_PATH = ".llm-wiki/ingest-runs.jsonl"
+
+/** How an existing page came to be offered to generation. */
+type CandidateFinder = "exact-slug" | "vector-search"
+
+/** One line of `.llm-wiki/ingest-runs.jsonl`: one per autoIngest call. */
+export interface IngestRunRecord {
+  startedAt: string
+  finishedAt: string
+  /** The source's path under raw/sources/ (else as given), as wiki/log.md
+   *  and the ingest cache name it. */
+  source: string
+  /** The ingest cache's SHA-256 of the source text; null when the run
+   *  failed before the source was read. */
+  contentHash: string | null
+  outcome: "done" | "skipped" | "failed"
+  /** Why the run was skipped, or the error that failed it. */
+  reason?: string
+  presetId: string | null
+  model: string
+  /** From here on, present once the run reached that step. */
+  topics?: string[]
+  candidates?: { path: string; foundBy: CandidateFinder[] }[]
+  /** Candidate checks that did not run, and why. */
+  searchSkipped?: string[]
+  updatedPages?: string[]
+  createdPages?: string[]
+  /** Merges whose model reply was rejected or whose call failed, so the
+   *  page took the incoming text and the old text was backed up. */
+  mergeFallbacks?: { path: string; reason: string }[]
+}
+
+/** Run-record appends, one at a time, so two sources finishing together
+ *  cannot overwrite each other's line. */
+let ingestRunRecordWrites: Promise<unknown> = Promise.resolve()
 
 export class NonRetryableIngestError extends Error {
   readonly nonRetryable = true
@@ -664,16 +700,57 @@ export async function autoIngest(
   const sp = normalizePath(sourcePath)
   return withProjectLock(
     `ingest-source\0${pp}\0${sp}`,
-    () => autoIngestImpl(
-      projectPath,
-      sourcePath,
-      llmConfig,
-      signal,
-      folderContext,
-      onFileWritten,
-      options,
-    ),
+    async () => {
+      const record: IngestRunRecord = {
+        startedAt: new Date().toISOString(),
+        finishedAt: "",
+        source: sourceIdentityForPath(pp, sp),
+        contentHash: null,
+        outcome: "done",
+        presetId: getIngestLlmPresetId(),
+        model: llmConfig.model,
+      }
+      try {
+        return await autoIngestImpl(
+          projectPath,
+          sourcePath,
+          llmConfig,
+          record,
+          signal,
+          folderContext,
+          onFileWritten,
+          options,
+        )
+      } catch (err) {
+        record.outcome = "failed"
+        record.reason = err instanceof Error ? err.message : String(err)
+        throw err
+      } finally {
+        record.finishedAt = new Date().toISOString()
+        await appendIngestRunRecord(pp, record)
+      }
+    },
   )
+}
+
+/** Appends the run's line; a failed write is logged, never thrown. */
+function appendIngestRunRecord(projectPath: string, record: IngestRunRecord): Promise<void> {
+  const path = `${projectPath}/${INGEST_RUN_RECORD_PATH}`
+  const write = ingestRunRecordWrites
+    .then(async () => {
+      // A file that exists but cannot be read fails the append rather than
+      // being rewritten from empty.
+      const existing = (await fileExists(path)) ? await readFile(path) : ""
+      await writeFile(path, `${existing}${JSON.stringify(record)}\n`)
+    })
+    .catch((err) => {
+      console.warn(
+        `[ingest] Failed to write ingest run record for "${record.source}":`,
+        err instanceof Error ? err.message : err,
+      )
+    })
+  ingestRunRecordWrites = write
+  return write
 }
 
 function throwIfIngestAborted(signal: AbortSignal | undefined, activityId?: string): void {
@@ -736,6 +813,7 @@ async function autoIngestImpl(
   projectPath: string,
   sourcePath: string,
   llmConfig: LlmConfig,
+  record: IngestRunRecord,
   signal?: AbortSignal,
   folderContext?: string,
   onFileWritten?: (relativePath: string) => void,
@@ -823,6 +901,7 @@ async function autoIngestImpl(
       )
     }
   }
+  record.contentHash = await sha256(sourceContent)
   if (isPdf && mineruSavedImages.length === 0 && hasMineruImageRefs(sourceContent, sourceSummarySlug)) {
     mineruSavedImages = await savedImagesFromMineruMarkdown(pp, sourceSummarySlug, sourceContent)
     if (mineruSavedImages.length > 0) {
@@ -844,6 +923,8 @@ async function autoIngestImpl(
   const cachedFiles = await checkIngestCache(pp, sourceIdentity, sourceContent)
   console.log(`[ingest:diag] cache check for "${sourceIdentity}":`, cachedFiles === null ? "MISS (full pipeline)" : `HIT (${cachedFiles.length} cached files)`)
   if (cachedFiles !== null) {
+    record.outcome = "skipped"
+    record.reason = "cache hit: source unchanged since its last ingest"
     return runCommit(async () => {
       throwIfIngestAborted(signal, activityId)
       try {
@@ -1147,6 +1228,9 @@ async function autoIngestImpl(
     sourceSummaryPath,
     llmConfig.maxContextSize,
   )
+  record.topics = candidates.topics
+  record.candidates = candidates.pages.map(({ path }) => ({ path, foundBy: candidates.foundBy.get(path) ?? [] }))
+  record.searchSkipped = candidates.skipped
   throwIfIngestAborted(signal, activityId)
 
   // ── Step 2: Generation ────────────────────────────────────────
@@ -1319,6 +1403,7 @@ async function autoIngestImpl(
   const hardFailures = writeResult.hardFailures
   const createdPaths = [...writeResult.createdPaths]
   const updatedPaths = [...writeResult.updatedPaths]
+  const mergeFallbacks = [...writeResult.mergeFallbacks]
   let unrecoveredTruncatedPaths = uniqueNormalizedPaths(
     writeResult.truncatedPaths.filter((path) =>
       !writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))
@@ -1414,6 +1499,7 @@ async function autoIngestImpl(
         hardFailures.push(...repairResult.hardFailures)
         createdPaths.push(...repairResult.createdPaths)
         updatedPaths.push(...repairResult.updatedPaths)
+        mergeFallbacks.push(...repairResult.mergeFallbacks)
         const recoveredPathKeys = new Set(recoveredPaths.map(normalizePath))
         unrecoveredTruncatedPaths = unrecoveredTruncatedPaths.filter((path) =>
           !recoveredPathKeys.has(normalizePath(path))
@@ -1438,6 +1524,11 @@ async function autoIngestImpl(
     )
   }
 
+  const pageWrites = createdAndUpdatedPages(createdPaths, updatedPaths)
+  record.createdPages = pageWrites.created
+  record.updatedPages = pageWrites.updated
+  record.mergeFallbacks = mergeFallbacks
+
   // log.md is append-only structural metadata. If the model omitted its FILE
   // block, write a deterministic entry instead of starting another LLM turn.
   // This keeps multi-file imports at two generation stages per source and
@@ -1447,7 +1538,7 @@ async function autoIngestImpl(
     try {
       const logPath = `${pp}/wiki/log.md`
       const existingLog = await tryReadFile(logPath)
-      const details = formatCandidateLogDetails(candidates, createdPaths, updatedPaths)
+      const details = formatCandidateLogDetails(candidates, pageWrites)
       if (writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md")) {
         await writeFile(logPath, `${existingLog.trimEnd()}\n\n${details.join("\n")}\n`)
       } else {
@@ -2072,6 +2163,7 @@ async function writeFileBlocks(
   truncatedPaths: string[]
   createdPaths: string[]
   updatedPaths: string[]
+  mergeFallbacks: { path: string; reason: string }[]
 }> {
   const { blocks, warnings: parseWarnings, truncatedPaths } = parseFileBlocks(text)
   const warnings = [...parseWarnings]
@@ -2092,6 +2184,7 @@ async function writeFileBlocks(
   // Content pages written over an existing page, and pages that did not exist.
   const createdPaths: string[] = []
   const updatedPaths: string[] = []
+  const mergeFallbacks: { path: string; reason: string }[] = []
   const projectSchemaRouting = await loadProjectWikiSchemaRouting(projectPath)
 
   const targetLang = useWikiStore.getState().outputLanguage
@@ -2236,6 +2329,7 @@ async function writeFileBlocks(
             pagePath: relativePath,
             signal,
             backup: (oldContent) => backupExistingPage(projectPath, relativePath, oldContent),
+            onFallback: (reason) => mergeFallbacks.push({ path: relativePath, reason }),
             replaceExistingBody,
           },
         )
@@ -2265,6 +2359,7 @@ async function writeFileBlocks(
     truncatedPaths,
     createdPaths,
     updatedPaths,
+    mergeFallbacks,
   }
 }
 
@@ -2823,6 +2918,10 @@ interface ExistingPageCandidates {
   pages: ExistingPage[]
   /** Log lines naming each candidate check that did not run, and why. */
   skipped: string[]
+  /** The analysis's topics the checks ran on. */
+  topics: string[]
+  /** How each offerable page was found, in the order the checks ran. */
+  foundBy: Map<string, CandidateFinder[]>
 }
 
 function candidateBlockCap(maxContextSize: number | undefined): number {
@@ -2895,9 +2994,12 @@ async function selectExistingPageCandidates(
 ): Promise<ExistingPageCandidates> {
   const topics = parseAnalysisTopics(analysis)
   const scores = new Map<string, number>()
-  const offer = (relativePath: string, score: number) => {
+  const foundBy = new Map<string, CandidateFinder[]>()
+  const offer = (relativePath: string, score: number, finder: CandidateFinder) => {
     if (!isCandidatePagePath(relativePath, sourceSummaryPath)) return
     scores.set(relativePath, Math.max(scores.get(relativePath) ?? Number.NEGATIVE_INFINITY, score))
+    const finders = foundBy.get(relativePath) ?? []
+    if (!finders.includes(finder)) foundBy.set(relativePath, [...finders, finder])
   }
 
   // Page text by path, read once: a search hit counts only if its page has text.
@@ -2916,7 +3018,7 @@ async function selectExistingPageCandidates(
     try {
       const bySlug = await wikiPagesBySlug(projectPath)
       for (const topic of topics) {
-        for (const relativePath of bySlug.get(makeQuerySlug(topic)) ?? []) offer(relativePath, EXACT_PATH_SCORE)
+        for (const relativePath of bySlug.get(makeQuerySlug(topic)) ?? []) offer(relativePath, EXACT_PATH_SCORE, "exact-slug")
       }
     } catch (err) {
       skipped.push(`Exact-path check skipped: wiki listing failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -2942,7 +3044,7 @@ async function selectExistingPageCandidates(
           if (kept >= CANDIDATE_HITS_PER_TOPIC) break
           const relativePath = `wiki/${hit.id}.md`
           if (!isCandidatePagePath(relativePath, sourceSummaryPath) || !(await readPage(relativePath))) continue
-          offer(relativePath, hit.score)
+          offer(relativePath, hit.score, "vector-search")
           kept++
         }
       }
@@ -2963,19 +3065,27 @@ async function selectExistingPageCandidates(
     pages.push(page)
     room -= page.content.length
   }
-  return { pages, skipped }
+  return { pages, skipped, topics, foundBy }
+}
+
+/** Pages an ingest created, and existing pages it updated; a page created
+ *  and then written again counts as created only. */
+function createdAndUpdatedPages(
+  createdPaths: readonly string[],
+  updatedPaths: readonly string[],
+): { created: string[]; updated: string[] } {
+  const created = new Set(createdPaths.map(normalizePath))
+  const updated = new Set(updatedPaths.map(normalizePath).filter((path) => !created.has(path)))
+  return { created: [...created], updated: [...updated] }
 }
 
 /** Log lines for one ingest: candidate and write counts, then skipped checks. */
 function formatCandidateLogDetails(
   candidates: ExistingPageCandidates,
-  createdPaths: readonly string[],
-  updatedPaths: readonly string[],
+  { created, updated }: { created: readonly string[]; updated: readonly string[] },
 ): string[] {
-  const created = new Set(createdPaths.map(normalizePath))
-  const updated = new Set(updatedPaths.map(normalizePath).filter((path) => !created.has(path)))
   return [
-    `- Existing pages offered: ${candidates.pages.length}. Existing pages updated: ${updated.size}. Pages created: ${created.size}.`,
+    `- Existing pages offered: ${candidates.pages.length}. Existing pages updated: ${updated.length}. Pages created: ${created.length}.`,
     ...candidates.skipped.map((line) => `- ${line}.`),
   ]
 }

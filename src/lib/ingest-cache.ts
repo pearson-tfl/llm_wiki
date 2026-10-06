@@ -17,7 +17,8 @@ interface CacheData {
   entries: Record<string, CacheEntry> // keyed by source filename
 }
 
-async function sha256(content: string): Promise<string> {
+/** The content hash a cache entry keys on; ingest run records carry it too. */
+export async function sha256(content: string): Promise<string> {
   const encoder = new TextEncoder()
   const data = encoder.encode(content)
   const hashBuffer = await crypto.subtle.digest("SHA-256", data)
