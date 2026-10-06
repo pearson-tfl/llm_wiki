@@ -206,7 +206,7 @@ describe("autoIngest records each run in .llm-wiki/ingest-runs.jsonl", () => {
     expect(lines).toHaveLength(1)
     const [record] = lines
     expect(record).toMatchObject({
-      sourcePath: `raw/sources/${SOURCE}`,
+      source: SOURCE,
       contentHash: createHash("sha256").update(SOURCE_TEXT).digest("hex"),
       outcome: "done",
       presetId: "anthropic",
@@ -275,7 +275,7 @@ describe("autoIngest records each run in .llm-wiki/ingest-runs.jsonl", () => {
     const lines = await records()
     expect(lines).toHaveLength(1)
     expect(lines[0]).toMatchObject({
-      sourcePath: `raw/sources/${SOURCE}`,
+      source: SOURCE,
       contentHash: createHash("sha256").update(SOURCE_TEXT).digest("hex"),
       outcome: "failed",
       reason: "Analysis failed: model unavailable (503)",
@@ -291,7 +291,7 @@ describe("autoIngest records each run in .llm-wiki/ingest-runs.jsonl", () => {
     const lines = await records()
     expect(lines.map((line) => line.outcome)).toEqual(["done", "skipped"])
     expect(lines[1]).toMatchObject({
-      sourcePath: `raw/sources/${SOURCE}`,
+      source: SOURCE,
       contentHash: lines[0].contentHash,
       reason: "cache hit: source unchanged since its last ingest",
     })

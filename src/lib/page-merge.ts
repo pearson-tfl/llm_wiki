@@ -84,6 +84,9 @@ export interface MergePageOptions {
    *  fallback write. Errors are swallowed — backup must never
    *  block the merge. */
   backup?: (existingContent: string) => Promise<void>
+  /** Told why, each time a merge reply is rejected or the merge call
+   *  fails and the page falls back to incoming + array-field union. */
+  onFallback?: (reason: string) => void
   /** Date provider for the `updated` field. Injectable for
    *  deterministic tests. Defaults to today's UTC date. */
   today?: () => string
@@ -152,6 +155,7 @@ export async function mergePageContent(
     console.warn(
       `[page-merge] LLM merge failed for ${opts.pagePath}, falling back to incoming + array-field union: ${err instanceof Error ? err.message : err}`,
     )
+    opts.onFallback?.(`merge call failed: ${err instanceof Error ? err.message : String(err)}`)
     await tryBackup(opts, existingContent)
     return normalizeMalformedWikilinks(arrayMerged)
   }
@@ -163,6 +167,7 @@ export async function mergePageContent(
     console.warn(
       `[page-merge] LLM output for ${opts.pagePath} has no frontmatter — rejecting, falling back`,
     )
+    opts.onFallback?.("merge reply has no frontmatter")
     await tryBackup(opts, existingContent)
     return normalizeMalformedWikilinks(arrayMerged)
   }
@@ -176,6 +181,7 @@ export async function mergePageContent(
     console.warn(
       `[page-merge] LLM merge for ${opts.pagePath} produced body ${llmBodyLen} chars, below threshold ${minThreshold.toFixed(0)} (max input was ${Math.max(oldBodyLen, newBodyLen)}) — rejecting, falling back`,
     )
+    opts.onFallback?.(`merge reply body ${llmBodyLen} chars, below threshold ${minThreshold.toFixed(0)}`)
     await tryBackup(opts, existingContent)
     return normalizeMalformedWikilinks(arrayMerged)
   }

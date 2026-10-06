@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { projectLlmProfile, resolveProjectLlmConfig, resolveTaskLlmConfig } from "./llm-task-routing"
-import type { LlmConfig } from "@/stores/wiki-store"
+import {
+  getIngestLlmPresetId,
+  projectLlmProfile,
+  resolveProjectLlmConfig,
+  resolveTaskLlmConfig,
+} from "./llm-task-routing"
+import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 
 const fallback: LlmConfig = {
   provider: "openai",
@@ -118,5 +123,37 @@ describe("resolveProjectLlmConfig", () => {
       { chatPresetId: "openai", ingestPresetId: null },
       { enabled: true, presetId: "anthropic", model: "project-sonnet" },
     )).toMatchObject({ provider: "anthropic", model: "project-sonnet" })
+  })
+})
+
+describe("getIngestLlmPresetId", () => {
+  function route(
+    projectLlmOverride: { enabled: boolean; presetId: string | null },
+    ingestPresetId: string | null,
+  ): string | null {
+    useWikiStore.setState({
+      activePresetId: "openai",
+      customLlmPresets: [],
+      projectLlmOverride: { ...projectLlmOverride, model: "" },
+      taskModelRouting: { chatPresetId: null, ingestPresetId },
+    })
+    return getIngestLlmPresetId()
+  }
+
+  it("names the active preset when nothing routes ingest elsewhere", () => {
+    expect(route({ enabled: false, presetId: null }, null)).toBe("openai")
+  })
+
+  it("names the ingest route's preset", () => {
+    expect(route({ enabled: false, presetId: null }, "anthropic")).toBe("anthropic")
+  })
+
+  it("names the project override's preset over the ingest route", () => {
+    expect(route({ enabled: true, presetId: "google" }, "anthropic")).toBe("google")
+  })
+
+  it("names the active preset when the routed preset no longer exists", () => {
+    expect(route({ enabled: false, presetId: null }, "deleted-preset")).toBe("openai")
+    expect(route({ enabled: true, presetId: "deleted-preset" }, "anthropic")).toBe("openai")
   })
 })
