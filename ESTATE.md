@@ -131,7 +131,9 @@ Keep this list current. Merge conflicts can only come from these files.
 - `src/lib/ingest.ts`, `src/lib/dedup-runner.ts`, with the new
   `src/lib/new-page-check.ts` – after an ingest's writes, each concept or
   entity page it created is compared with the existing concept and entity
-  pages (pearson-tfl/llm_wiki#69). The score is the cosine of the two pages'
+  pages (pearson-tfl/llm_wiki#69), and with the other concept and entity
+  pages the same ingest created, which are not yet in the embedding store
+  (pearson-tfl/llm_wiki#75). The score is the cosine of the two pages'
   summary embeddings, the text the duplicate scan embeds (`dedup-runner.ts`
   now exports `summaryToEmbeddingPage` for it); candidates come from the
   embedding search, and a hit stored under a bare slug is mapped to the
@@ -141,6 +143,8 @@ Keep this list current. Merge conflicts can only come from these files.
   item opens either page. Every ingest's log entry says how many new pages
   were checked and flagged. Embeddings off, a failed embedding call or a
   vector-store error skips the check with a log line; the ingest carries on.
+  A cancelled ingest skips the check and makes no embedding call for it
+  (pearson-tfl/llm_wiki#75).
   Tests in `src/lib/ingest-new-page-check.test.ts`; opt-in runs on a real
   endpoint in `src/lib/ingest-new-page-check.real-llm.test.ts` and
   `src/lib/new-page-check.calibration.real-llm.test.ts`.

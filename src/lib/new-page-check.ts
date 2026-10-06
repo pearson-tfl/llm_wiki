@@ -1,8 +1,9 @@
 /**
  * The check after an ingest's writes (#69): each concept or entity page the
  * ingest created is compared by meaning with the existing concept and entity
- * pages. One scoring at or above the threshold is flagged – logged and raised
- * as a duplicate review item – never refused, so no content is lost.
+ * pages, and with the other pages the same ingest created (#75). One scoring
+ * at or above the threshold is flagged – logged and raised as a duplicate
+ * review item – never refused, so no content is lost.
  *
  * The score is the duplicate scan's own: the cosine of the two pages' summary
  * embeddings (title, tags and description), the text `dedup-runner.ts`
@@ -32,6 +33,8 @@ export interface NearDuplicate {
   existingPath: string
   /** Rounded to three places, as the log line shows it. */
   score: number
+  /** `existingPath` was created by the same ingest (#75). */
+  sameIngest?: true
 }
 
 export interface NewPageCheck {
@@ -57,9 +60,10 @@ export function summaryText(path: string, content: string): string {
 
 /**
  * Compares each created concept or entity page with its nearest existing
- * concept and entity pages. Never throws: embeddings off, a failed embedding
- * call, a vector-store error or an unreadable page ends the check with the
- * reason in `skipped`.
+ * concept and entity pages, and with the created pages before it: new pages
+ * are embedded into the store only after the check. Never throws: embeddings
+ * off, a failed embedding call, a vector-store error or an unreadable page
+ * ends the check with the reason in `skipped`.
  */
 export async function checkNewPages(
   projectPath: string,
@@ -76,6 +80,7 @@ export async function checkNewPages(
       return vector
     }
 
+    const created: Array<{ path: string; vector: number[] }> = []
     for (const path of createdPaths.filter(isCheckedPage)) {
       const text = summaryText(path, await readFile(`${projectPath}/${path}`))
       const vector = await embed(text)
@@ -117,6 +122,11 @@ export async function checkNewPages(
       }
       check.checked.push(path)
       if (best && best.score >= NEAR_DUPLICATE_THRESHOLD) check.flagged.push(best)
+      for (const twin of created) {
+        const score = Math.round(cosineSimilarity(vector, twin.vector) * 1000) / 1000
+        if (score >= NEAR_DUPLICATE_THRESHOLD) check.flagged.push({ path, existingPath: twin.path, score, sameIngest: true })
+      }
+      created.push({ path, vector })
     }
   } catch (err) {
     check.skipped = err instanceof Error ? err.message : String(err)
@@ -128,27 +138,29 @@ export async function checkNewPages(
 export function formatNewPageCheckLog(check: NewPageCheck): string[] {
   return [
     `- New concept and entity pages checked against existing pages: ${check.checked.length}. Near-duplicates flagged: ${check.flagged.length}.`,
-    ...check.flagged.map(({ path, existingPath, score }) =>
-      `- Near-duplicate flagged: ${path} is close to ${existingPath} (score ${score.toFixed(3)}).`,
+    ...check.flagged.map(({ path, existingPath, score, sameIngest }) =>
+      `- Near-duplicate flagged: ${path} is close to ${existingPath}${sameIngest ? ", also created by this ingest" : ""} (score ${score.toFixed(3)}).`,
     ),
     ...(check.skipped ? [`- New-page check skipped: ${check.skipped}.`] : []),
   ]
 }
 
-/** One duplicate review item per flagged page. */
+/** One duplicate review item per flagged pair. */
 export function newPageCheckReviewItems(
   check: NewPageCheck,
   sourcePath: string,
 ): Omit<ReviewItem, "id" | "resolved" | "createdAt">[] {
-  return check.flagged.map(({ path, existingPath, score }) => ({
+  return check.flagged.map(({ path, existingPath, score, sameIngest }) => ({
     type: "duplicate",
     title: `Possible duplicate: ${path} and ${existingPath}`,
-    description: `Ingest created ${path}, whose title and summary score ${score.toFixed(3)} against the existing ${existingPath} (threshold ${NEAR_DUPLICATE_THRESHOLD}). The new page was written. If the two are the same subject, merge them from the duplicate scan on the Maintenance screen or by hand.`,
+    description: sameIngest
+      ? `Ingest created both ${path} and ${existingPath}, whose titles and summaries score ${score.toFixed(3)} against each other (threshold ${NEAR_DUPLICATE_THRESHOLD}). Both pages were written. If the two are the same subject, merge them from the duplicate scan on the Maintenance screen or by hand.`
+      : `Ingest created ${path}, whose title and summary score ${score.toFixed(3)} against the existing ${existingPath} (threshold ${NEAR_DUPLICATE_THRESHOLD}). The new page was written. If the two are the same subject, merge them from the duplicate scan on the Maintenance screen or by hand.`,
     sourcePath,
     affectedPages: [path, existingPath],
     options: [
       { label: "Open new page", action: `open:${path}` },
-      { label: "Open existing page", action: `open:${existingPath}` },
+      { label: sameIngest ? "Open other new page" : "Open existing page", action: `open:${existingPath}` },
       { label: "Skip", action: "Skip" },
     ],
   }))
