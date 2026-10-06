@@ -60,6 +60,12 @@ vi.mock("@/lib/ingest-queue", () => ({
   getQueueSummary: () => ({ pending: ingestSummary.pending, processing: ingestSummary.processing }),
 }))
 
+// The real backfill, replaceable where a test is not about it.
+vi.mock("@/lib/embedding-freshness", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./embedding-freshness")>()
+  return { ...real, runEmbeddingBackfill: vi.fn(real.runEmbeddingBackfill) }
+})
+
 // The real lock, watched so a test can see the rebuild ask for it.
 vi.mock("@/lib/project-mutex", async (importOriginal) => {
   const real = await importOriginal<typeof import("./project-mutex")>()
@@ -83,7 +89,7 @@ import {
   loadScheduledMaintenanceConfig,
   saveScheduledMaintenanceConfig,
 } from "@/lib/project-store"
-import { runEmbeddingBackfill } from "./embedding-freshness"
+import { runEmbeddingBackfill } from "@/lib/embedding-freshness"
 import {
   runMaintenanceTick,
   startScheduledMaintenance,
@@ -100,6 +106,8 @@ const mockBuildLlm = vi.mocked(buildDedupLlmCall)
 const mockSearch = vi.mocked(searchByEmbedding)
 const mockEmbeddingError = vi.mocked(getLastEmbeddingError)
 const mockLock = vi.mocked(withProjectLock)
+const mockBackfill = vi.mocked(runEmbeddingBackfill)
+const { runEmbeddingBackfill: realBackfill } = await vi.importActual<typeof import("./embedding-freshness")>("./embedding-freshness")
 /** The model call the hub rebuild makes: (system, user) → reply. */
 const mockModel = vi.fn<(system: string, user: string) => Promise<string>>()
 
@@ -157,6 +165,7 @@ beforeEach(async () => {
   ingestSummary.paused = false
   settingRead.hold = null
   mockLock.mockClear()
+  mockBackfill.mockImplementation(realBackfill)
   mockDetect.mockReset()
   mockMerge.mockReset()
   mockDetect.mockResolvedValue([])
@@ -786,9 +795,9 @@ describe("scheduled maintenance tick – hub rebuild", () => {
       { id: "sources/harness-notes", score: 0.8 },
       { id: "sources/codex-howto-catalog", score: 0.5 },
     ])
-    // A vault the backfill has already covered: the tick's own backfill
-    // then embeds nothing before the rebuild.
-    await runEmbeddingBackfill(tmp.path, useWikiStore.getState().embeddingConfig)
+    // These tests time the rebuild against other writers; the backfill
+    // before it is tested on its own.
+    mockBackfill.mockResolvedValue(null)
   })
 
   it("rewrites a requested hub from its source summaries, unions its sources, backs it up and archives the request", async () => {
