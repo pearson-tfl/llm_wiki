@@ -49,6 +49,12 @@ import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { persistParsedMarkdown } from "@/lib/parsed-source-output"
 import { PROJECT_LOCAL_TERM_QUERY_RULES } from "@/lib/research-query-grounding"
+import {
+  checkNewPages,
+  formatNewPageCheckLog,
+  newPageCheckReviewItems,
+  type NewPageCheck,
+} from "@/lib/new-page-check"
 
 const LONG_SOURCE_MIN_BUDGET = 8_000
 const LONG_SOURCE_MAX_SINGLE_PASS_BUDGET = 300_000
@@ -114,6 +120,8 @@ export interface IngestRunRecord {
   /** Merges whose model reply was rejected or whose call failed, so the
    *  page took the incoming text and the old text was backed up. */
   mergeFallbacks?: { path: string; reason: string }[]
+  /** New concept and entity pages compared with existing pages, and those flagged. */
+  newPageCheck?: NewPageCheck
 }
 
 /** Run-record appends, one at a time, so two sources finishing together
@@ -1528,17 +1536,20 @@ async function autoIngestImpl(
   record.createdPages = pageWrites.created
   record.updatedPages = pageWrites.updated
   record.mergeFallbacks = mergeFallbacks
+  const newPageCheck = await checkNewPages(pp, pageWrites.created, useWikiStore.getState().embeddingConfig)
+  record.newPageCheck = newPageCheck
 
   // log.md is append-only structural metadata. If the model omitted its FILE
   // block, write a deterministic entry instead of starting another LLM turn.
   // This keeps multi-file imports at two generation stages per source and
   // prevents a slow provider from making the queue appear stuck in "repair".
-  // Either way the entry ends with the existing-page counts.
+  // Either way the entry ends with the existing-page counts and the new-page
+  // check.
   if (!signal?.aborted) {
     try {
       const logPath = `${pp}/wiki/log.md`
       const existingLog = await tryReadFile(logPath)
-      const details = formatCandidateLogDetails(candidates, pageWrites)
+      const details = [...formatCandidateLogDetails(candidates, pageWrites), ...formatNewPageCheckLog(newPageCheck)]
       if (writtenPaths.some((path) => normalizePath(path).toLowerCase() === "wiki/log.md")) {
         await writeFile(logPath, `${existingLog.trimEnd()}\n\n${details.join("\n")}\n`)
       } else {
@@ -1668,6 +1679,7 @@ async function autoIngestImpl(
   const reviewItems = [
     ...parseReviewBlocks(generation, sp),
     ...parseReviewBlocks(reviewSuggestionOutput, sp),
+    ...newPageCheckReviewItems(newPageCheck, sp),
   ]
   if (reviewItems.length > 0) {
     useReviewStore.getState().addItems(reviewItems)
