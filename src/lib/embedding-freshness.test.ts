@@ -10,12 +10,20 @@ import { createDeferred, flushIO } from "@/test-helpers/deferred"
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof createFakeVectorStore> | null }))
 const written = vi.hoisted(() => ({ paths: [] as string[] }))
+/** While set, a file lookup ignores case, as on the Mac's file system. */
+const lookup = vi.hoisted(() => ({ ignoresCase: false }))
 
 vi.mock("@/commands/fs", () => ({
   ...realFs,
   writeFile: async (path: string, contents: string) => {
     written.paths.push(path)
     await realFs.writeFile(path, contents)
+  },
+  fileExists: async (path: string) => {
+    if (!lookup.ignoresCase) return realFs.fileExists(path)
+    const slash = path.lastIndexOf("/")
+    const names = (await realFs.listDirectory(path.slice(0, slash))).map((n) => n.name.toLowerCase())
+    return names.includes(path.slice(slash + 1).toLowerCase())
   },
 }))
 vi.mock("@tauri-apps/api/core", () => ({
@@ -85,6 +93,7 @@ beforeEach(async () => {
   store.current = fake
   resetEmbeddingOptimizeAccountingForTests()
   written.paths = []
+  lookup.ignoresCase = false
 })
 
 afterEach(async () => {
@@ -331,6 +340,55 @@ describe("vector backfill – the embedded-pages record (#73)", () => {
     expect(written.paths.filter((p) => p.endsWith("/.llm-wiki/embedded-pages.json"))).toHaveLength(1)
     const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
     expect(Object.keys(record).sort()).toEqual(["concepts/sweep", "entities/inbox", "entities/relay"])
+  })
+})
+
+describe("vector backfill – recorded hashes of pages that are gone (#80)", () => {
+  async function recordedIds(): Promise<string[]> {
+    return Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
+  }
+
+  it("removes the recorded hash of a page deleted since the last run", async () => {
+    await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
+    await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
+    await runEmbeddingBackfill(tmp.path, cfg)
+    expect(await recordedIds()).toEqual(["entities/inbox", "entities/relay"])
+    await realFs.deleteFile(`${tmp.path}/wiki/entities/inbox.md`)
+
+    await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(await recordedIds()).toEqual(["entities/relay"])
+  })
+
+  it("keeps the recorded hash of an id differing only in case from a page, whose file the Mac still finds", async () => {
+    lookup.ignoresCase = true
+    const content = page("Relay", "The relay carries voice messages.")
+    await writePage("entities/relay.md", content)
+    fake.pages.set("entities/relay", storedRow(content))
+    fake.pages.set("entities/Relay", storedRow(content))
+    await recordHashes({ "entities/relay": await sha256(content), "entities/Relay": await sha256(content) })
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage?.orphansRemoved).toBe(0)
+    expect(await recordedIds()).toEqual(["entities/Relay", "entities/relay"])
+  })
+
+  it("keeps the recorded hash of a gone page whose vectors could not be removed", async () => {
+    await writePage("entities/relay.md", page("Relay", "The relay carries voice messages."))
+    await writePage("entities/inbox.md", page("Inbox", "The inbox holds messages."))
+    await runEmbeddingBackfill(tmp.path, cfg)
+    await realFs.deleteFile(`${tmp.path}/wiki/entities/inbox.md`)
+    store.current = {
+      ...fake,
+      invoke: (cmd: string, args?: Record<string, unknown>) =>
+        cmd === "vector_delete_page" ? Promise.reject(new Error("table locked")) : fake.invoke(cmd, args),
+    }
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage?.orphansRemoved).toBe(0)
+    expect(await recordedIds()).toEqual(["entities/inbox", "entities/relay"])
   })
 })
 

@@ -18,6 +18,7 @@ import {
   listVectorPageIds,
   loadEmbeddedHashes,
   recordEmbeddedHashes,
+  removeEmbeddedHashes,
   removePageEmbedding,
   removeVectorPageId,
   wikiPageIdFromPath,
@@ -51,7 +52,8 @@ export interface VectorCoverage {
   covered: number
   embedded: number
   failed: number
-  /** Pages whose file is gone, whose vectors this run removed. */
+  /** Pages whose file is gone, whose vectors and recorded hash this run
+   *  removed. */
   orphansRemoved: number
   /** Why the run stopped before embedding every page due, when it did. */
   stoppedEarly?: string
@@ -61,8 +63,8 @@ export interface VectorCoverage {
 let failureWrites: Promise<unknown> = Promise.resolve()
 
 /**
- * Remove the vectors of pages whose file is gone, then embed, up to
- * `limit`, the content pages that have no vectors under their
+ * Remove the vectors and recorded hash of pages whose file is gone, then
+ * embed, up to `limit`, the content pages that have no vectors under their
  * folder-qualified id (missing, or stored under the old bare slug only),
  * then those whose file changed since they were embedded. Stops after
  * BACKFILL_STOP_AFTER_FAILURES failed embeds in a row when the endpoint
@@ -135,7 +137,8 @@ async function endpointAnswers(cfg: EmbeddingConfig): Promise<boolean> {
 
 /**
  * Remove the rows of each stored page id that names no content page and
- * whose file is confirmed gone. A bare-slug id whose name a page still
+ * whose file is confirmed gone, and then, in one write, the recorded hash
+ * of each id whose rows went (#80). A bare-slug id whose name a page still
  * owns is kept: its page's own embed clears it once safe. An empty listing
  * removes nothing. Returns the number removed.
  */
@@ -147,7 +150,7 @@ async function removeOrphanVectors(
   if (pages.length === 0) return 0
   const ids = new Set(pages.map((p) => p.id))
   const stems = new Set(pages.map((p) => (p.id.split("/").pop() ?? "").toLowerCase()))
-  let removed = 0
+  const removed: string[] = []
   for (const id of stored) {
     if (ids.has(id)) continue
     if (!id.includes("/") && stems.has(id.toLowerCase())) continue
@@ -155,12 +158,13 @@ async function removeOrphanVectors(
     if (await fileExists(`${pp}/wiki/${id}.md`)) continue
     try {
       await removeVectorPageId(pp, id)
-      removed++
+      removed.push(id)
     } catch (err) {
       console.warn(`[Embedding] backfill: could not remove the vectors of ${id}: ${errorText(err)}`)
     }
   }
-  return removed
+  await removeEmbeddedHashes(pp, removed)
+  return removed.length
 }
 
 /**
