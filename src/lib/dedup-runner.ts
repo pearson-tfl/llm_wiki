@@ -311,7 +311,7 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
   return uniqueDuplicateGroups(out)
 }
 
-function summaryToEmbeddingPage(summary: EntitySummary): DedupEmbeddingPage {
+export function summaryToEmbeddingPage(summary: EntitySummary): DedupEmbeddingPage {
   return {
     id: summary.path,
     title: summary.title,

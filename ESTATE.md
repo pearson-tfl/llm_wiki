@@ -122,6 +122,48 @@ Keep this list current. Merge conflicts can only come from these files.
   `ingest-cache.ts` exports its hash and `llm-task-routing.ts` gains
   `getIngestLlmPresetId`. No screen shows the file yet. Tests in
   `src/lib/ingest-run-record.test.ts` and `src/lib/llm-task-routing.test.ts`.
+- `src/lib/ingest.ts`, `src/lib/dedup-runner.ts`, with the new
+  `src/lib/new-page-check.ts` – after an ingest's writes, each concept or
+  entity page it created is compared with the existing concept and entity
+  pages (pearson-tfl/llm_wiki#69). The score is the cosine of the two pages'
+  summary embeddings, the text the duplicate scan embeds (`dedup-runner.ts`
+  now exports `summaryToEmbeddingPage` for it); candidates come from the
+  embedding search, and a hit stored under a bare slug is mapped to the
+  concept or entity file of that name. A page scoring 0.89 or more is
+  flagged, never refused: a line in `wiki/log.md` names both pages and the
+  score, the run record's `newPageCheck` lists it, and a duplicate review
+  item opens either page. Every ingest's log entry says how many new pages
+  were checked and flagged. Embeddings off, a failed embedding call or a
+  vector-store error skips the check with a log line; the ingest carries on.
+  Tests in `src/lib/ingest-new-page-check.test.ts`; opt-in runs on a real
+  endpoint in `src/lib/ingest-new-page-check.real-llm.test.ts` and
+  `src/lib/new-page-check.calibration.real-llm.test.ts`.
+
+  The threshold was calibrated on 6 Oct 2026 with the calibration run on 35
+  page pairs from the Agent Harness Wiki, labelled by reading both pages,
+  with Ollama `qwen3-embedding:0.6b`. Twins (10): pages on one subject, such
+  as `claude-3-7-sonnet` and `claude-sonnet-3-7`, plural pairs such as
+  `openclaw-secretref` and `openclaw-secretrefs`, and the three slugs that
+  are both a concept and an entity. Distinct (25): pages whose names share
+  words, such as `gpt-4-1` and `gpt-4-1-mini`, including four the
+  near-duplicate scan listed as twins that name different things
+  (`todo-write` is DeepSeek harness's tool, `todowrite` Claude Code's;
+  `openclaw agent` and `openclaw agents`; the `agent.wait` RPC and the
+  `agents_wait` tool; `openclaw node` and `openclaw nodes`). No past scan
+  merge was on disk to add.
+
+  | Threshold | Twins flagged | Distinct flagged | Precision | Recall |
+  |---|---|---|---|---|
+  | 0.68 (the scan's prefilter) | 10/10 | 25/25 | 0.29 | 1.00 |
+  | 0.82 (AHR #1918's figure) | 9/10 | 8/25 | 0.53 | 0.90 |
+  | **0.89 (chosen)** | 9/10 | 3/25 | 0.75 | 0.90 |
+  | 0.91 | 8/10 | 1/25 | 0.89 | 0.80 |
+  | 0.92 | 5/10 | 0/25 | 1.00 | 0.50 |
+
+  A flag loses nothing, so recall is preferred to precision. Twins scored
+  0.818 to 0.952 and distinct pairs 0.685 to 0.910, so the two ranges
+  overlap and no value separates them: re-run the calibration if the
+  embedding model changes.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/project-store.ts`,
   `src/lib/dedup-queue.ts`, `src/lib/dedup-storage.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/page-merge.ts`,
