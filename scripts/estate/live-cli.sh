@@ -9,7 +9,9 @@ set -euo pipefail
 [ $# -eq 2 ] || { echo "usage: live-cli.sh <stdin.jsonl> <output>" >&2; exit 2; }
 [ -f "$1" ] || { echo "live-cli.sh: no stdin file $1" >&2; exit 1; }
 
-# Resolved before the cd into the scratch folder below.
+# Resolved before the cd into the scratch folder below. The output's folder
+# is made here, so the caller needs no mkdir of its own.
+mkdir -p "$(dirname "$2")"
 stdin_file="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 output="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
 

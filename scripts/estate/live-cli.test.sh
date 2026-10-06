@@ -81,6 +81,13 @@ ran_in="$(cat "$case_dir/cwd")"
 [ -e "$ran_in" ] && fail "ok: scratch folder $ran_in left behind"
 grep -q "9.9.9 (Claude Code)" "$case_dir/out.log" || fail "ok: output does not name the claude version"
 
+# An output folder that does not exist yet is made.
+setup new-folder
+(cd "$case_dir/caller" && env -i HOME="$case_dir/home" PATH="$case_dir/stubs:/usr/bin:/bin" \
+  bash "$here/live-cli.sh" in.stdin.jsonl new/deeper/out.jsonl > "$case_dir/out.log" 2>&1) \
+  || fail "new folder: exited non-zero: $(cat "$case_dir/out.log")"
+[ -s "$case_dir/caller/new/deeper/out.jsonl" ] || fail "new folder: no output"
+
 # The CLI's exit status is the script's.
 setup exit-status
 run STUB_EXIT=3
@@ -104,14 +111,16 @@ run CLAUDE_CONFIG_DIR=/elsewhere AHR_LANE_WORKTREE=/some/worktree
 setup fence
 run
 worktree="$(cd "$here/../.." && pwd -P)"
-verdict="$(python3 - "$case_dir/argv" "$worktree" <<'EOF' | AHR_LANE_WORKTREE="$worktree" python3 "$fence"
+if ! verdict="$(python3 - "$case_dir/argv" "$worktree" <<'EOF' | AHR_LANE_WORKTREE="$worktree" python3 "$fence"
 import json, shlex, sys
 args = open(sys.argv[1], 'rb').read().decode().split('\0')[:-1]
 print(json.dumps({'tool_name': 'Bash', 'cwd': sys.argv[2],
                   'tool_input': {'command': shlex.join(['claude', *args])}}))
 EOF
-)"
-[ $? -eq 0 ] || fail "fence: the hook did not run"
+)"; then
+  fail "fence: the hook did not run"
+fi
 [ -z "$verdict" ] || fail "fence: refused: $verdict"
 
-[ "$failures" -eq 0 ] && echo "live-cli.test.sh: all passed" || { echo "live-cli.test.sh: $failures failed"; exit 1; }
+if [ "$failures" -ne 0 ]; then echo "live-cli.test.sh: $failures failed"; exit 1; fi
+echo "live-cli.test.sh: all passed"
