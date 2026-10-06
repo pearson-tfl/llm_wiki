@@ -430,7 +430,7 @@ export async function removeEmbeddedHashes(projectPath: string, pageIds: string[
   if (pageIds.length === 0) return
   const pp = normalizePath(projectPath)
   await updateEmbeddedHashes(pp, (record) => {
-    const recorded = pageIds.filter((pageId) => Object.hasOwn(record, pageId))
+    const recorded = pageIds.filter((pageId) => Object.prototype.hasOwnProperty.call(record, pageId))
     for (const pageId of recorded) delete record[pageId]
     return recorded.length > 0
   })

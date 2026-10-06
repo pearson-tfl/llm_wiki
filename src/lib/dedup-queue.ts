@@ -722,8 +722,13 @@ async function processNext(projectId: string): Promise<void> {
     // The task is done, so a cancel during the re-embed finds nothing to
     // cancel; the next merge waits for it. It runs after the lock is
     // released: a hung embedding endpoint must not hold an ingest's write
-    // (#73).
-    await reembedMergedPages(pp, result)
+    // (#73). A failure here cannot fail the finished merge (#80).
+    try {
+      await reembedMergedPages(pp, result)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[Dedup Queue] Re-embed after merging ${next.group.slugs.join(",")} failed: ${message}`)
+    }
   } catch (err) {
     if (currentProjectId !== projectId) return
     const message = err instanceof Error ? err.message : String(err)
