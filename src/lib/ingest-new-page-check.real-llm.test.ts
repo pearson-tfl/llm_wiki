@@ -141,6 +141,10 @@ const newPageBlock = fileBlock(
   "wiki/concepts/release-calendar.md",
   page("concept", "Release Calendar", "A release calendar lists the planned dates of a product's upcoming versions."),
 )
+const releaseCalendarTwinBlock = fileBlock(
+  "wiki/entities/release-calendar.md",
+  page("entity", "Release Calendar", "The release calendar lists the planned dates of the product's upcoming versions."),
+)
 
 describe.skipIf(!ENABLED)("the new-page check on a real embedding endpoint", () => {
   let tmp: { path: string; cleanup: () => Promise<void> }
@@ -209,6 +213,20 @@ describe.skipIf(!ENABLED)("the new-page check on a real embedding endpoint", () 
     console.log(log)
     expect(log).toContain("- New concept and entity pages checked against existing pages: 1. Near-duplicates flagged: 0.")
     expect(record.newPageCheck).toEqual({ checked: ["wiki/concepts/release-calendar.md"], flagged: [] })
+  }, 60_000)
+
+  it("flags two twins created by the same ingest as one pair", async () => {
+    generationReply = [summaryBlock, newPageBlock, releaseCalendarTwinBlock].join("\n")
+
+    const { log, record } = await ingest()
+
+    console.log(log)
+    expect(log).toMatch(
+      /- Near-duplicate flagged: wiki\/entities\/release-calendar\.md is close to wiki\/concepts\/release-calendar\.md, also created by this ingest \(score 0\.\d{3}\)\./,
+    )
+    expect(record.newPageCheck).toMatchObject({
+      flagged: [{ path: "wiki/entities/release-calendar.md", existingPath: "wiki/concepts/release-calendar.md", sameIngest: true }],
+    })
   }, 60_000)
 
   it("completes the ingest and logs the skip with the embedding endpoint stopped", async () => {
