@@ -72,6 +72,16 @@ mv "$stubs/cargo" "$case_dir/home/.cargo/bin/cargo"
 mv "$stubs/protoc" "$case_dir/brew/bin/protoc"
 run || fail "path: cargo and protoc not found where build.sh puts them on PATH: $(cat "$case_dir/out.log")"
 
+# A node under $HOMEBREW_PREFIX/bin does not displace the caller's node.
+setup node-order "${all_tools[@]}"
+mkdir -p "$case_dir/brew/bin"
+printf '#!/bin/sh\necho "brew-node $*" >> "%s/calls.log"\n' "$case_dir" > "$case_dir/brew/bin/node"
+chmod +x "$case_dir/brew/bin/node"
+printf '#!/bin/sh\nnode\necho "npm $*" >> "%s/calls.log"\n' "$case_dir" > "$stubs/npm"
+run || fail "node-order: exited non-zero: $(cat "$case_dir/out.log")"
+grep -q '^brew-node' "$case_dir/calls.log" && fail "node-order: Homebrew's node ran ahead of the caller's"
+grep -q '^node' "$case_dir/calls.log" || fail "node-order: the caller's node did not run"
+
 # A failed npm ci stops the build before tauri runs.
 setup npm-fails "${all_tools[@]}"
 printf '#!/bin/sh\necho "npm $*" >> "%s/calls.log"\nexit 1\n' "$case_dir" > "$stubs/npm"

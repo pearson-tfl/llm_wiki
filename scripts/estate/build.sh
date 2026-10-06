@@ -3,8 +3,9 @@
 # way to build it: see ESTATE.md, Build. Run: scripts/estate/build.sh
 set -euo pipefail
 
-# Rust and protoc are not on the agent PATH.
-export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:${HOMEBREW_PREFIX:-/opt/homebrew}/bin:$PATH"
+# Rust and protoc are not on the agent PATH. Homebrew's folder goes last, so
+# its node does not displace the caller's.
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH:${HOMEBREW_PREFIX:-/opt/homebrew}/bin"
 
 for tool in node cargo protoc; do
   command -v "$tool" > /dev/null || { echo "build.sh: $tool not found on PATH" >&2; exit 1; }
