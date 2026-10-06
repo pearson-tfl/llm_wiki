@@ -5,7 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
-import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
+import { createFakeVectorStore, fakeEmbedding } from "@/test-helpers/fake-vector-store"
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof createFakeVectorStore> | null }))
 
@@ -50,7 +50,7 @@ async function writePage(rel: string, content: string): Promise<void> {
 }
 
 function storedRow(text: string) {
-  return [{ chunk_index: 0, chunk_text: text, heading_path: "", embedding: [1] }]
+  return [{ chunk_index: 0, chunk_text: text, heading_path: "", embedding: fakeEmbedding(text) }]
 }
 
 async function recordHashes(hashes: Record<string, string>): Promise<void> {

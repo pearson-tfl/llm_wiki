@@ -13,7 +13,7 @@ interface StoredChunk {
   embedding: number[]
 }
 
-const DIM = 64
+const DIM = 1024
 
 export function fakeEmbedding(text: string): number[] {
   const vector = new Array<number>(DIM).fill(0)
