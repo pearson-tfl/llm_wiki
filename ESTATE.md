@@ -304,6 +304,38 @@ Keep this list current. Merge conflicts can only come from these files.
   stops with the request in place, stays due, and redoes on the next run any
   hub it had already rebuilt. An unreadable request is left in place and the
   run records why. Tests in `src/lib/scheduled-maintenance.test.ts`.
+- `src/lib/embedding-freshness.ts`, `src/lib/embedding.ts`,
+  `src/lib/ingest-cache.ts`, `src/lib/scheduled-maintenance.ts`,
+  `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`,
+  `src-tauri/src/commands/vectorstore.rs`, `src-tauri/src/lib.rs` – the
+  vector index is kept fresh (pearson-tfl/llm_wiki#67, from #15). Each
+  scheduled maintenance run first backfills the vector store, before the
+  duplicate scan. It lists the wiki's content pages (structural pages
+  left out, as the Settings re-index does) and the store's page ids (new
+  Rust command `vector_list_page_ids`). It then embeds up to 500 pages:
+  first those with no vectors under their folder-qualified id (none at
+  all, or only under the old bare slug, whose rows the embed then removes
+  when one page owns the name), then those whose file changed since they
+  were embedded. "Changed since embedded" is a content hash: every
+  successful embed (`embedPage`, so ingest, deep research, merges, hubs and
+  the backfill, and the Settings re-index) records the SHA-256 of the
+  page's text in `.llm-wiki/embedded-pages.json`, and a page whose hash is
+  missing or differs is re-embedded. Pages embedded through the API/MCP
+  route, which keeps its own revision record, are re-embedded once by the
+  next backfill. A page with nothing to embed counts as covered. The run's
+  line in `maintenance-runs.jsonl` carries `vectorCoverage`: pages,
+  covered, embedded this run and failed. A duplicate merge removes the
+  merged-away pages' vectors before deleting their files, then re-embeds
+  the canonical page and every page whose links it rewrote; a hub rebuild
+  re-embeds each rebuilt hub. A failed embed is logged, gets a line in
+  `.llm-wiki/embedding-failures.jsonl` (time, trigger, page, reason) and
+  never fails the merge, rebuild or run; the page keeps its old hash, so
+  the next backfill tries it again. Tests in
+  `src/lib/embedding-freshness.test.ts`,
+  `src/lib/dedup-runner.reembed.test.ts`,
+  `src/lib/scheduled-maintenance.test.ts` and the Rust
+  `v2_list_page_ids_returns_each_page_once`; the in-memory store they
+  share is `src/test-helpers/fake-vector-store.ts`.
 - `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
   the test-only `clearQueueState()` cannot stop an ingest queue save that
   is already writing, so it hands back a promise that settles once that
