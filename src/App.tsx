@@ -76,12 +76,12 @@ function App() {
 
   async function hydrateProjectSideStores(proj: WikiProject): Promise<void> {
     try {
+      const { dismissStaleRestoreNotice } = await import("@/lib/dedup-queue")
       // The review auto-save writes nothing for this project until these
       // load, so a merge-queue time-out notice filed first is not saved
       // over them, and they load beside it (#62).
-      const { dismissStaleRestoreNotice } = await import("@/lib/dedup-queue")
-      const loaded = await loadSavedReviewItems(proj.path, () => isCurrentProject(proj))
-      if (loaded) {
+      const tookSavedItems = await loadSavedReviewItems(proj.path, () => isCurrentProject(proj))
+      if (tookSavedItems) {
         // A merge-queue time-out notice saved before this reopen goes if
         // the queue has opened since (#59).
         dismissStaleRestoreNotice(proj.id)
