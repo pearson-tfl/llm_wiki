@@ -68,8 +68,9 @@ vi.mock("./llm-client", () => ({
 
 import * as dedupQueue from "./dedup-queue"
 import * as ingestQueue from "./ingest-queue"
-import { resetEmbeddingOptimizeAccountingForTests } from "./embedding"
-import { BACKFILL_STOP_AFTER_FAILURES, runEmbeddingBackfill } from "./embedding-freshness"
+import { embedPage, recordEmbeddedHashes, resetEmbeddingOptimizeAccountingForTests, type EmbeddedHashes } from "./embedding"
+import { BACKFILL_STOP_AFTER_FAILURES, reembedWikiPages, runEmbeddingBackfill } from "./embedding-freshness"
+import { sha256 } from "./ingest-cache"
 import { useReviewStore } from "@/stores/review-store"
 import { useWikiStore, type EmbeddingConfig } from "@/stores/wiki-store"
 
@@ -85,22 +86,28 @@ function concept(title: string, body: string): string {
   return ["---", "type: concept", `title: ${title}`, "created: 2026-10-06", "updated: 2026-10-06", "tags: []", "related: []", "sources: []", "---", `# ${title}`, "", body, ""].join("\n")
 }
 
-/** A relay to the real endpoint that never answers a request holding
- *  `marker`, as an endpoint that accepts the connection and hangs. */
-async function startRelay(target: string, marker: string): Promise<{ url: string; held: () => number; close: () => Promise<void> }> {
-  let held = 0
+/** A relay to the real endpoint that holds a request holding `marker`, as
+ *  an endpoint that accepts the connection and hangs, until `release`
+ *  answers it late. */
+async function startRelay(target: string, marker: string): Promise<{
+  url: string
+  held: () => number
+  release: () => Promise<void>
+  close: () => Promise<void>
+}> {
+  const held: (() => Promise<void>)[] = []
   const sockets = new Set<Socket>()
   const server: Server = createServer((req, res) => {
     let body = ""
     req.on("data", (chunk) => (body += chunk))
     req.on("end", async () => {
-      if (body.includes(marker)) {
-        held++
-        return
+      const answer = async () => {
+        const upstream = await fetch(target, { method: "POST", headers: { "Content-Type": "application/json" }, body })
+        res.writeHead(upstream.status, { "Content-Type": "application/json" })
+        res.end(await upstream.text())
       }
-      const upstream = await fetch(target, { method: "POST", headers: { "Content-Type": "application/json" }, body })
-      res.writeHead(upstream.status, { "Content-Type": "application/json" })
-      res.end(await upstream.text())
+      if (body.includes(marker)) held.push(answer)
+      else await answer()
     })
   })
   server.on("connection", (socket) => {
@@ -110,7 +117,10 @@ async function startRelay(target: string, marker: string): Promise<{ url: string
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/embeddings`,
-    held: () => held,
+    held: () => held.length,
+    release: async () => {
+      await Promise.all(held.splice(0).map((answer) => answer()))
+    },
     close: () => new Promise<void>((resolve) => {
       for (const socket of sockets) socket.destroy()
       server.close(() => resolve())
@@ -185,9 +195,10 @@ describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73)",
       const started = Date.now()
       await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
       await waitUntil(async () => (await readFileRaw(`${tmp.path}/wiki/index.md`)).includes("rope"))
-      console.log(`[#73 live] ingest wrote rope.md and its index line ${Date.now() - started} ms after enqueue; merge task still ${dedupQueue.getQueue()[0]?.status}`)
+      console.log(`[#73 live] ingest wrote rope.md and its index line ${Date.now() - started} ms after enqueue; merge tasks left on the queue: ${dedupQueue.getQueue().length}, re-embed requests still held: ${relay.held()}`)
       expect(await fileExists(`${tmp.path}/wiki/concepts/rope.md`)).toBe(true)
-      expect(dedupQueue.getQueue().map((t) => t.status)).toEqual(["processing"])
+      // The merge task is done; only its re-embed is waiting (#73 gate).
+      expect(dedupQueue.getQueue()).toEqual([])
       // The ingest's own embeds go through the relay and are answered.
       await waitUntil(() => ingestQueue.getQueue().length === 0)
       expect([...store.current!.pages.keys()].filter((id) => id !== "concepts/attention").sort()).toEqual([
@@ -197,9 +208,10 @@ describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73)",
     } finally {
       await relay.close()
     }
-    await waitUntil(() => dedupQueue.getQueue().length === 0)
+    // Closing the relay fails the held re-embed, which logs it.
+    await waitUntil(() => fileExists(`${tmp.path}/.llm-wiki/embedding-failures.jsonl`))
     const failures = (await readFileRaw(`${tmp.path}/.llm-wiki/embedding-failures.jsonl`)).trim().split("\n").map((l) => JSON.parse(l))
-    console.log(`[#73 live] after the relay closed, the merge finished; failures file: ${JSON.stringify(failures.map((f) => [f.trigger, f.page]))}`)
+    console.log(`[#73 live] after the relay closed, the held re-embed failed and was logged; failures file: ${JSON.stringify(failures.map((f) => [f.trigger, f.page]))}`)
     expect(failures[0]).toEqual(expect.objectContaining({ trigger: "merge", page: "wiki/concepts/attention.md" }))
   }, 120_000)
 
@@ -232,5 +244,41 @@ describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73)",
     console.log(`[#73 live] after deleting inbox.md: vectorCoverage ${JSON.stringify(second)}; stored ids ${JSON.stringify([...store.current!.pages.keys()].sort())}`)
     expect(second?.orphansRemoved).toBe(1)
     expect([...store.current!.pages.keys()].sort()).toEqual(["concepts/sweep", "entities/relay"])
+  }, 60_000)
+
+  it("repairs a page whose merge re-embed landed after an ingest's newer embed and whose newer hash was recorded last", async () => {
+    const v1 = concept("Lease", "The lease runs a year.")
+    const v2 = concept("Lease", "The lease now runs on quartz monthly terms.")
+    await writeFileRaw(`${tmp.path}/wiki/concepts/lease.md`, v1)
+    const relay = await startRelay(cfg.endpoint, "runs a year")
+    const relayed = { ...cfg, endpoint: relay.url }
+    useWikiStore.getState().setEmbeddingConfig(relayed)
+    const ingestBatch: EmbeddedHashes = {}
+    try {
+      // The merge's re-embed reads A as v1; the relay holds its request.
+      const merge = reembedWikiPages(tmp.path, ["wiki/concepts/lease.md"], "merge")
+      await waitUntil(() => relay.held() > 0)
+      // The ingest writes A as v2 and stores v2 vectors; its batch records later.
+      await writeFileRaw(`${tmp.path}/wiki/concepts/lease.md`, v2)
+      expect(await embedPage(tmp.path, "concepts/lease", "Lease", v2, relayed, { hashes: ingestBatch })).toBe(true)
+      // The merge's slow embed lands over them, and its batch records v1.
+      await relay.release()
+      expect(await merge).toBe(0)
+    } finally {
+      await relay.close()
+    }
+    // The ingest's longer batch records v2 last.
+    await recordEmbeddedHashes(tmp.path, ingestBatch)
+    const record = () => readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`).then((r) => JSON.parse(r)["concepts/lease"])
+    const stored = () => store.current!.pages.get("concepts/lease")?.[0].chunk_text ?? ""
+    console.log(`[#73 live] two writers: vectors from v1: ${stored().includes("runs a year")}; record names v1: ${(await record()) === (await sha256(v1))}, v2: ${(await record()) === (await sha256(v2))}`)
+    expect(stored()).toContain("runs a year")
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    console.log(`[#73 live] next backfill: vectorCoverage ${JSON.stringify(coverage)}; vectors from v2: ${stored().includes("quartz monthly terms")}; record names v2: ${(await record()) === (await sha256(v2))}`)
+    expect(coverage?.embedded).toBe(1)
+    expect(stored()).toContain("quartz monthly terms")
+    expect(await record()).toBe(await sha256(v2))
   }, 60_000)
 })

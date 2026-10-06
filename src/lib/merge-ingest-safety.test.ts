@@ -353,7 +353,8 @@ describe("a merge's re-embed holds no ingest write (#73)", () => {
     await ingestQueue.enqueueIngest(PROJECT_ID, scenario.source.path)
     await waitUntil(async () => (await read("wiki/index.md")).includes("rope"))
     expect(await fileExists(`${tmp.path}/wiki/concepts/rope.md`)).toBe(true)
-    expect(dedupQueue.getQueue().map((t) => t.status)).toEqual(["processing"])
+    // The merge task is done; only its re-embed is waiting (#73 gate).
+    expect(dedupQueue.getQueue()).toEqual([])
 
     endpoint.resolve()
     await waitUntil(bothQueuesIdle)

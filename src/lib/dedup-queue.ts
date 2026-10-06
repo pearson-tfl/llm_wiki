@@ -694,16 +694,15 @@ async function processNext(projectId: string): Promise<void> {
       return await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
     })
     const merged = result !== null
-    if (merged) {
-      // Tell the rest of the app the wiki tree changed, even if a cancel
-      // landed while the merge wrote.
-      if (currentProjectId === projectId) useWikiStore.getState().bumpDataVersion()
-      // After the lock is released: a hung embedding endpoint must not hold
-      // an ingest's write (#73).
-      await reembedMergedPages(pp, result)
+    // Tell the rest of the app the wiki tree changed, even if a cancel
+    // landed while the merge wrote.
+    if (merged && currentProjectId === projectId) useWikiStore.getState().bumpDataVersion()
+    if (currentProjectId !== projectId || signal.aborted) {
+      // A cancel or switch has taken the queue over; the pages the merge
+      // wrote still get fresh vectors.
+      if (merged) await reembedMergedPages(pp, result)
+      return
     }
-    if (currentProjectId !== projectId) return
-    if (signal.aborted) return
     if (!merged) {
       currentAbortController = null
       next.status = "pending"
@@ -720,6 +719,11 @@ async function processNext(projectId: string): Promise<void> {
     await saveQueue(pp)
 
     console.log(`[Dedup Queue] Done: ${next.group.slugs.join(",")}`)
+    // The task is done, so a cancel during the re-embed finds nothing to
+    // cancel; the next merge waits for it. It runs after the lock is
+    // released: a hung embedding endpoint must not hold an ingest's write
+    // (#73).
+    await reembedMergedPages(pp, result)
   } catch (err) {
     if (currentProjectId !== projectId) return
     const message = err instanceof Error ? err.message : String(err)

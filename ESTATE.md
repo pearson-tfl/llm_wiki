@@ -414,12 +414,19 @@ Keep this list current. Merge conflicts can only come from these files.
   `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
   `.llm-wiki/embedded-pages.json` is written once per backfill run, merge
   re-embed, hub re-embed and ingest, not once per page (`embedPage`'s
-  `hashes` option and the exported `recordEmbeddedHashes`). Tests in
+  `hashes` option and the exported `recordEmbeddedHashes`). Each page's
+  vector writes are numbered in the order they land, and a batch records
+  a page's hash only if its own write is still the page's latest, so a
+  merge re-embed and an ingest on the same page cannot leave old vectors
+  under a current hash; the next backfill re-embeds such a page. The merge
+  task is reported done and leaves the queue before its re-embed starts,
+  so a cancel meanwhile finds nothing to cancel, and the next merge waits
+  for the re-embed. Tests in
   `src/lib/embedding-freshness.test.ts`,
   `src/lib/dedup-runner.reembed.test.ts`,
-  `src/lib/merge-ingest-safety.test.ts` and
-  `src/lib/ingest-embed-record.test.ts`; an opt-in run of all three on a
-  real embedding endpoint (a relay that never answers the merged page, a
+  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-queue.test.ts`
+  and `src/lib/ingest-embed-record.test.ts`; an opt-in run on a real
+  embedding endpoint (a relay that holds the merged page's request, a
   stopped port, and the endpoint itself) in
   `src/lib/embedding-freshness.real-llm.test.ts`.
 - `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
