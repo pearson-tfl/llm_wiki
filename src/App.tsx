@@ -10,7 +10,7 @@ import { BASE_FONT_SIZE_PX, useZoomStore } from "@/stores/zoom-store"
 import { openProject } from "@/commands/fs"
 import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, loadLanguage, loadSearchApiConfig, loadEmbeddingConfig, loadMineruConfig, loadMultimodalConfig, loadOutputLanguage, loadProviderConfigs, loadCustomLlmPresets, loadActivePresetId, loadTaskModelRouting, loadProjectLlmOverride, loadProxyConfig, loadScheduledImportConfig, saveScheduledImportConfig, loadSourceWatchAllProjects, loadSourceWatchConfig, loadApiConfig, loadGeneralConfig, loadZoomLevel } from "@/lib/project-store"
 import { loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
-import { setupAutoSave, loadSavedReviewItems } from "@/lib/auto-save"
+import { setupAutoSave, loadReviewItemsOnOpen } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
 import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
 import { useGlobalShortcut } from "@/hooks/use-global-shortcut"
@@ -76,16 +76,10 @@ function App() {
 
   async function hydrateProjectSideStores(proj: WikiProject): Promise<void> {
     try {
-      const { dismissStaleRestoreNotice } = await import("@/lib/dedup-queue")
       // The review auto-save writes nothing for this project until these
       // load, so a merge-queue time-out notice filed first is not saved
       // over them, and they load beside it (#62).
-      const tookSavedItems = await loadSavedReviewItems(proj.path, () => isCurrentProject(proj))
-      if (tookSavedItems) {
-        // A merge-queue time-out notice saved before this reopen goes if
-        // the queue has opened since (#59).
-        dismissStaleRestoreNotice(proj.id)
-      }
+      await loadReviewItemsOnOpen(proj.id, proj.path, () => isCurrentProject(proj))
     } catch (err) {
       console.warn("[startup] failed to load review items:", err)
     }

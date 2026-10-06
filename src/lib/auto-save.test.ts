@@ -159,16 +159,17 @@ describe("auto-save project-switch guard", () => {
     expect(saveReviewItems).not.toHaveBeenCalled()
   })
 
-  it("a review load keeps the items that arrived while it read, over a saved item with the same id", async () => {
+  it("a review load keeps the items that arrived while it read, and a saved resolved item with the same id stays resolved (#65)", async () => {
     setProjectPath("/proj/A")
     loadReviewItems.mockResolvedValueOnce([{ ...review("n1"), resolved: true }, review("a1")])
-    useReviewStore.setState({ items: [review("n1")] })
+    useReviewStore.setState({ items: [review("n1"), review("n2")] })
 
     expect(await loadSavedReviewItems("/proj/A", () => true)).toBe(true)
 
     expect(useReviewStore.getState().items.map(({ title, resolved }) => ({ title, resolved }))).toEqual([
+      { title: "n1", resolved: true },
       { title: "a1", resolved: false },
-      { title: "n1", resolved: false },
+      { title: "n2", resolved: false },
     ])
   })
 

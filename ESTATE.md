@@ -189,11 +189,18 @@ Keep this list current. Merge conflicts can only come from these files.
   auto-save back on before it reads the project's saved review items, so
   the review auto-save writes nothing for a project until they have
   loaded, and the load keeps a notice filed meanwhile beside them (#62).
+  An item that arrives during that load and matches a saved one is merged
+  with it, so a resolved item stays resolved, except a time-out notice,
+  which a restore files open on purpose; arrivals reach an empty saved
+  file at once; and the review auto-save opens for the project even if
+  the merge-queue module fails to import, since project open's review
+  load (now in `auto-save.ts`) imports it first, in its own catch (#65).
   Upstream edits to the dedup queue, the dedup merge, the ingest queue,
   the Maintenance screen, the Review screen, the auto-save or project
   open in `App.tsx` need re-checking against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`,
   `src/lib/auto-save.test.ts`, `src/lib/auto-save.review-load.test.ts`,
+  `src/lib/auto-save.review-load-import.test.ts`,
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
