@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore, fakeEmbedding } from "@/test-helpers/fake-vector-store"
+import { createDeferred, flushIO } from "@/test-helpers/deferred"
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof createFakeVectorStore> | null }))
 const written = vi.hoisted(() => ({ paths: [] as string[] }))
@@ -21,10 +22,20 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => store.current!.invoke(cmd, args),
 }))
 
-import { resetEmbeddingOptimizeAccountingForTests, searchByEmbedding } from "@/lib/embedding"
+import {
+  embedPage,
+  recordEmbeddedHashes,
+  resetEmbeddingOptimizeAccountingForTests,
+  searchByEmbedding,
+} from "@/lib/embedding"
 import { sha256 } from "@/lib/ingest-cache"
-import { BACKFILL_STOP_AFTER_FAILURES, FAILURE_LOG_MAX_LINES, runEmbeddingBackfill } from "./embedding-freshness"
-import type { EmbeddingConfig } from "@/stores/wiki-store"
+import {
+  BACKFILL_STOP_AFTER_FAILURES,
+  FAILURE_LOG_MAX_LINES,
+  reembedWikiPages,
+  runEmbeddingBackfill,
+} from "./embedding-freshness"
+import { useWikiStore, type EmbeddingConfig } from "@/stores/wiki-store"
 
 const cfg: EmbeddingConfig = {
   enabled: true,
@@ -320,5 +331,46 @@ describe("vector backfill – the embedded-pages record (#73)", () => {
     expect(written.paths.filter((p) => p.endsWith("/.llm-wiki/embedded-pages.json"))).toHaveLength(1)
     const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
     expect(Object.keys(record).sort()).toEqual(["concepts/sweep", "entities/inbox", "entities/relay"])
+  })
+})
+
+describe("vector backfill – two writers on one page (#73 gate)", () => {
+  afterEach(() => {
+    useWikiStore.getState().setEmbeddingConfig({ enabled: false, endpoint: "", apiKey: "", model: "" })
+  })
+
+  it("repairs a page whose older embed landed after a newer one and whose newer hash was recorded last", async () => {
+    useWikiStore.getState().setEmbeddingConfig(cfg)
+    const v1 = page("Lease", "The lease runs a year.")
+    const v2 = page("Lease", "The lease now runs on quartz monthly terms.")
+    await writePage("concepts/lease.md", v1)
+    const endpoint = createDeferred<void>()
+    fake.state.hung = { matching: "runs a year", until: endpoint.promise }
+
+    // The merge's re-embed reads the page as v1, and its embed waits on the
+    // endpoint.
+    const merge = reembedWikiPages(tmp.path, ["wiki/concepts/lease.md"], "merge")
+    for (let i = 0; i < 200 && !fake.calls.some((c) => JSON.stringify(c.args).includes("runs a year")); i++) await flushIO()
+    // An ingest writes v2 and stores its vectors; its batch records the
+    // hash later.
+    await writePage("concepts/lease.md", v2)
+    const ingestBatch: Parameters<typeof recordEmbeddedHashes>[1] = {}
+    expect(await embedPage(tmp.path, "concepts/lease", "Lease", v2, cfg, { hashes: ingestBatch })).toBe(true)
+    // The merge's slow embed lands over them, and its batch records v1.
+    endpoint.resolve()
+    fake.state.hung = null
+    expect(await merge).toBe(0)
+    // The ingest's longer batch records v2 last.
+    await recordEmbeddedHashes(tmp.path, ingestBatch)
+    expect(fake.pages.get("concepts/lease")?.[0].chunk_text).toContain("runs a year")
+
+    const coverage = await runEmbeddingBackfill(tmp.path, cfg)
+
+    expect(coverage?.embedded).toBe(1)
+    expect(fake.pages.get("concepts/lease")?.[0].chunk_text).toContain("quartz monthly terms")
+    const hits = await searchByEmbedding(tmp.path, "quartz monthly terms", cfg, 5)
+    expect(hits[0]?.id).toBe("concepts/lease")
+    const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
+    expect(record["concepts/lease"]).toBe(await sha256(v2))
   })
 })

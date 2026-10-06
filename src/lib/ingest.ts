@@ -1710,7 +1710,7 @@ async function autoIngestImpl(
     try {
       const { embedPage, recordEmbeddedHashes, wikiPageIdFromPath } = await import("@/lib/embedding")
       // One write of the embedded-pages record for the whole ingest (#73).
-      const hashes: Record<string, string> = {}
+      const hashes: import("@/lib/embedding").EmbeddedHashes = {}
       for (const wpath of writtenPaths) {
         const pageId = wikiPageIdFromPath(pp, wpath)
         const pageStem = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""

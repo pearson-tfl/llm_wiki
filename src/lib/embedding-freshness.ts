@@ -9,6 +9,7 @@ import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
 import {
   contentPagesInTree,
   embedPage,
+  type EmbeddedHashes,
   extractEmbeddingTitle,
   fetchEmbedding,
   getLastEmbeddingError,
@@ -101,7 +102,7 @@ export async function runEmbeddingBackfill(
   let embedded = 0
   let failedInARow = 0
   let stoppedEarly: string | undefined
-  const embeddedHashes: Record<string, string> = {}
+  const embeddedHashes: EmbeddedHashes = {}
   try {
     for (const page of [...missing, ...stale].slice(0, limit)) {
       const failure = await embedOne(pp, page, cfg, "backfill", embeddedHashes)
@@ -176,7 +177,7 @@ export async function reembedWikiPages(
   if (!cfg.enabled || !cfg.model) return 0
   const pp = normalizePath(projectPath)
   let failed = 0
-  const embeddedHashes: Record<string, string> = {}
+  const embeddedHashes: EmbeddedHashes = {}
   for (const path of paths) {
     const pageId = wikiPageIdFromPath(pp, path)
     if (!pageId || !isContentPagePath(path)) continue
@@ -215,7 +216,7 @@ async function embedOne(
   page: Due,
   cfg: EmbeddingConfig,
   trigger: EmbedTrigger,
-  hashes: Record<string, string>,
+  hashes: EmbeddedHashes,
 ): Promise<string | null> {
   let reason: string
   try {

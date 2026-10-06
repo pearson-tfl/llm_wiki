@@ -266,13 +266,30 @@ async function removeLegacyVectorIdIfSafe(projectPath: string, pageId: string): 
   })
 }
 
+/** Replace a page's vectors. Returns the number of this vector write. */
 async function vectorUpsertPageChunks(
   projectPath: string,
   pageId: string,
   rows: ChunkUpsertInput[],
-): Promise<void> {
+): Promise<number> {
   await vectorUpsertChunks(projectPath, pageId, rows)
+  const write = noteVectorWrite(projectPath, pageId)
   await removeLegacyVectorIdIfSafe(projectPath, pageId)
+  return write
+}
+
+// Each page's vector writes are numbered in the order they land, so a hash
+// is recorded only by the embed whose vectors are still the page's latest
+// (#73 gate). Two writers on one page – a merge's re-embed outside the
+// project lock and an ingest, say – can then never leave the record naming
+// newer text than the vectors hold.
+let vectorWriteCount = 0
+const latestVectorWrite = new Map<string, number>()
+
+function noteVectorWrite(projectPath: string, pageId: string): number {
+  vectorWriteCount++
+  latestVectorWrite.set(`${normalizePath(projectPath)}\0${pageId}`, vectorWriteCount)
+  return vectorWriteCount
 }
 
 async function vectorCountChunks(projectPath: string): Promise<number> {
@@ -384,19 +401,28 @@ export function loadEmbeddedHashes(projectPath: string): Promise<Record<string, 
   return pending
 }
 
-/** Record the hash of each page's embedded text, by page id. One call is
- *  one write of the whole record, so a caller embedding many pages
- *  collects their hashes and records them once (#73). */
+/** The hash of each page's embedded text, by page id, with the number of
+ *  the vector write that embed made. */
+export type EmbeddedHashes = Record<string, { hash: string; write: number }>
+
+/** Record the hash of each page's embedded text, by page id, skipping a
+ *  page whose vectors a later write has replaced since. One call is one
+ *  write of the whole record, so a caller embedding many pages collects
+ *  their hashes and records them once (#73). */
 export async function recordEmbeddedHashes(
   projectPath: string,
-  hashes: Record<string, string>,
+  hashes: EmbeddedHashes,
 ): Promise<void> {
   if (Object.keys(hashes).length === 0) return
   const pp = normalizePath(projectPath)
   // One write at a time per project, each of the whole record as it then is.
   const write = (embeddedHashWrites.get(pp) ?? Promise.resolve()).then(async () => {
+    const latest = Object.entries(hashes).filter(
+      ([pageId, { write }]) => latestVectorWrite.get(`${pp}\0${pageId}`) === write,
+    )
+    if (latest.length === 0) return
     const record = await loadEmbeddedHashes(pp)
-    Object.assign(record, hashes)
+    for (const [pageId, { hash }] of latest) record[pageId] = hash
     await writeFile(`${pp}/${EMBEDDED_HASHES_PATH}`, JSON.stringify(record))
   })
   embeddedHashWrites.set(pp, write.catch(() => undefined))
@@ -554,7 +580,7 @@ export async function embedPage(
     deferOptimization?: boolean
     /** Collect the page's hash here for the caller to record with
      *  `recordEmbeddedHashes`, instead of writing the record now. */
-    hashes?: Record<string, string>
+    hashes?: EmbeddedHashes
   },
 ): Promise<boolean> {
   const t0 = performance.now()
@@ -569,10 +595,10 @@ export async function embedPage(
     return false
   }
 
-  await vectorUpsertPageChunks(projectPath, pageId, prepared.page.rows)
-  const hash = await sha256(content)
-  if (options?.hashes) options.hashes[pageId] = hash
-  else await recordEmbeddedHashes(projectPath, { [pageId]: hash })
+  const write = await vectorUpsertPageChunks(projectPath, pageId, prepared.page.rows)
+  const entry = { hash: await sha256(content), write }
+  if (options?.hashes) options.hashes[pageId] = entry
+  else await recordEmbeddedHashes(projectPath, { [pageId]: entry })
   if (!options?.deferOptimization) {
     await noteIncrementalVectorWrite(projectPath)
   }
@@ -780,19 +806,20 @@ export async function embedAllPages(
 
     if (failures.length > 0) {
       let updated = 0
+      const recorded: EmbeddedHashes = {}
       for (const page of preparedPages) {
         try {
-          await vectorUpsertPageChunks(pp, page.pageId, page.rows)
+          const write = await vectorUpsertPageChunks(pp, page.pageId, page.rows)
+          recorded[page.pageId] = { hash: hashes[page.pageId], write }
           updated++
         } catch (err) {
-          delete hashes[page.pageId]
           failures.push(
             `${page.pageId}: ${err instanceof Error ? err.message : String(err)}`,
           )
         }
       }
       if (updated > 0) await optimizeChunkVectorTableBestEffort(pp)
-      await recordEmbeddedHashes(pp, hashes)
+      await recordEmbeddedHashes(pp, recorded)
       const error = `${failures.length} of ${mdFiles.length} pages could not be embedded (${failures[0]}). ${updated} successful page(s) were updated; failed pages kept their previous vectors and can be retried.`
       setEmbeddingReindexState({ kind: "error", projectPath: pp, message: error })
       throw new Error(error)
@@ -811,10 +838,12 @@ export async function embedAllPages(
     await clearChunkVectorTable(pp)
 
     let written = 0
+    const recorded: EmbeddedHashes = {}
     for (const page of preparedPages) {
       try {
         // The table was just cleared, so no legacy basename rows remain.
         await vectorUpsertChunks(pp, page.pageId, page.rows)
+        recorded[page.pageId] = { hash: hashes[page.pageId], write: noteVectorWrite(pp, page.pageId) }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
         throwEmbeddingReindexError(
@@ -831,7 +860,7 @@ export async function embedAllPages(
     if (written > 0) {
       await optimizeChunkVectorTableBestEffort(pp)
     }
-    await recordEmbeddedHashes(pp, hashes)
+    await recordEmbeddedHashes(pp, recorded)
     // Forced rebuild succeeded, so the legacy v1 per-page table is obsolete
     // even when every readable content page was empty and no v2 rows were
     // written. Keep this outside the `written > 0` optimization guard.
@@ -843,15 +872,15 @@ export async function embedAllPages(
 
   let done = 0
   let indexed = 0
-  const hashes: Record<string, string> = {}
+  const hashes: EmbeddedHashes = {}
   await parallelForEach(mdFiles, cfg.concurrency, async (file) => {
     try {
       const content = await readFile(file.path)
       const title = extractEmbeddingTitle(content, file.id)
       const prepared = await preparePageEmbeddingRows(file.id, title, content, cfg, scheduleEmbedding)
       if (prepared.status === "ready") {
-        await scheduleVectorWrite(() => vectorUpsertPageChunks(pp, file.id, prepared.page.rows))
-        hashes[file.id] = await sha256(content)
+        const write = await scheduleVectorWrite(() => vectorUpsertPageChunks(pp, file.id, prepared.page.rows))
+        hashes[file.id] = { hash: await sha256(content), write }
         indexed++
       }
     } catch {
