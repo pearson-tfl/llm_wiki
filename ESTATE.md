@@ -414,7 +414,10 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/embedding-freshness.test.ts`,
   `src/lib/dedup-runner.reembed.test.ts`,
   `src/lib/merge-ingest-safety.test.ts` and
-  `src/lib/ingest-embed-record.test.ts`.
+  `src/lib/ingest-embed-record.test.ts`; an opt-in run of all three on a
+  real embedding endpoint (a relay that never answers the merged page, a
+  stopped port, and the endpoint itself) in
+  `src/lib/embedding-freshness.real-llm.test.ts`.
 - `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
   the test-only `clearQueueState()` cannot stop an ingest queue save that
   is already writing, so it hands back a promise that settles once that
