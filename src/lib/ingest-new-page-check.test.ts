@@ -30,6 +30,7 @@ function cosine(a: number[], b: number[]): number {
 let vectorIndex: Array<{ id: string; text: string }> = []
 let embeddingDown = false
 let vectorStoreDown = false
+let embeddingCalls = 0
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tauri-apps/api/core")>()
@@ -37,6 +38,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
     ...actual,
     invoke: async (cmd: string, args?: Record<string, unknown>) => {
       if (cmd === "embedding_fetch") {
+        embeddingCalls++
         if (embeddingDown) throw new Error("connection refused")
         return fakeVector(String(args?.text))
       }
@@ -119,6 +121,14 @@ const newPageBlock = fileBlock(
   "wiki/concepts/release-calendar.md",
   page("concept", "Release Calendar", "A calendar of planned releases."),
 )
+const gatewayBlock = fileBlock(
+  "wiki/entities/gateway.md",
+  page("entity", "Gateway", "The gateway routes an agent's model calls."),
+)
+const gatewayTwinBlock = fileBlock(
+  "wiki/concepts/model-gateway.md",
+  page("concept", "Model Gateway", "A model gateway routes an agent's model calls."),
+)
 const harnessUpdateBlock = fileBlock(
   "wiki/concepts/agent-harness-engineering.md",
   page("concept", "Agent Harness Engineering", "The task notes add a section on task lists."),
@@ -151,6 +161,7 @@ describe("autoIngest checks each new concept or entity page against existing pag
   beforeEach(async () => {
     embeddingDown = false
     vectorStoreDown = false
+    embeddingCalls = 0
     resetEmbeddingOptimizeAccountingForTests()
     generationReply = [summaryBlock, todoWriteTwinBlock].join("\n")
 
@@ -229,6 +240,48 @@ describe("autoIngest checks each new concept or entity page against existing pag
       checked: ["wiki/concepts/release-calendar.md"],
       flagged: [],
     })
+    expect(duplicateReviews()).toHaveLength(0)
+  })
+
+  it("flags two twins created by the same ingest as one pair", async () => {
+    generationReply = [summaryBlock, gatewayBlock, gatewayTwinBlock].join("\n")
+
+    await ingest()
+
+    const text = await log()
+    expect(text).toContain("- New concept and entity pages checked against existing pages: 2. Near-duplicates flagged: 1.")
+    expect(text).toContain(
+      "- Near-duplicate flagged: wiki/concepts/model-gateway.md is close to wiki/entities/gateway.md, also created by this ingest (score 1.000).",
+    )
+    expect((await lastRecord()).newPageCheck).toEqual({
+      checked: ["wiki/entities/gateway.md", "wiki/concepts/model-gateway.md"],
+      flagged: [
+        { path: "wiki/concepts/model-gateway.md", existingPath: "wiki/entities/gateway.md", score: 1, sameIngest: true },
+      ],
+    })
+    const reviews = duplicateReviews()
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0].affectedPages).toEqual(["wiki/concepts/model-gateway.md", "wiki/entities/gateway.md"])
+    expect(reviews[0].description).toContain("Ingest created both wiki/concepts/model-gateway.md and wiki/entities/gateway.md")
+    expect(reviews[0].options.map((option) => option.label)).toEqual(["Open new page", "Open other new page", "Skip"])
+  })
+
+  it("makes no embedding call for the check when the ingest is cancelled before it", async () => {
+    const controller = new AbortController()
+
+    // The index update is the last write before the check. Calls counted
+    // from the abort are the check's: the candidate search embeds earlier.
+    await expect(
+      autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig(), controller.signal, undefined, (path) => {
+        if (path !== "wiki/index.md") return
+        controller.abort()
+        embeddingCalls = 0
+      }),
+    ).rejects.toThrow()
+
+    expect(await readFileRaw(`${tmp.path}/wiki/entities/todowrite.md`)).toContain("title: TodoWrite")
+    expect(embeddingCalls).toBe(0)
+    expect((await lastRecord()).newPageCheck).toEqual({ checked: [], flagged: [], skipped: "ingest cancelled" })
     expect(duplicateReviews()).toHaveLength(0)
   })
 

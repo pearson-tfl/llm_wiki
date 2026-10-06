@@ -1539,7 +1539,10 @@ async function autoIngestImpl(
   record.createdPages = pageWrites.created
   record.updatedPages = pageWrites.updated
   record.mergeFallbacks = mergeFallbacks
-  const newPageCheck = await checkNewPages(pp, pageWrites.created, useWikiStore.getState().embeddingConfig)
+  // A cancelled ingest spends no embedding calls on the check (#75).
+  const newPageCheck: NewPageCheck = signal?.aborted
+    ? { checked: [], flagged: [], skipped: "ingest cancelled" }
+    : await checkNewPages(pp, pageWrites.created, useWikiStore.getState().embeddingConfig)
   record.newPageCheck = newPageCheck
 
   // log.md is append-only structural metadata. If the model omitted its FILE
