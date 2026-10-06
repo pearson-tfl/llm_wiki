@@ -230,6 +230,26 @@ describe("an item that arrives while the saved review items load (#65)", () => {
     ])
   })
 
+  it("leaves a saved time-out notice in place when no notice arrives", async () => {
+    const savedNotice: ReviewItem = {
+      id: RESTORE_TIMEOUT_NOTICE_ID, type: "confirm", title: NOTICE_TITLE, description: "",
+      options: [], resolved: false, createdAt: 1,
+    }
+    const savedFile = JSON.stringify([savedNotice], null, 2)
+    await writeFileRaw(reviewFile, savedFile)
+    const reviewRead = createDeferred<string>()
+    heldReads.set(reviewFile, reviewRead.promise)
+
+    await openProject()
+    const loaded = loadSavedReviewItems(project.path, isOpen, RESTORE_TIMEOUT_NOTICE_ID)
+    const { type, title, description, options } = SAVED[0]
+    useReviewStore.getState().addItem({ type, title, description, options })
+    reviewRead.resolve(savedFile)
+
+    expect(await loaded).toBe(true)
+    expect(useReviewStore.getState().items.map((i) => i.title)).toEqual([NOTICE_TITLE, "Saved review"])
+  })
+
   it("is saved to an empty saved review file with no further change", async () => {
     await writeFileRaw(reviewFile, "[]")
     const reviewRead = createDeferred<string>()
