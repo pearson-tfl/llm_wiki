@@ -5,7 +5,7 @@ use arrow_array::{
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Duration;
 use lancedb::connect;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::query::{ExecutableQuery, QueryBase, Select};
 use lancedb::table::{CompactionOptions, OptimizeAction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -753,6 +753,65 @@ pub async fn vector_count_chunks(project_path: String) -> Result<usize, String> 
     .await
 }
 
+/// Every distinct page id in the v2 table, sorted. The scheduled
+/// maintenance tick compares it with the wiki's pages to find pages with
+/// no vectors under their folder-qualified id.
+#[tauri::command]
+pub async fn vector_list_page_ids(project_path: String) -> Result<Vec<String>, String> {
+    run_guarded_async("vector_list_page_ids", async move {
+        let lock = vectorstore_v2_lock(&project_path);
+        let _guard = lock.read().await;
+
+        let db = connect(&db_path(&project_path))
+            .execute()
+            .await
+            .map_err(|e| format!("DB connect error: {e}"))?;
+
+        let tables = db
+            .table_names()
+            .execute()
+            .await
+            .map_err(|e| format!("List tables error: {e}"))?;
+
+        if !tables.contains(&TABLE_V2.to_string()) {
+            return Ok(vec![]);
+        }
+
+        let table = db
+            .open_table(TABLE_V2)
+            .execute()
+            .await
+            .map_err(|e| format!("Open table error: {e}"))?;
+
+        let stream = table
+            .query()
+            .select(Select::columns(&["page_id"]))
+            .execute()
+            .await
+            .map_err(|e| format!("Query error: {e}"))?;
+
+        use futures::TryStreamExt;
+        let batches: Vec<RecordBatch> = stream
+            .try_collect()
+            .await
+            .map_err(|e| format!("Collect error: {e}"))?;
+
+        let mut ids = std::collections::BTreeSet::new();
+        for batch in &batches {
+            let page_ids = batch
+                .column_by_name("page_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+                .ok_or("Missing page_id column")?;
+            for i in 0..batch.num_rows() {
+                ids.insert(page_ids.value(i).to_string());
+            }
+        }
+
+        Ok(ids.into_iter().collect())
+    })
+    .await
+}
+
 /// Drop the v2 chunk table entirely. Used by Settings → Embedding
 /// "Re-index all pages" so a rebuild reflects the current wiki tree
 /// exactly and removes chunks for deleted/renamed pages.
@@ -1089,6 +1148,31 @@ mod tests_v2 {
             .unwrap();
 
         assert_eq!(vector_count_chunks(pp.clone()).await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn v2_list_page_ids_returns_each_page_once() {
+        let p = tmp_project();
+        let pp = p.to_string_lossy().to_string();
+        assert!(vector_list_page_ids(pp.clone()).await.unwrap().is_empty());
+
+        vector_upsert_chunks(pp.clone(), "concepts/page-b".into(), make_chunks("concepts/page-b", 3, 16))
+            .await
+            .unwrap();
+        vector_upsert_chunks(pp.clone(), "page-a".into(), make_chunks("page-a", 2, 16))
+            .await
+            .unwrap();
+        vector_upsert_chunks(pp.clone(), "entities/page-c".into(), make_chunks("entities/page-c", 1, 16))
+            .await
+            .unwrap();
+        vector_delete_page(pp.clone(), "entities/page-c".into())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            vector_list_page_ids(pp.clone()).await.unwrap(),
+            vec!["concepts/page-b".to_string(), "page-a".to_string()]
+        );
     }
 
     #[tokio::test]

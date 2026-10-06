@@ -17,7 +17,7 @@ interface CacheData {
   entries: Record<string, CacheEntry> // keyed by source filename
 }
 
-/** The content hash a cache entry keys on; ingest run records carry it too. */
+/** The content hash a cache entry keys on; ingest run records and the embedded-pages record carry it too. */
 export async function sha256(content: string): Promise<string> {
   const encoder = new TextEncoder()
   const data = encoder.encode(content)

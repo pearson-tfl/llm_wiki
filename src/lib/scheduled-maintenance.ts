@@ -1,7 +1,7 @@
 /**
  * Scheduled maintenance job (#16 fixes 2 and 3, tickets #18 and #19): a
- * per-project timer that runs the existing duplicate scan, then any
- * hub-rebuild request, with no click. Started and stopped the same way as
+ * per-project timer that runs the vector backfill (#67), the existing
+ * duplicate scan, then any hub-rebuild request, with no click. Started and stopped the same way as
  * scheduled import, for the open project only.
  */
 import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
@@ -25,6 +25,7 @@ import {
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { runHubRebuildRequest } from "@/lib/hub-rebuild"
+import { runEmbeddingBackfill, type VectorCoverage } from "@/lib/embedding-freshness"
 import { parseSources } from "@/lib/sources-merge"
 import type { DuplicateGroup } from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
@@ -65,6 +66,8 @@ export interface MaintenanceRunRecord {
    *  page changed (#24). */
   mergesRejected?: number
   rejectedMerges?: { slugs: string[]; reason: string }[]
+  /** The vector backfill's counts (#67); absent while embeddings are off. */
+  vectorCoverage?: VectorCoverage
   error?: string
 }
 
@@ -111,6 +114,14 @@ export async function runMaintenanceTick(
   const taskIds: string[] = []
   const outcomes: Promise<DedupTaskOutcome>[] = []
   try {
+    // The backfill first, so the hub rebuild's search sees every page.
+    try {
+      const coverage = await runEmbeddingBackfill(pp, useWikiStore.getState().embeddingConfig)
+      if (coverage) record.vectorCoverage = coverage
+    } catch (err) {
+      record.error = `vector backfill: ${err instanceof Error ? err.message : String(err)}`
+    }
+
     try {
       groups = await runDuplicateDetection(pp, llmConfig)
       record.groupsFound = {
@@ -138,7 +149,8 @@ export async function runMaintenanceTick(
         outcomes.push(waitForTask(taskId))
       }
     } catch (err) {
-      record.error = err instanceof Error ? err.message : String(err)
+      const message = err instanceof Error ? err.message : String(err)
+      record.error = record.error ? `${record.error}; ${message}` : message
     }
 
     if (record.groupsFound) {

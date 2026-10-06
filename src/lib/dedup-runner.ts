@@ -13,6 +13,7 @@ import {
   type CandidatePair,
   type Page as DedupEmbeddingPage,
 } from "@/lib/dedup_embedding"
+import { reembedWikiPages, removeWikiPageEmbeddings } from "@/lib/embedding-freshness"
 import { loadEmbeddingConfig } from "@/lib/project-store"
 import { normalizePath } from "@/lib/path-utils"
 import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
@@ -408,6 +409,9 @@ function isEmbeddingCoverageError(err: unknown): boolean {
  *   7. Apply index.md rewrite (separate pass — index isn't in
  *      otherWikiPages because removing references is a different
  *      operation than slug-rewriting them)
+ *   8. Re-embed the canonical and rewritten pages, and remove the
+ *      merged-away pages' vectors (#67); a failed embed is recorded,
+ *      not thrown
  */
 export async function executeMerge(
   projectPath: string,
@@ -477,7 +481,9 @@ export async function executeMerge(
     await writeFile(`${pp}/${r.path}`, r.newContent)
   }
 
-  // 5. Delete merged-away pages
+  // 5. Delete merged-away pages, their vectors first: a bare-slug row is
+  //    only removed while the page that owns the name is still on disk.
+  await removeWikiPageEmbeddings(pp, result.pagesToDelete)
   for (const dead of result.pagesToDelete) {
     try {
       await deleteFile(`${pp}/${dead}`)
@@ -499,6 +505,9 @@ export async function executeMerge(
       await writeFile(indexPath, rewritten)
     }
   }
+
+  // 7. Re-embed the pages just written.
+  await reembedWikiPages(pp, [result.canonicalPath, ...result.rewrites.map((r) => r.path)], "merge")
 
   return result
 }

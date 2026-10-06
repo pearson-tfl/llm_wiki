@@ -2,13 +2,14 @@
  * One-off hub-page rebuild (#16 fix 3, ticket #19), run by the scheduled
  * maintenance tick after the duplicate scan. An agent writes a request
  * file listing hub pages; each is rewritten from the source summaries a
- * search by meaning finds for it, then the request is archived with each
- * hub's result.
+ * search by meaning finds for it and re-embedded (#67), then the request
+ * is archived with each hub's result.
  */
 import { deleteFile, fileExists, readFile, writeFile } from "@/commands/fs"
 import { MergeReplyRejectedError } from "@/lib/dedup"
 import { buildDedupLlmCall } from "@/lib/dedup-runner"
 import { computeContextBudget } from "@/lib/context-budget"
+import { reembedWikiPages } from "@/lib/embedding-freshness"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { BODY_SHRINK_THRESHOLD, setFrontmatterScalar } from "@/lib/page-merge"
 import { withProjectLock } from "@/lib/project-mutex"
@@ -75,6 +76,8 @@ export async function runHubRebuildRequest(
       return { ...tally(results), withheld: step.withheld }
     }
     results.push(step)
+    // A failed embed is recorded by the re-embed and does not fail the hub.
+    if (step.result === "rebuilt") await reembedWikiPages(pp, [path], "hub-rebuild")
   }
 
   await writeFile(

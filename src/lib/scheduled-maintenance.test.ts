@@ -2,13 +2,15 @@
  * Seam 2 of #16 (tickets #18, #19): the scheduled maintenance tick, called
  * with an explicit clock against a real temporary project. Detection, merge
  * and the model call are faked at the dedup runner boundary, and the
- * embedding search at its own; the merge queue, the not-duplicates list,
+ * embedding search at its own, and the Tauri vector-store and embedding
+ * commands are an in-memory store (#67); the merge queue, the not-duplicates list,
  * the saved-groups file, the hub-rebuild request and archive, the page
  * history, the project lock, the run record and the review sweep are real.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { createDeferred, waitFor } from "@/test-helpers/deferred"
+import { createFakeVectorStore, fakeEmbedding } from "@/test-helpers/fake-vector-store"
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
 const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0, paused: false }))
@@ -17,6 +19,11 @@ const ingestSummary = vi.hoisted(() => ({ pending: 0, processing: 0, paused: fal
 const settingRead = vi.hoisted(() => ({ hold: null as (() => Promise<void>) | null }))
 
 vi.mock("@/commands/fs", () => realFs)
+
+const vectors = vi.hoisted(() => ({ store: null as ReturnType<typeof createFakeVectorStore> | null }))
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (cmd: string, args?: Record<string, unknown>) => vectors.store!.invoke(cmd, args),
+}))
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: vi.fn(async () => ({
@@ -53,6 +60,12 @@ vi.mock("@/lib/ingest-queue", () => ({
   getQueueSummary: () => ({ pending: ingestSummary.pending, processing: ingestSummary.processing }),
 }))
 
+// The real backfill, replaceable where a test is not about it.
+vi.mock("@/lib/embedding-freshness", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./embedding-freshness")>()
+  return { ...real, runEmbeddingBackfill: vi.fn(real.runEmbeddingBackfill) }
+})
+
 // The real lock, watched so a test can see the rebuild ask for it.
 vi.mock("@/lib/project-mutex", async (importOriginal) => {
   const real = await importOriginal<typeof import("./project-mutex")>()
@@ -60,7 +73,7 @@ vi.mock("@/lib/project-mutex", async (importOriginal) => {
 })
 
 import { buildDedupLlmCall, executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
-import { getLastEmbeddingError, searchByEmbedding } from "@/lib/embedding"
+import { getLastEmbeddingError, resetEmbeddingOptimizeAccountingForTests, searchByEmbedding } from "@/lib/embedding"
 import { withProjectLock } from "@/lib/project-mutex"
 import {
   clearQueueState,
@@ -76,6 +89,7 @@ import {
   loadScheduledMaintenanceConfig,
   saveScheduledMaintenanceConfig,
 } from "@/lib/project-store"
+import { runEmbeddingBackfill } from "@/lib/embedding-freshness"
 import {
   runMaintenanceTick,
   startScheduledMaintenance,
@@ -92,6 +106,8 @@ const mockBuildLlm = vi.mocked(buildDedupLlmCall)
 const mockSearch = vi.mocked(searchByEmbedding)
 const mockEmbeddingError = vi.mocked(getLastEmbeddingError)
 const mockLock = vi.mocked(withProjectLock)
+const mockBackfill = vi.mocked(runEmbeddingBackfill)
+const { runEmbeddingBackfill: realBackfill } = await vi.importActual<typeof import("./embedding-freshness")>("./embedding-freshness")
 /** The model call the hub rebuild makes: (system, user) → reply. */
 const mockModel = vi.fn<(system: string, user: string) => Promise<string>>()
 
@@ -139,6 +155,8 @@ beforeEach(async () => {
   tmp = await createTempProject("sched-maint")
   project = { id: PROJECT_ID, name: "maint", path: tmp.path }
   storage.clear()
+  vectors.store = createFakeVectorStore()
+  resetEmbeddingOptimizeAccountingForTests()
   storage.set("projectRegistry", {
     [PROJECT_ID]: { id: PROJECT_ID, path: tmp.path, name: "maint", lastOpened: T0 },
   })
@@ -147,6 +165,7 @@ beforeEach(async () => {
   ingestSummary.paused = false
   settingRead.hold = null
   mockLock.mockClear()
+  mockBackfill.mockImplementation(realBackfill)
   mockDetect.mockReset()
   mockMerge.mockReset()
   mockDetect.mockResolvedValue([])
@@ -471,8 +490,57 @@ describe("scheduled maintenance tick – after merges", () => {
       mergesDone: 0,
       mergesFailed: 0,
       mergesRejected: 0,
+      vectorCoverage: { pages: 0, covered: 0, embedded: 0, failed: 0 },
     })
     expect(records[1].startedAt).toBe("2026-10-06T10:00:00.000Z")
+  })
+})
+
+describe("scheduled maintenance tick – vector coverage (#67)", () => {
+  const row = (text: string) => [{ chunk_index: 0, chunk_text: text, heading_path: "", embedding: fakeEmbedding(text) }]
+
+  it("leaves every content page with folder-qualified vectors and records the counts in its line", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/echo-loop.md`, page("Echo loop", "2026-09-20", []))
+    await writeFileRaw(`${tmp.path}/wiki/entities/relay.md`, page("Relay", "2026-09-21", []))
+    await writeFileRaw(`${tmp.path}/wiki/index.md`, page("Index", "2026-09-21", []))
+    vectors.store!.pages.set("echo-loop", row("Echo loop body."))
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect([...vectors.store!.pages.keys()].sort()).toEqual(["concepts/echo-loop", "entities/relay"])
+    expect((await runRecords()).slice(-1)[0]).toMatchObject({
+      skipReason: null,
+      vectorCoverage: { pages: 2, covered: 2, embedded: 2, failed: 0 },
+    })
+    expect(mockDetect).toHaveBeenCalled()
+  })
+
+  it("records a backfill that fails and still runs the duplicate scan", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/entities/relay.md`, page("Relay", "2026-09-21", []))
+    const invoke = vectors.store!.invoke
+    vectors.store!.invoke = async (cmd, args) => {
+      if (cmd === "vector_list_page_ids") throw new Error("DB connect error: locked")
+      return invoke(cmd, args)
+    }
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.error).toBe("vector backfill: DB connect error: locked")
+    expect(record?.vectorCoverage).toBeUndefined()
+    expect(mockDetect).toHaveBeenCalled()
+    expect(record?.groupsFound).toEqual({ high: 0, medium: 0, low: 0 })
+  })
+
+  it("records no coverage while embeddings are off", async () => {
+    await setConfig(null)
+    useWikiStore.getState().setEmbeddingConfig({ enabled: false, endpoint: "", apiKey: "", model: "" })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.vectorCoverage).toBeUndefined()
+    expect(record?.error).toBeUndefined()
   })
 })
 
@@ -727,6 +795,9 @@ describe("scheduled maintenance tick – hub rebuild", () => {
       { id: "sources/harness-notes", score: 0.8 },
       { id: "sources/codex-howto-catalog", score: 0.5 },
     ])
+    // These tests time the rebuild against other writers; the backfill
+    // before it is tested on its own.
+    mockBackfill.mockResolvedValue(null)
   })
 
   it("rewrites a requested hub from its source summaries, unions its sources, backs it up and archives the request", async () => {
@@ -769,6 +840,31 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     ])
     expect(record).toMatchObject({ skipReason: null, hubsRebuilt: [HUB], hubsRejected: [] })
     expect((await runRecords()).slice(-1)[0]).toMatchObject({ hubsRebuilt: [HUB], hubsRejected: [] })
+  })
+
+  it("re-embeds a rebuilt hub, so a search for a phrase only in the rebuilt hub returns it (#67)", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("A harness also pins a zebra quartz harmonic ([[sources/harness-notes]])."))
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    const { searchByEmbedding: search } = await vi.importActual<typeof import("./embedding")>("./embedding")
+    const hits = await search(tmp.path, "zebra quartz harmonic", useWikiStore.getState().embeddingConfig, 3)
+    expect(hits[0]?.id).toBe("concepts/agent-harness-engineering")
+  })
+
+  it("completes a rebuild with the embedding endpoint down, and records the failed embed (#67)", async () => {
+    await writeRequest([HUB])
+    mockModel.mockResolvedValue(rewrite("A harness also pins a zebra quartz harmonic ([[sources/harness-notes]])."))
+    vectors.store!.state.endpointDown = true
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record).toMatchObject({ hubsRebuilt: [HUB], hubsRejected: [] })
+    expect(await readFileRaw(`${tmp.path}/${HUB}`)).toContain("zebra quartz harmonic")
+    const failures = (await readFileRaw(`${tmp.path}/.llm-wiki/embedding-failures.jsonl`))
+      .trim().split("\n").map((l) => JSON.parse(l))
+    expect(failures.filter((f) => f.trigger === "hub-rebuild").map((f) => f.page)).toEqual([HUB])
   })
 
   it("rejects a rewrite whose body shrinks below the same-path merge's ratio, and one with no front matter, keeping the old page", async () => {
