@@ -430,11 +430,15 @@ Keep this list current. Merge conflicts can only come from these files.
   (`stoppedEarly`) and the rest wait for the next tick; if it answers, the
   pages themselves failed and the run carries on. Before embedding, the backfill removes the vectors of every
   stored page id that names no content page and whose file is gone
-  (`orphansRemoved`); a bare-slug id whose name a page still owns is
-  kept, and an empty listing removes nothing.
+  (`orphansRemoved`), then, in one write, those ids' entries in
+  `.llm-wiki/embedded-pages.json` (since #80, `removeEmbeddedHashes`); a
+  bare-slug id whose name a page still owns is kept, an id the Mac's
+  case-insensitive lookup still finds keeps its vectors and its entry,
+  and an empty listing removes nothing.
   `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
-  `.llm-wiki/embedded-pages.json` is written once per backfill run, merge
-  re-embed, hub re-embed and ingest, not once per page (`embedPage`'s
+  `.llm-wiki/embedded-pages.json` is written once per backfill run (twice
+  when it removed orphans), merge re-embed, hub re-embed and ingest, not
+  once per page (`embedPage`'s
   `hashes` option and the exported `recordEmbeddedHashes`). Each page's
   vector writes are numbered in the order they land, and a batch records
   a page's hash only if its own write is still the page's latest, so a
@@ -442,8 +446,11 @@ Keep this list current. Merge conflicts can only come from these files.
   under a current hash; the next backfill re-embeds such a page. The merge
   task is reported done and leaves the queue before its re-embed starts,
   so a cancel meanwhile finds nothing to cancel, and the next merge waits
-  for the re-embed. Tests in
+  for the re-embed; since #80 an error in that re-embed is only logged,
+  so it cannot bump the finished merge's retry count or report it failed
+  after done. Tests in
   `src/lib/embedding-freshness.test.ts`,
+  `src/lib/dedup-queue.reembed-error.test.ts`,
   `src/lib/dedup-runner.reembed.test.ts`,
   `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-queue.test.ts`
   and `src/lib/ingest-embed-record.test.ts`; an opt-in run on a real
