@@ -519,6 +519,9 @@ const RESTORE_TIMEOUT_NOTICE = {
   title: "Duplicate merge queue did not open",
 }
 
+/** The time-out notice's review id. */
+export const RESTORE_TIMEOUT_NOTICE_ID = reviewIdFor(RESTORE_TIMEOUT_NOTICE)
+
 /** Tell the user, in the review queue, that the merge queue did not open. */
 function recordRestoreTimeout(): void {
   const item = {
@@ -536,9 +539,8 @@ function recordRestoreTimeout(): void {
  *  during project open could save the emptied items over the project's
  *  saved ones (#59). */
 function dismissRestoreTimeoutNotice(): void {
-  const id = reviewIdFor(RESTORE_TIMEOUT_NOTICE)
   const { items, dismissItem } = useReviewStore.getState()
-  if (items.some((item) => item.id === id)) dismissItem(id)
+  if (items.some((item) => item.id === RESTORE_TIMEOUT_NOTICE_ID)) dismissItem(RESTORE_TIMEOUT_NOTICE_ID)
 }
 
 async function loadProjectQueue(

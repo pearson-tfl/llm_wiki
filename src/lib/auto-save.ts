@@ -1,4 +1,4 @@
-import { useReviewStore } from "@/stores/review-store"
+import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useLintStore } from "@/stores/lint-store"
 import { useChatStore } from "@/stores/chat-store"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -91,24 +91,66 @@ export async function runWithSuspendedAutoSave<T>(
 /**
  * Load a project's saved review items into the review store and let the
  * review auto-save write for that project from then on. Items that arrived
- * while the file was loading are newer than it, so they are kept, replacing
- * a saved item with the same id. Returns whether the store took the saved
- * items; it does nothing once `stillCurrent` says the project has changed,
- * or while a switch has auto-save suspended, since the switch's own open
- * loads them again, even for the same project.
+ * while the file was loading are kept beside them. One with the same id as
+ * a saved item is merged with it by the store's rule, so a resolved item
+ * stays resolved, except an arrived `reopenedId`, which replaces the saved
+ * one: the merge-queue restore files its time-out notice open on purpose.
+ * When there are no saved items, the arrivals are saved at once, since the
+ * store does not change to set off the auto-save.
+ *
+ * Returns whether the store took the saved items. It does nothing once
+ * `stillCurrent` says the project has changed. While a switch has auto-save
+ * suspended it does nothing even for the same project, since the switch's
+ * own open loads them again.
  */
 export async function loadSavedReviewItems(
   projectPath: string,
   stillCurrent: () => boolean,
+  reopenedId?: string,
 ): Promise<boolean> {
   const saved = await loadReviewItems(projectPath)
   if (suspended || !stillCurrent()) return false
   reviewLoadedFor = projectPath
-  if (saved.length === 0) return false
   const { items, setItems } = useReviewStore.getState()
-  const arrived = new Set(items.map((item) => item.id))
-  setItems([...saved.filter((item) => !arrived.has(item.id)), ...items])
+  if (saved.length === 0) {
+    if (items.length > 0) scheduleReviewSave(projectPath, items)
+    return false
+  }
+  const reopened = items.some((item) => item.id === reopenedId)
+  setItems([...saved.filter((item) => !reopened || item.id !== reopenedId), ...items])
   return true
+}
+
+/**
+ * Project open's review load. The merge-queue module is imported first, in
+ * its own catch, so the review auto-save opens for the project even if the
+ * import fails, and nothing awaits between the load and the dismissal of a
+ * time-out notice the queue's opening has made stale (#59, #65).
+ */
+export async function loadReviewItemsOnOpen(
+  projectId: string,
+  projectPath: string,
+  stillCurrent: () => boolean,
+): Promise<void> {
+  let dedupQueue: typeof import("./dedup-queue") | null = null
+  try {
+    dedupQueue = await import("./dedup-queue")
+  } catch (err) {
+    console.warn("[startup] failed to load the merge queue module:", err)
+  }
+  const tookSavedItems = await loadSavedReviewItems(
+    projectPath,
+    stillCurrent,
+    dedupQueue?.RESTORE_TIMEOUT_NOTICE_ID,
+  )
+  if (tookSavedItems) dedupQueue?.dismissStaleRestoreNotice(projectId)
+}
+
+function scheduleReviewSave(projectPath: string, items: ReviewItem[]): void {
+  if (reviewTimer) clearTimeout(reviewTimer)
+  reviewTimer = setTimeout(() => {
+    saveReviewItems(projectPath, items).catch(() => {})
+  }, 1000)
 }
 
 export function setupAutoSave(): void {
@@ -116,13 +158,8 @@ export function setupAutoSave(): void {
   useReviewStore.subscribe((state) => {
     if (suspended) return
     const projectPath = useWikiStore.getState().project?.path
-    if (projectPath !== reviewLoadedFor) return
-    if (reviewTimer) clearTimeout(reviewTimer)
-    reviewTimer = setTimeout(() => {
-      if (projectPath) {
-        saveReviewItems(projectPath, state.items).catch(() => {})
-      }
-    }, 1000)
+    if (!projectPath || projectPath !== reviewLoadedFor) return
+    scheduleReviewSave(projectPath, state.items)
   })
 
   // Auto-save lint items (debounced 1s)

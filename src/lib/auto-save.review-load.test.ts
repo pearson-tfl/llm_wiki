@@ -36,8 +36,14 @@ vi.mock("@/lib/project-identity", () => ({
   loadRegistry: vi.fn(),
 }))
 
-import { setupAutoSave, runWithSuspendedAutoSave, loadSavedReviewItems } from "./auto-save"
-import { restoreQueue, clearQueueState, SwitchStepTimeoutError, SWITCH_STEP_TIMEOUT_MS } from "./dedup-queue"
+import { setupAutoSave, runWithSuspendedAutoSave, loadSavedReviewItems, loadReviewItemsOnOpen } from "./auto-save"
+import {
+  restoreQueue,
+  clearQueueState,
+  SwitchStepTimeoutError,
+  SWITCH_STEP_TIMEOUT_MS,
+  RESTORE_TIMEOUT_NOTICE_ID,
+} from "./dedup-queue"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
 
@@ -178,5 +184,82 @@ describe("a restore time-out notice filed before the saved review items load (#6
     await settleWrites()
 
     expect(await readFileRaw(reviewFile)).toBe(SAVED_FILE)
+  })
+})
+
+describe("an item that arrives while the saved review items load (#65)", () => {
+  it("leaves the saved item resolved when the same item arrives unresolved", async () => {
+    const savedFile = JSON.stringify([{ ...SAVED[0], resolved: true, resolvedAction: "skip" }], null, 2)
+    await writeFileRaw(reviewFile, savedFile)
+    const reviewRead = createDeferred<string>()
+    heldReads.set(reviewFile, reviewRead.promise)
+
+    await openProject()
+    const loaded = loadSavedReviewItems(project.path, isOpen, RESTORE_TIMEOUT_NOTICE_ID)
+    const { type, title, description, options } = SAVED[0]
+    useReviewStore.getState().addItem({ type, title, description, options })
+    reviewRead.resolve(savedFile)
+
+    expect(await loaded).toBe(true)
+    expect(useReviewStore.getState().items).toEqual([
+      expect.objectContaining({ title: "Saved review", resolved: true, resolvedAction: "skip" }),
+    ])
+  })
+
+  it("re-opens a saved resolved time-out notice when the restore times out again", async () => {
+    const savedNotice: ReviewItem = {
+      id: RESTORE_TIMEOUT_NOTICE_ID, type: "confirm", title: NOTICE_TITLE, description: "",
+      options: [], resolved: true, resolvedAction: "skip", createdAt: 1,
+    }
+    const savedFile = JSON.stringify([savedNotice], null, 2)
+    await writeFileRaw(reviewFile, savedFile)
+    const reviewRead = createDeferred<string>()
+    heldReads.set(reviewFile, reviewRead.promise)
+    heldReads.set(queueFile, new Promise(() => {}))
+
+    await openProject()
+    const loaded = loadSavedReviewItems(project.path, isOpen, RESTORE_TIMEOUT_NOTICE_ID)
+    const restore = restoreQueue(project.id, project.path, isOpen).catch((err: unknown) => err)
+    await vi.advanceTimersByTimeAsync(SWITCH_STEP_TIMEOUT_MS)
+    expect(await restore).toBeInstanceOf(SwitchStepTimeoutError)
+    reviewRead.resolve(savedFile)
+
+    expect(await loaded).toBe(true)
+    expect(useReviewStore.getState().items).toEqual([
+      expect.objectContaining({ title: NOTICE_TITLE, resolved: false }),
+    ])
+  })
+
+  it("is saved to an empty saved review file with no further change", async () => {
+    await writeFileRaw(reviewFile, "[]")
+    const reviewRead = createDeferred<string>()
+    heldReads.set(reviewFile, reviewRead.promise)
+
+    await openProject()
+    const loaded = loadSavedReviewItems(project.path, isOpen, RESTORE_TIMEOUT_NOTICE_ID)
+    const { type, title, description, options } = SAVED[0]
+    useReviewStore.getState().addItem({ type, title, description, options })
+    reviewRead.resolve("[]")
+    expect(await loaded).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    const written = JSON.parse(await reviewFileAfterSave("[]")) as ReviewItem[]
+    expect(written.map((i) => i.title)).toEqual(["Saved review"])
+  })
+})
+
+describe("project open's review load (#65)", () => {
+  it("dismisses a saved time-out notice once the merge queue has opened", async () => {
+    const savedNotice: ReviewItem = {
+      id: RESTORE_TIMEOUT_NOTICE_ID, type: "confirm", title: NOTICE_TITLE, description: "",
+      options: [], resolved: false, createdAt: 1,
+    }
+    await writeFileRaw(reviewFile, JSON.stringify([...SAVED, savedNotice], null, 2))
+
+    await openProject()
+    await restoreQueue(project.id, project.path, isOpen)
+    await loadReviewItemsOnOpen(project.id, project.path, isOpen)
+
+    expect(useReviewStore.getState().items.map((i) => i.title)).toEqual(["Saved review"])
   })
 })
