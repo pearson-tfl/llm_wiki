@@ -83,11 +83,15 @@ Keep this list current. Merge conflicts can only come from these files.
 - `src/lib/ingest.ts` – ingest grows existing pages (pearson-tfl/llm_wiki#17,
   fix 1 of #16). The analysis ends with a topics list, and each long-source
   digest begins with one, so trimming a long digest keeps it. Before
-  generation, ingest searches the wiki by meaning once per topic and adds any
-  page whose file name matches a topic's title. Each search fetches 10 hits
-  and keeps the best 3 that are pages ingest may offer and that exist with
-  text, so other sources' summaries and embeddings with no page behind them
-  do not use up a topic's places (#22). It gives generation up to 12 of
+  generation, ingest adds any page whose file name matches a topic's title,
+  then searches the wiki once per topic with the app's hybrid search, by
+  keyword and by meaning, with graph neighbours off (#70). Each search
+  fetches 50 hits and keeps the best 3 that are pages ingest may offer and
+  that exist with text, so the index, the log, other sources' summaries and
+  hits with no page behind them do not use up a topic's places (#22). When
+  the hybrid search fails, the remaining topics use the search by meaning
+  alone, which fetches 10 hits; when only its meaning half fails, the
+  keyword hits are kept. It gives generation up to 12 of
   those pages, with their exact paths and text, inside a block capped at 15%
   of the context. The cap is counted with the schema, purpose, index and
   overview in the room set aside before the source budget is worked out, so
@@ -99,7 +103,7 @@ Keep this list current. Merge conflicts can only come from these files.
   update a listed page by its exact path. The index is labelled a partial,
   read-only list of recent pages and the overview read-only. Each ingest's
   `wiki/log.md` entry ends with pages offered, updated and created, and why
-  the embedding search or the exact-path check was skipped when one was,
+  the search or the exact-path check was skipped or fell back when one was,
   including a failed embedding fetch or vector store search. `ingest.ts` is
   a large upstream file that changes in most releases: re-check these
   changes at the next upstream merge. Tests in
@@ -113,7 +117,9 @@ Keep this list current. Merge conflicts can only come from these files.
   carries start and finish times, the source as `wiki/log.md` names it, the
   ingest cache's SHA-256 of the source text, the ingest preset id and model,
   the analysis's topics, each existing page offered and whether an exact
-  file-name match or the embedding search found it, why a check was skipped,
+  file-name match, the hybrid search or the embedding search found it
+  (`exact-slug`, `hybrid-search`, `vector-search`; #70), why a check was
+  skipped,
   the pages updated and created (the same counts as the log entry), and each
   merge that fell back because its model reply was rejected or the call
   failed, with why. A run that fails early has only the fields it reached.
@@ -326,10 +332,21 @@ Keep this list current. Merge conflicts can only come from these files.
   result. A version whose prompt-injection guard refuses a transcript with
   `<assistant>` sections would turn every chat with history into an error.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
-  the vector store search fails, which ingest's candidate search uses so the
-  failure reaches its log (#22), and the hub rebuild's search uses so the
+  the vector store search fails, which ingest's candidate search uses when
+  it falls back from the hybrid search, so the failure reaches its log (#22,
+  #70), and the hub rebuild's search uses so the
   failure is that hub's reason (#27). Without the option it returns no hits,
   as upstream does.
+- `src-tauri/src/commands/search.rs`, `src/lib/search.ts`,
+  `src-tauri/src/agent/tools.rs`, `src-tauri/src/api_server.rs` – the
+  hybrid search (`search_project`) takes `includeGraph`, which leaves out
+  the graph-neighbour slots when false, and its response carries
+  `vectorError` when the query embedding or the vector store search failed
+  and only keyword hits came back (#70). Upstream only printed that to the
+  console. Chat, the UI, the API and MCP keep the graph slots; the API and
+  the agent's search tool do not pass `vectorError` on. `searchWikiMatches`
+  in `search.ts` is ingest's caller. Tests in `search.rs` and
+  `src/lib/ingest-candidates.test.ts`.
 - `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
   `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
   from a one-off request file (pearson-tfl/llm_wiki#19, fix 3 of #16). After

@@ -80,6 +80,9 @@ const CANDIDATE_HITS_PER_TOPIC = 3
 // Hits fetched per topic, so that excluded pages and hits with no page file
 // do not use up the per-topic slots.
 const CANDIDATE_SEARCH_HITS_PER_TOPIC = 10
+// The hybrid search's keyword hits also take in the index, the log and other
+// sources' summaries, so it is asked for its most: the backend's cap.
+const CANDIDATE_HYBRID_HITS_PER_TOPIC = 50
 // A topics-section line longer than this is prose, not a name.
 const CANDIDATE_TOPIC_MAX_CHARS = 120
 const CANDIDATE_BLOCK_PAGE_BUDGET_SHARE = 0.3
@@ -93,7 +96,7 @@ const EXACT_PATH_SCORE = Number.POSITIVE_INFINITY
 const INGEST_RUN_RECORD_PATH = ".llm-wiki/ingest-runs.jsonl"
 
 /** How an existing page came to be offered to generation. */
-type CandidateFinder = "exact-slug" | "vector-search"
+type CandidateFinder = "exact-slug" | "hybrid-search" | "vector-search"
 
 /** One line of `.llm-wiki/ingest-runs.jsonl`: one per autoIngest call. */
 export interface IngestRunRecord {
@@ -2993,10 +2996,11 @@ async function wikiPagesBySlug(projectPath: string): Promise<Map<string, string[
 
 /**
  * Existing wiki pages on the analysed source's topics: each topic's best
- * embedding hits that are offerable pages with text, plus a page at each
- * topic's title-derived file name, ranked by best score and cut to the
- * candidate budget. Never throws for a search failure; it reports why the
- * search was skipped instead.
+ * hybrid (keyword and vector) search hits that are offerable pages with
+ * text, plus a page at each topic's title-derived file name, ranked by best
+ * score and cut to the candidate budget. When the hybrid search fails, the
+ * rest of the topics use the embedding search. Never throws for a search
+ * failure; it reports why the search was skipped instead.
  */
 async function selectExistingPageCandidates(
   projectPath: string,
@@ -3044,19 +3048,37 @@ async function selectExistingPageCandidates(
     const queries = topics.length > 0 ? topics : [analysis.trim().slice(0, CANDIDATE_FALLBACK_QUERY_MAX)]
     try {
       const { searchByEmbedding, getLastEmbeddingError } = await import("@/lib/embedding")
+      const { searchWikiMatches } = await import("@/lib/search")
+      let hybridFailed = false
       for (const query of queries.filter(Boolean)) {
-        const hits = await searchByEmbedding(projectPath, query, embCfg, CANDIDATE_SEARCH_HITS_PER_TOPIC, {
-          throwOnStoreError: true,
-        })
-        // searchByEmbedding answers a failed embedding fetch with no hits.
-        const fetchError = hits.length === 0 ? getLastEmbeddingError() : null
-        if (fetchError) throw new Error(fetchError)
+        let hits: Array<{ path: string; score: number }> | null = null
+        let finder: CandidateFinder = "hybrid-search"
+        if (!hybridFailed) {
+          try {
+            const { results, vectorError } = await searchWikiMatches(projectPath, query, CANDIDATE_HYBRID_HITS_PER_TOPIC)
+            hits = results
+            const keywordsOnlyLine = vectorError && `Existing-page search used keywords only: ${vectorError}`
+            if (keywordsOnlyLine && !skipped.includes(keywordsOnlyLine)) skipped.push(keywordsOnlyLine)
+          } catch (err) {
+            hybridFailed = true
+            skipped.push(`Hybrid search failed, so the vector search was used: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        }
+        if (!hits) {
+          finder = "vector-search"
+          const vectorHits = await searchByEmbedding(projectPath, query, embCfg, CANDIDATE_SEARCH_HITS_PER_TOPIC, {
+            throwOnStoreError: true,
+          })
+          // searchByEmbedding answers a failed embedding fetch with no hits.
+          const fetchError = vectorHits.length === 0 ? getLastEmbeddingError() : null
+          if (fetchError) throw new Error(fetchError)
+          hits = vectorHits.map((hit) => ({ path: `wiki/${hit.id}.md`, score: hit.score }))
+        }
         let kept = 0
         for (const hit of hits) {
           if (kept >= CANDIDATE_HITS_PER_TOPIC) break
-          const relativePath = `wiki/${hit.id}.md`
-          if (!isCandidatePagePath(relativePath, sourceSummaryPath) || !(await readPage(relativePath))) continue
-          offer(relativePath, hit.score, "vector-search")
+          if (!isCandidatePagePath(hit.path, sourceSummaryPath) || !(await readPage(hit.path))) continue
+          offer(hit.path, hit.score, finder)
           kept++
         }
       }

@@ -57,6 +57,10 @@ pub struct ProjectSearchResponse {
     pub token_hits: usize,
     pub vector_hits: usize,
     pub graph_hits: usize,
+    /// Why the vector half of the search did not run: the query embedding
+    /// or the vector store search failed. The keyword hits still stand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vector_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,18 +116,22 @@ pub async fn search_project(
     include_content: Option<bool>,
     query_embedding: Option<Vec<f32>>,
     embedding_config: Option<SearchEmbeddingConfig>,
+    include_graph: Option<bool>,
 ) -> Result<ProjectSearchResponse, String> {
     run_guarded_async("search_project", async move {
-        let query_embedding =
-            resolve_query_embedding(&query, query_embedding, embedding_config).await?;
-        search_project_inner(
+        let (query_embedding, embedding_error) =
+            query_embedding_or_error(&query, query_embedding, embedding_config).await?;
+        let mut response = search_project_inner(
             project_path,
             query,
             top_k.unwrap_or(DEFAULT_RESULTS),
             include_content.unwrap_or(false),
             query_embedding,
+            include_graph.unwrap_or(true),
         )
-        .await
+        .await?;
+        response.vector_error = response.vector_error.or(embedding_error);
+        Ok(response)
     })
     .await
 }
@@ -296,20 +304,31 @@ pub async fn resolve_query_embedding(
     explicit_embedding: Option<Vec<f32>>,
     embedding_config: Option<SearchEmbeddingConfig>,
 ) -> Result<Option<Vec<f32>>, String> {
+    query_embedding_or_error(query, explicit_embedding, embedding_config)
+        .await
+        .map(|(embedding, _)| embedding)
+}
+
+/// The query embedding, or no embedding and why the fetch failed.
+async fn query_embedding_or_error(
+    query: &str,
+    explicit_embedding: Option<Vec<f32>>,
+    embedding_config: Option<SearchEmbeddingConfig>,
+) -> Result<(Option<Vec<f32>>, Option<String>), String> {
     if let Some(embedding) = explicit_embedding {
-        return validate_query_embedding(embedding).map(Some);
+        return validate_query_embedding(embedding).map(|embedding| (Some(embedding), None));
     }
     let Some(cfg) = embedding_config else {
-        return Ok(None);
+        return Ok((None, None));
     };
     if !cfg.enabled || cfg.endpoint.trim().is_empty() || cfg.model.trim().is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
     match fetch_embedding_with_retry(query, &cfg, 0).await {
-        Ok(embedding) => validate_query_embedding(embedding).map(Some),
+        Ok(embedding) => validate_query_embedding(embedding).map(|embedding| (Some(embedding), None)),
         Err(err) => {
             eprintln!("[Search] embedding disabled for this request: {err}");
-            Ok(None)
+            Ok((None, Some(format!("query embedding: {err}"))))
         }
     }
 }
@@ -330,6 +349,7 @@ pub async fn search_project_inner(
     top_k: usize,
     include_content: bool,
     query_embedding: Option<Vec<f32>>,
+    include_graph: bool,
 ) -> Result<ProjectSearchResponse, String> {
     if query.trim().is_empty() {
         return Err("query is required".to_string());
@@ -434,6 +454,7 @@ pub async fn search_project_inner(
     let mut vector_rank: BTreeMap<String, usize> = BTreeMap::new();
     let mut vector_score: BTreeMap<String, f32> = BTreeMap::new();
     let mut vector_hits = 0;
+    let mut vector_error = None;
     if let Some(embedding) = query_embedding {
         if !embedding.is_empty() {
             match search_by_embedding(&project_path, embedding, limit.max(10)).await {
@@ -456,6 +477,7 @@ pub async fn search_project_inner(
                     eprintln!(
                         "[Search] vector search failed; falling back to keyword results: {err}"
                     );
+                    vector_error = Some(format!("vector store: {err}"));
                 }
             }
         }
@@ -477,13 +499,12 @@ pub async fn search_project_inner(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.path.cmp(&b.path))
     });
-    let graph_hits = blend_graph_results(
-        &mut results,
-        &graph_pages,
-        limit,
-        vector_hits,
-        include_content,
-    );
+    let graph_hits = if include_graph {
+        blend_graph_results(&mut results, &graph_pages, limit, vector_hits, include_content)
+    } else {
+        results.truncate(limit);
+        0
+    };
 
     Ok(ProjectSearchResponse {
         mode: search_mode(token_rank.is_empty(), vector_hits, graph_hits).to_string(),
@@ -491,6 +512,7 @@ pub async fn search_project_inner(
         vector_hits,
         graph_hits,
         results,
+        vector_error,
     })
 }
 
@@ -2235,6 +2257,7 @@ mod tests {
             20,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -2271,6 +2294,7 @@ mod tests {
             10,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -2390,6 +2414,7 @@ mod tests {
             20,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -2419,6 +2444,7 @@ mod tests {
             20,
             false,
             None,
+            true,
         )
         .await
         .unwrap();
@@ -2449,5 +2475,210 @@ mod tests {
         assert!(parse_embedding_batch_values(&response, 2)
             .unwrap_err()
             .contains("duplicate"));
+    }
+
+    async fn store_vector(root: &Path, page_id: &str, embedding: Vec<f32>) {
+        vectorstore::vector_upsert_chunks(
+            root.to_string_lossy().to_string(),
+            page_id.to_string(),
+            vec![vectorstore::ChunkUpsertInput {
+                chunk_index: 0,
+                chunk_text: format!("{page_id} chunk"),
+                heading_path: String::new(),
+                embedding,
+            }],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn search_without_graph_returns_matches_only() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent Runtime\n---\n\n# Agent Runtime\n\nagent runtime details. [[Tool Registry]]",
+        );
+        write_page(
+            &root,
+            "wiki/concepts/tool-registry.md",
+            "---\ntitle: Tool Registry\n---\n\n# Tool Registry\n\nDefines callable tools.",
+        );
+
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "agent runtime".into(),
+            10,
+            false,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.mode, "keyword");
+        assert_eq!(out.graph_hits, 0);
+        let titles: Vec<&str> = out.results.iter().map(|result| result.title.as_str()).collect();
+        assert_eq!(titles, vec!["Agent Runtime"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn search_finds_a_product_code_page_by_keyword_when_no_vector_matches_it() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/entities/gpt-5-3.md",
+            "---\ntitle: GPT-5.3\n---\n\n# GPT-5.3\n\nA model release.",
+        );
+        write_page(
+            &root,
+            "wiki/concepts/model-routing.md",
+            "---\ntitle: Model Routing\n---\n\n# Model Routing\n\nHow requests reach a model.",
+        );
+        store_vector(&root, "concepts/model-routing", vec![1.0, 0.0, 0.0, 0.0]).await;
+
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "GPT-5.3".into(),
+            10,
+            false,
+            Some(vec![1.0, 0.0, 0.0, 0.0]),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.vector_hits, 1);
+        assert_eq!(out.vector_error, None);
+        let gpt = out
+            .results
+            .iter()
+            .find(|result| result.path == "wiki/entities/gpt-5-3.md")
+            .expect("the product-code page is a keyword hit");
+        assert_eq!(gpt.vector_score, None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn search_returns_a_page_whose_vectors_are_under_a_bare_slug_id_at_its_path() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/entities/openclaw.md",
+            "---\ntitle: OpenClaw\n---\n\n# OpenClaw\n\nAn agent gateway.",
+        );
+        store_vector(&root, "openclaw", vec![0.0, 1.0, 0.0, 0.0]).await;
+
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "OpenClaw".into(),
+            10,
+            false,
+            Some(vec![0.0, 1.0, 0.0, 0.0]),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.results.len(), 1);
+        assert_eq!(out.results[0].path, "wiki/entities/openclaw.md");
+        assert!(out.results[0].vector_score.is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn search_reports_a_vector_store_failure_and_keeps_keyword_hits() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/entities/openclaw.md",
+            "---\ntitle: OpenClaw\n---\n\n# OpenClaw\n\nAn agent gateway.",
+        );
+        store_vector(&root, "entities/openclaw", vec![0.0, 1.0, 0.0, 0.0]).await;
+
+        // A query vector of another width than the stored ones fails the search.
+        let out = search_project_inner(
+            root.to_string_lossy().to_string(),
+            "OpenClaw".into(),
+            10,
+            false,
+            Some(vec![0.0, 1.0]),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(out.vector_error.is_some());
+        assert_eq!(out.results[0].path, "wiki/entities/openclaw.md");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn search_project_reports_a_failed_query_embedding() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/entities/openclaw.md",
+            "---\ntitle: OpenClaw\n---\n\n# OpenClaw\n\nAn agent gateway.",
+        );
+        let cfg = SearchEmbeddingConfig {
+            enabled: true,
+            // Nothing listens on port 1, so the fetch is refused.
+            endpoint: "http://127.0.0.1:1/v1/embeddings".into(),
+            api_key: String::new(),
+            model: "fake-embed".into(),
+            output_dimensionality: None,
+            extra_headers: None,
+            max_chunk_chars: None,
+            overlap_chunk_chars: None,
+        };
+
+        let out = search_project(
+            root.to_string_lossy().to_string(),
+            "OpenClaw".into(),
+            Some(10),
+            None,
+            None,
+            Some(cfg),
+            Some(false),
+        )
+        .await
+        .unwrap();
+
+        assert!(out.vector_error.is_some());
+        assert_eq!(out.results[0].path, "wiki/entities/openclaw.md");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn search_project_keeps_graph_neighbours_by_default() {
+        let root = tmp_project();
+        write_page(
+            &root,
+            "wiki/concepts/agent.md",
+            "---\ntitle: Agent Runtime\n---\n\n# Agent Runtime\n\nagent runtime details. [[Tool Registry]]",
+        );
+        write_page(
+            &root,
+            "wiki/concepts/tool-registry.md",
+            "---\ntitle: Tool Registry\n---\n\n# Tool Registry\n\nDefines callable tools.",
+        );
+
+        let out = search_project(
+            root.to_string_lossy().to_string(),
+            "agent runtime".into(),
+            Some(10),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.graph_hits, 1);
+        let _ = fs::remove_dir_all(root);
     }
 }

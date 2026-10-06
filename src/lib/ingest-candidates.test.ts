@@ -22,7 +22,8 @@ vi.mock("./mineru", () => ({
   parseWithMineruResult: vi.fn(),
 }))
 
-// The embedding search runs for real; the Tauri commands under it are faked.
+// The embedding search, which ingest falls back to, runs for real; the Tauri
+// commands under it are faked.
 // A query's vector is its position in `searchQueries`, and the vector store
 // answers it with one chunk per page listed for that query in `searchHits`.
 // Either command can fail instead, rejecting with a string as a Tauri
@@ -31,6 +32,13 @@ let searchHits: Record<string, Array<{ id: string; score: number }>> = {}
 let embeddingFetchError: string | null = null
 let vectorStoreError: string | null = null
 const searchQueries: string[] = []
+// The hybrid search answers a query with the project-relative paths listed
+// for it in `hybridHits`, best first, up to the requested count, and with
+// `hybridVectorError` when set. Null stands for a hybrid search that fails,
+// so the tests that leave it null run the vector-only fallback.
+let hybridHits: Record<string, Array<{ path: string; score: number }>> | null = null
+let hybridVectorError: string | null = null
+const hybridRequests: Array<Record<string, unknown>> = []
 
 vi.mock("@tauri-apps/api/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tauri-apps/api/core")>()
@@ -41,6 +49,19 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
         searchQueries.push(String(args?.text))
         if (embeddingFetchError) throw embeddingFetchError
         return [searchQueries.length - 1]
+      }
+      if (cmd === "search_project") {
+        hybridRequests.push(args ?? {})
+        if (!hybridHits) throw "search_project: index unavailable"
+        const results = (hybridHits[String(args?.query)] ?? []).slice(0, Number(args?.topK))
+        return {
+          mode: "hybrid",
+          results: results.map(({ path, score }) => ({ path, title: path, snippet: "", titleMatch: false, score, images: [] })),
+          tokenHits: results.length,
+          vectorHits: 0,
+          graphHits: 0,
+          ...(hybridVectorError ? { vectorError: hybridVectorError } : {}),
+        }
       }
       if (cmd === "vector_search_chunks") {
         if (vectorStoreError) throw vectorStoreError
@@ -165,6 +186,9 @@ describe("autoIngest offers existing pages before generation", () => {
     embeddingFetchError = null
     vectorStoreError = null
     searchQueries.length = 0
+    hybridHits = null
+    hybridVectorError = null
+    hybridRequests.length = 0
     resetEmbeddingOptimizeAccountingForTests()
     analysisReply = [
       "## Key Concepts",
@@ -274,6 +298,97 @@ describe("autoIngest offers existing pages before generation", () => {
     ])
     const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
     expect(log).not.toContain("search skipped")
+  })
+
+  it("offers a page the hybrid search finds by keyword, asking it for matches only", async () => {
+    analysisReply = "## Key Concepts\n- GPT-5.3\n\n## Topics\nGPT-5.3"
+    await writeFileRaw(`${tmp.path}/wiki/entities/gpt-5-3.md`, page("entity", "GPT-5.3", ["other.md"], "A model release."))
+    hybridHits = { "GPT-5.3": [{ path: "wiki/entities/gpt-5-3.md", score: 0.016 }] }
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(lastGeneration().system).toContain('<existing-page path="wiki/entities/gpt-5-3.md">')
+    expect(searchQueries).toEqual([])
+    expect(hybridRequests).toEqual([
+      expect.objectContaining({
+        projectPath: tmp.path,
+        query: "GPT-5.3",
+        includeGraph: false,
+        embeddingConfig: useWikiStore.getState().embeddingConfig,
+      }),
+    ])
+    const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
+    expect(log).not.toContain("search skipped")
+    expect(log).not.toContain("Hybrid search failed")
+  })
+
+  it("offers a page at the path the hybrid search gives for a bare-slug vector hit", async () => {
+    searchHits = { "OpenClaw Gateway": [{ id: "openclaw", score: 0.9 }] }
+    hybridHits = { "OpenClaw Gateway": [{ path: "wiki/entities/openclaw.md", score: 0.03 }] }
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(lastGeneration().system).toContain('<existing-page path="wiki/entities/openclaw.md">')
+  })
+
+  it("offers the next passing hybrid hits for a topic when its top hits are excluded or have no page", async () => {
+    for (const slug of ["gateway-routing", "gateway-auth", "gateway-limits", "gateway-overflow"]) {
+      await writeFileRaw(`${tmp.path}/wiki/concepts/${slug}.md`, page("concept", slug, ["other.md"], `About ${slug}.`))
+    }
+    const otherSummaries = Array.from({ length: 10 }, (_, i) => ({ path: `wiki/sources/other-${i}.md`, score: 0.05 }))
+    for (const { path: summary } of otherSummaries) {
+      await writeFileRaw(`${tmp.path}/${summary}`, page("source", summary, ["other.md"], "Another source."))
+    }
+    hybridHits = {
+      "OpenClaw Gateway": [
+        { path: "wiki/log.md", score: 0.06 },
+        { path: "wiki/index.md", score: 0.06 },
+        ...otherSummaries,
+        { path: "wiki/concepts/deleted-page.md", score: 0.04 },
+        { path: "wiki/concepts/gateway-routing.md", score: 0.03 },
+        { path: "wiki/concepts/gateway-auth.md", score: 0.03 },
+        { path: "wiki/concepts/gateway-limits.md", score: 0.02 },
+        { path: "wiki/concepts/gateway-overflow.md", score: 0.02 },
+      ],
+    }
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    const offered = (lastGeneration().system.match(/<existing-page path="[^"]+">/g) ?? []).sort()
+    expect(offered).toEqual([
+      '<existing-page path="wiki/concepts/agent-harness-engineering.md">',
+      '<existing-page path="wiki/concepts/gateway-auth.md">',
+      '<existing-page path="wiki/concepts/gateway-limits.md">',
+      '<existing-page path="wiki/concepts/gateway-routing.md">',
+    ])
+  })
+
+  it("falls back to the vector search and logs why when the hybrid search fails", async () => {
+    searchHits = { "OpenClaw Gateway": [{ id: "entities/openclaw", score: 0.9 }] }
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(hybridRequests).toHaveLength(1)
+    expect(searchQueries).toEqual(["Agent Harness Engineering", "OpenClaw Gateway"])
+    expect(lastGeneration().system).toContain('<existing-page path="wiki/entities/openclaw.md">')
+    const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
+    expect(log).toContain("Hybrid search failed, so the vector search was used: search_project: index unavailable.")
+    expect(log).not.toContain("search skipped")
+  })
+
+  it("keeps the keyword hits and logs why once when the hybrid search's vector half fails", async () => {
+    hybridHits = {
+      "Agent Harness Engineering": [],
+      "OpenClaw Gateway": [{ path: "wiki/entities/openclaw.md", score: 30 }],
+    }
+    hybridVectorError = "query embedding: HTTP 401 from embedding endpoint"
+
+    await autoIngest(tmp.path, `${tmp.path}/raw/sources/${SOURCE}`, llmConfig())
+
+    expect(lastGeneration().system).toContain('<existing-page path="wiki/entities/openclaw.md">')
+    const log = await readFileRaw(`${tmp.path}/wiki/log.md`)
+    const line = "Existing-page search used keywords only: query embedding: HTTP 401 from embedding endpoint."
+    expect(log.split(line)).toHaveLength(2)
   })
 
   it("merges a write to a candidate path into the existing page instead of creating a new one", async () => {

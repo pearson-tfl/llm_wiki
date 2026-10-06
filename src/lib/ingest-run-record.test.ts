@@ -17,6 +17,7 @@ vi.mock("./mineru", () => ({
 // The embedding search runs for real; the Tauri commands under it are faked.
 // A query's vector is its position in `searchQueries`, and the vector store
 // answers it with one chunk per page listed for that query in `searchHits`.
+// The hybrid search answers with the same pages, at their paths.
 let searchHits: Record<string, Array<{ id: string; score: number }>> = {}
 const searchQueries: string[] = []
 
@@ -28,6 +29,10 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
       if (cmd === "embedding_fetch") {
         searchQueries.push(String(args?.text))
         return [searchQueries.length - 1]
+      }
+      if (cmd === "search_project") {
+        const results = (searchHits[String(args?.query)] ?? []).map((hit) => ({ path: `wiki/${hit.id}.md`, score: hit.score }))
+        return { mode: "hybrid", results, tokenHits: 0, vectorHits: results.length, graphHits: 0 }
       }
       if (cmd === "vector_search_chunks") {
         const query = searchQueries[(args?.queryEmbedding as number[])[0]]
@@ -214,7 +219,7 @@ describe("autoIngest records each run in .llm-wiki/ingest-runs.jsonl", () => {
       topics: ["Agent Harness Engineering", "OpenClaw Gateway"],
       candidates: [
         { path: "wiki/concepts/agent-harness-engineering.md", foundBy: ["exact-slug"] },
-        { path: "wiki/entities/openclaw.md", foundBy: ["vector-search"] },
+        { path: "wiki/entities/openclaw.md", foundBy: ["hybrid-search"] },
       ],
       searchSkipped: [],
       updatedPages: ["wiki/concepts/agent-harness-engineering.md"],
@@ -236,7 +241,7 @@ describe("autoIngest records each run in .llm-wiki/ingest-runs.jsonl", () => {
 
     const [record] = await records()
     expect(record.candidates).toEqual([
-      { path: "wiki/concepts/agent-harness-engineering.md", foundBy: ["exact-slug", "vector-search"] },
+      { path: "wiki/concepts/agent-harness-engineering.md", foundBy: ["exact-slug", "hybrid-search"] },
     ])
   })
 
