@@ -3,9 +3,9 @@
  * queue, the ingest queue, `executeMerge`, `autoIngest` and the backfill
  * are real and write a real temporary project; the model's replies are
  * scripted, and the vector store is the in-memory store (LanceDB is not
- * reachable under Node). Every embedding goes over HTTP: to the real endpoint, through a
- * local relay that never answers a request holding the merged page's text,
- * or to a port with nothing listening.
+ * reachable under Node). Every embedding goes over HTTP: to the real
+ * endpoint, through a local relay that never answers a request holding the
+ * merged page's text, or to a port with nothing listening.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT and EMBEDDING_MODEL.
  */
@@ -145,7 +145,7 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>, limitMs = 
   }
 }
 
-describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73)", () => {
+describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73, #80)", () => {
   const cfg: EmbeddingConfig = {
     enabled: true,
     endpoint: process.env.EMBEDDING_ENDPOINT ?? "",
@@ -256,6 +256,7 @@ describe.skipIf(!ENABLED)("vector freshness on a real embedding endpoint (#73)",
     const third = await runEmbeddingBackfill(tmp.path, cfg)
     const after = Object.keys(JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))).sort()
     console.log(`[#80 live] with entities/Relay stored beside entities/relay.md: vectorCoverage ${JSON.stringify(third)}; embedded-pages.json ids ${JSON.stringify(after)}`)
+    expect(third?.orphansRemoved).toBe(0)
     expect(after).toEqual(["concepts/sweep", "entities/Relay", "entities/relay"])
   }, 60_000)
 
