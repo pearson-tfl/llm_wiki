@@ -21,7 +21,7 @@
  * transport is shared by UI and backend callers.
  */
 
-import { readFile, listDirectory } from "@/commands/fs"
+import { fileExists, readFile, listDirectory, writeFile } from "@/commands/fs"
 import { invoke } from "@tauri-apps/api/core"
 import type { EmbeddingConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
@@ -29,6 +29,7 @@ import { normalizePath } from "@/lib/path-utils"
 import { chunkMarkdown, type Chunk } from "@/lib/text-chunker"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { clampUserConcurrency } from "@/lib/concurrency-limits"
+import { sha256 } from "@/lib/ingest-cache"
 
 // ── Error surfacing ──────────────────────────────────────────────────────
 
@@ -51,6 +52,8 @@ export function resetEmbeddingOptimizeAccountingForTests(): void {
   incrementalOptimizeCounts.clear()
   attemptedLegacyVectorCleanup.clear()
   legacyStemOwnerCounts.clear()
+  embeddedHashes.clear()
+  embeddedHashWrites.clear()
   embeddingFailureVersion = 0
   lastEmbeddingError = null
 }
@@ -278,6 +281,13 @@ async function vectorCountChunks(projectPath: string): Promise<number> {
   })
 }
 
+/** Every page id that has vectors in the v2 store. */
+export async function listVectorPageIds(projectPath: string): Promise<string[]> {
+  return await invoke("vector_list_page_ids", {
+    projectPath: normalizePath(projectPath),
+  })
+}
+
 async function vectorClearChunks(projectPath: string): Promise<void> {
   await invoke("vector_clear_chunks", {
     projectPath: normalizePath(projectPath),
@@ -341,6 +351,61 @@ async function noteIncrementalVectorWrite(projectPath: string): Promise<void> {
   await optimizeChunkVectorTableBestEffort(pp)
 }
 
+// ── Embedded-content record ──────────────────────────────────────────────
+
+/**
+ * The SHA-256 of the text each page's vectors were made from, by page id,
+ * so the scheduled backfill can tell a page that changed since it was
+ * embedded (#67). Written after every successful embed; a page with no
+ * entry is treated as changed.
+ */
+const EMBEDDED_HASHES_PATH = ".llm-wiki/embedded-pages.json"
+const embeddedHashes = new Map<string, Promise<Record<string, string>>>()
+const embeddedHashWrites = new Map<string, Promise<unknown>>()
+
+/** The recorded hashes. An unreadable record reads as empty, so every
+ *  page is embedded again rather than wrongly taken as fresh. */
+export function loadEmbeddedHashes(projectPath: string): Promise<Record<string, string>> {
+  const pp = normalizePath(projectPath)
+  const cached = embeddedHashes.get(pp)
+  if (cached) return cached
+  const path = `${pp}/${EMBEDDED_HASHES_PATH}`
+  const pending = (async () => {
+    if (!(await fileExists(path))) return {}
+    const parsed: unknown = JSON.parse(await readFile(path))
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, string>)
+      : {}
+  })().catch((err) => {
+    console.warn(`[Embedding] Embedded-pages record unreadable, every page counts as changed: ${err}`)
+    return {}
+  })
+  embeddedHashes.set(pp, pending)
+  return pending
+}
+
+/** Record the hash of each page's embedded text, by page id. */
+async function recordEmbeddedHashes(
+  projectPath: string,
+  hashes: Record<string, string>,
+): Promise<void> {
+  if (Object.keys(hashes).length === 0) return
+  const pp = normalizePath(projectPath)
+  // One write at a time per project, each of the whole record as it then is.
+  const write = (embeddedHashWrites.get(pp) ?? Promise.resolve()).then(async () => {
+    const record = await loadEmbeddedHashes(pp)
+    Object.assign(record, hashes)
+    await writeFile(`${pp}/${EMBEDDED_HASHES_PATH}`, JSON.stringify(record))
+  })
+  embeddedHashWrites.set(pp, write.catch(() => undefined))
+  try {
+    await write
+  } catch (err) {
+    // The vectors are written; a missing entry only re-embeds the page.
+    console.warn(`[Embedding] Could not record embedded content: ${err}`)
+  }
+}
+
 // ── Chunk enrichment ─────────────────────────────────────────────────────
 
 /**
@@ -379,6 +444,18 @@ export function extractEmbeddingTitle(content: string, fallbackId: string): stri
   return typeof title === "string" && title.trim() ? title.trim() : fallbackId
 }
 
+function chunkForEmbedding(content: string, cfg: EmbeddingConfig): Chunk[] {
+  return chunkMarkdown(content, {
+    targetChars: cfg.maxChunkChars ?? 1000,
+    overlapChars: cfg.overlapChunkChars ?? 200,
+  })
+}
+
+/** False for a page that chunks to nothing, which never has vectors. */
+export function hasEmbeddableText(content: string, cfg: EmbeddingConfig): boolean {
+  return chunkForEmbedding(content, cfg).length > 0
+}
+
 async function preparePageEmbeddingRows(
   pageId: string,
   title: string,
@@ -388,10 +465,7 @@ async function preparePageEmbeddingRows(
 ): Promise<PageEmbeddingPreparation> {
   if (!cfg.enabled || !cfg.model) return { status: "empty" }
 
-  const chunks = chunkMarkdown(content, {
-    targetChars: cfg.maxChunkChars ?? 1000,
-    overlapChars: cfg.overlapChunkChars ?? 200,
-  })
+  const chunks = chunkForEmbedding(content, cfg)
   if (chunks.length === 0) return { status: "empty" }
 
   const batchSize = Math.max(1, Math.min(64, Math.floor(cfg.batchSize ?? 1)))
@@ -489,6 +563,7 @@ export async function embedPage(
   }
 
   await vectorUpsertPageChunks(projectPath, pageId, prepared.page.rows)
+  await recordEmbeddedHashes(projectPath, { [pageId]: await sha256(content) })
   if (!options?.deferOptimization) {
     await noteIncrementalVectorWrite(projectPath)
   }
@@ -497,6 +572,37 @@ export async function embedPage(
     `[Embedding] Indexed "${pageId}": ${prepared.page.rows.length}/${prepared.page.chunkCount} chunks (${prepared.page.failedChunks} skipped) in ${elapsed}ms`,
   )
   return true
+}
+
+const STRUCTURAL_PAGE_STEMS = ["index", "log", "overview", "purpose", "schema"]
+
+/**
+ * True for a wiki content page. Structural pages (index / log / overview /
+ * purpose / schema) are aggregate views, not retrieval targets.
+ */
+export function isContentPagePath(path: string): boolean {
+  const name = path.split("/").pop() ?? ""
+  return /\.md$/i.test(name) && !STRUCTURAL_PAGE_STEMS.includes(name.replace(/\.md$/i, ""))
+}
+
+/** The wiki's content pages, with their vector ids. */
+export function contentPagesInTree(
+  projectPath: string,
+  tree: FileNode[],
+): { id: string; path: string }[] {
+  const pp = normalizePath(projectPath)
+  const pages: { id: string; path: string }[] = []
+  function walk(nodes: FileNode[]) {
+    for (const node of nodes) {
+      if (node.is_dir && node.children) {
+        walk(node.children)
+      } else if (!node.is_dir && isContentPagePath(node.name)) {
+        pages.push({ id: wikiPageIdFromPath(pp, node.path), path: node.path })
+      }
+    }
+  }
+  walk(tree)
+  return pages
 }
 
 export type EmbeddingReindexState =
@@ -600,20 +706,7 @@ export async function embedAllPages(
     return 0
   }
 
-  const mdFiles: { id: string; path: string }[] = []
-  function walk(nodes: FileNode[]) {
-    for (const node of nodes) {
-      if (node.is_dir && node.children) {
-        walk(node.children)
-      } else if (!node.is_dir && /\.md$/i.test(node.name)) {
-        const stem = node.name.replace(/\.md$/i, "")
-        if (!["index", "log", "overview", "purpose", "schema"].includes(stem)) {
-          mdFiles.push({ id: wikiPageIdFromPath(pp, node.path), path: node.path })
-        }
-      }
-    }
-  }
-  walk(tree)
+  const mdFiles = contentPagesInTree(pp, tree)
   const scheduleEmbedding = createAsyncLimiter(cfg.concurrency)
   // LanceDB page replacement is intentionally serialized. The configured
   // concurrency applies to outbound embedding HTTP, not database writers.
@@ -635,6 +728,7 @@ export async function embedAllPages(
     }
 
     const preparedPages: PreparedPageEmbedding[] = []
+    const hashes: Record<string, string> = {}
     const failures: string[] = []
     let attempted = 0
     await parallelForEach(mdFiles, cfg.concurrency, async (file) => {
@@ -657,6 +751,7 @@ export async function embedAllPages(
             )
           } else {
             preparedPages.push(prepared.page)
+            hashes[file.id] = await sha256(content)
           }
         } else if (prepared.status === "failed") {
           failures.push(`${file.id}: ${prepared.reason}`)
@@ -681,12 +776,14 @@ export async function embedAllPages(
           await vectorUpsertPageChunks(pp, page.pageId, page.rows)
           updated++
         } catch (err) {
+          delete hashes[page.pageId]
           failures.push(
             `${page.pageId}: ${err instanceof Error ? err.message : String(err)}`,
           )
         }
       }
       if (updated > 0) await optimizeChunkVectorTableBestEffort(pp)
+      await recordEmbeddedHashes(pp, hashes)
       const error = `${failures.length} of ${mdFiles.length} pages could not be embedded (${failures[0]}). ${updated} successful page(s) were updated; failed pages kept their previous vectors and can be retried.`
       setEmbeddingReindexState({ kind: "error", projectPath: pp, message: error })
       throw new Error(error)
@@ -725,6 +822,7 @@ export async function embedAllPages(
     if (written > 0) {
       await optimizeChunkVectorTableBestEffort(pp)
     }
+    await recordEmbeddedHashes(pp, hashes)
     // Forced rebuild succeeded, so the legacy v1 per-page table is obsolete
     // even when every readable content page was empty and no v2 rows were
     // written. Keep this outside the `written > 0` optimization guard.
@@ -736,6 +834,7 @@ export async function embedAllPages(
 
   let done = 0
   let indexed = 0
+  const hashes: Record<string, string> = {}
   await parallelForEach(mdFiles, cfg.concurrency, async (file) => {
     try {
       const content = await readFile(file.path)
@@ -743,6 +842,7 @@ export async function embedAllPages(
       const prepared = await preparePageEmbeddingRows(file.id, title, content, cfg, scheduleEmbedding)
       if (prepared.status === "ready") {
         await scheduleVectorWrite(() => vectorUpsertPageChunks(pp, file.id, prepared.page.rows))
+        hashes[file.id] = await sha256(content)
         indexed++
       }
     } catch {
@@ -756,6 +856,7 @@ export async function embedAllPages(
   if (indexed > 0) {
     await optimizeChunkVectorTableBestEffort(pp)
   }
+  await recordEmbeddedHashes(pp, hashes)
 
   setEmbeddingReindexState({ kind: "done", projectPath: pp, count: indexed })
   return indexed
