@@ -398,14 +398,17 @@ Keep this list current. Merge conflicts can only come from these files.
   were embedded. "Changed since embedded" is a content hash: every
   successful embed (`embedPage`, so ingest, deep research, merges, hubs and
   the backfill, and the Settings re-index) records the SHA-256 of the
-  page's text in `.llm-wiki/embedded-pages.json`, and a page whose hash is
+  page's text in `.llm-wiki/embedded-pages.json` (written once per batch
+  since #73, below), and a page whose hash is
   missing or differs is re-embedded. Pages embedded through the API/MCP
   route, which keeps its own revision record, are re-embedded once by the
   next backfill. A page with nothing to embed counts as covered. The run's
   line in `maintenance-runs.jsonl` carries `vectorCoverage`: pages,
-  covered, embedded this run and failed. A duplicate merge removes the
-  merged-away pages' vectors before deleting their files, then re-embeds
-  the canonical page and every page whose links it rewrote; a hub rebuild
+  covered, embedded this run and failed (#73 adds `orphansRemoved` and
+  `stoppedEarly`, below). A duplicate merge removes the merged-away pages'
+  vectors before deleting their files; the canonical page and every page
+  whose links it rewrote are then re-embedded (since #73, by the merge
+  queue once the project lock is released, below); a hub rebuild
   re-embeds each rebuilt hub. A failed embed is logged, gets a line in
   `.llm-wiki/embedding-failures.jsonl` (time, trigger, page, reason) and
   never fails the merge, rebuild or run; the page keeps its old hash, so
@@ -415,6 +418,38 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts` and the Rust
   `v2_list_page_ids_returns_each_page_once`; the in-memory store they
   share is `src/test-helpers/fake-vector-store.ts`.
+- `src/lib/embedding-freshness.ts`, `src/lib/embedding.ts`,
+  `src/lib/dedup-runner.ts`, `src/lib/dedup-queue.ts`, `src/lib/ingest.ts`
+  – vector freshness follow-ups (pearson-tfl/llm_wiki#73, from the #67
+  gate). A merge's re-embed of the canonical and rewritten pages runs in
+  the merge queue after the project write lock is released, so an
+  embedding endpoint that hangs no longer holds an ingest's write; the
+  merged-away pages' vectors are still removed inside the lock. The
+  backfill, after 5 failed embeds in a row, checks the endpoint with one
+  request: if that fails too it stops, the run's `vectorCoverage` says why
+  (`stoppedEarly`) and the rest wait for the next tick; if it answers, the
+  pages themselves failed and the run carries on. Before embedding, the backfill removes the vectors of every
+  stored page id that names no content page and whose file is gone
+  (`orphansRemoved`); a bare-slug id whose name a page still owns is
+  kept, and an empty listing removes nothing.
+  `.llm-wiki/embedding-failures.jsonl` keeps its newest 1,000 lines.
+  `.llm-wiki/embedded-pages.json` is written once per backfill run, merge
+  re-embed, hub re-embed and ingest, not once per page (`embedPage`'s
+  `hashes` option and the exported `recordEmbeddedHashes`). Each page's
+  vector writes are numbered in the order they land, and a batch records
+  a page's hash only if its own write is still the page's latest, so a
+  merge re-embed and an ingest on the same page cannot leave old vectors
+  under a current hash; the next backfill re-embeds such a page. The merge
+  task is reported done and leaves the queue before its re-embed starts,
+  so a cancel meanwhile finds nothing to cancel, and the next merge waits
+  for the re-embed. Tests in
+  `src/lib/embedding-freshness.test.ts`,
+  `src/lib/dedup-runner.reembed.test.ts`,
+  `src/lib/merge-ingest-safety.test.ts`, `src/lib/dedup-queue.test.ts`
+  and `src/lib/ingest-embed-record.test.ts`; an opt-in run on a real
+  embedding endpoint (a relay that holds the merged page's request, a
+  stopped port, and the endpoint itself) in
+  `src/lib/embedding-freshness.real-llm.test.ts`.
 - `src/lib/ingest-queue.ts`, `src/lib/ingest-queue.integration.test.ts` –
   the test-only `clearQueueState()` cannot stop an ingest queue save that
   is already writing, so it hands back a promise that settles once that

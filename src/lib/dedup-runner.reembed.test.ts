@@ -1,6 +1,8 @@
 /**
  * Seam 4 of #67: a duplicate merge keeps the vector index fresh. Runs the
- * real `executeMerge` against a real temporary project; the model's reply
+ * real `executeMerge`, then the real `reembedMergedPages` as the merge queue
+ * does once it releases the project lock (#73), against a real temporary
+ * project; the model's reply
  * is faked at `streamChat`, and the Tauri vector-store and embedding
  * commands are an in-memory store with a deterministic embedding.
  */
@@ -10,8 +12,15 @@ import { createFakeVectorStore, fakeEmbedding } from "@/test-helpers/fake-vector
 
 const store = vi.hoisted(() => ({ current: null as ReturnType<typeof createFakeVectorStore> | null }))
 const reply = vi.hoisted(() => ({ text: "" }))
+const written = vi.hoisted(() => ({ paths: [] as string[] }))
 
-vi.mock("@/commands/fs", () => realFs)
+vi.mock("@/commands/fs", () => ({
+  ...realFs,
+  writeFile: async (path: string, contents: string) => {
+    written.paths.push(path)
+    await realFs.writeFile(path, contents)
+  },
+}))
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => store.current!.invoke(cmd, args),
 }))
@@ -27,7 +36,7 @@ vi.mock("./llm-client", async (importOriginal) => ({
 }))
 
 import { resetEmbeddingOptimizeAccountingForTests, searchByEmbedding } from "@/lib/embedding"
-import { executeMerge } from "./dedup-runner"
+import { executeMerge, reembedMergedPages } from "./dedup-runner"
 import { useWikiStore, type EmbeddingConfig, type LlmConfig } from "@/stores/wiki-store"
 
 const embeddingConfig: EmbeddingConfig = {
@@ -55,6 +64,7 @@ beforeEach(async () => {
   fake = createFakeVectorStore()
   store.current = fake
   resetEmbeddingOptimizeAccountingForTests()
+  written.paths = []
   useWikiStore.getState().setEmbeddingConfig(embeddingConfig)
 
   await writeFileRaw(`${tmp.path}/wiki/concepts/echo-loop.md`, page("Echo loop", "Peers suppress echoed replies."))
@@ -79,7 +89,7 @@ afterEach(async () => {
 
 describe("duplicate merge – vector index", () => {
   it("re-embeds the canonical page and each page whose links it rewrote, and removes the merged-away page's vectors", async () => {
-    await executeMerge(tmp.path, group, "echo-loop", llmConfig)
+    await reembedMergedPages(tmp.path, await executeMerge(tmp.path, group, "echo-loop", llmConfig))
 
     expect(upserted().sort()).toEqual(["concepts/echo-loop", "entities/relay"])
     expect([...fake.pages.keys()].sort()).toEqual(["concepts/echo-loop", "entities/inbox", "entities/relay"])
@@ -87,10 +97,26 @@ describe("duplicate merge – vector index", () => {
     expect(hits[0]?.id).toBe("concepts/echo-loop")
   })
 
+  it("writes the embedded-pages record once for all the pages it re-embeds", async () => {
+    await reembedMergedPages(tmp.path, await executeMerge(tmp.path, group, "echo-loop", llmConfig))
+
+    expect(upserted()).toHaveLength(2)
+    expect(written.paths.filter((p) => p.endsWith("/.llm-wiki/embedded-pages.json"))).toHaveLength(1)
+    const record = JSON.parse(await readFileRaw(`${tmp.path}/.llm-wiki/embedded-pages.json`))
+    expect(Object.keys(record).sort()).toEqual(["concepts/echo-loop", "entities/relay"])
+  })
+
+  it("removes the merged-away page's vectors inside the merge, before any re-embed", async () => {
+    await executeMerge(tmp.path, group, "echo-loop", llmConfig)
+
+    expect(upserted()).toEqual([])
+    expect(fake.pages.has("concepts/echo-loops")).toBe(false)
+  })
+
   it("removes the merged-away page's rows stored under its old bare slug", async () => {
     fake.pages.set("echo-loops", row("Echoed replies loop between peers."))
 
-    await executeMerge(tmp.path, group, "echo-loop", llmConfig)
+    await reembedMergedPages(tmp.path, await executeMerge(tmp.path, group, "echo-loop", llmConfig))
 
     expect(fake.pages.has("echo-loops")).toBe(false)
   })
@@ -98,7 +124,7 @@ describe("duplicate merge – vector index", () => {
   it("completes the merge with the embedding endpoint down, and records each failed embed", async () => {
     fake.state.endpointDown = true
 
-    await executeMerge(tmp.path, group, "echo-loop", llmConfig)
+    await reembedMergedPages(tmp.path, await executeMerge(tmp.path, group, "echo-loop", llmConfig))
 
     expect(await readFileRaw(`${tmp.path}/wiki/concepts/echo-loop.md`)).toContain("zebra quartz harmonic")
     expect(await fileExists(`${tmp.path}/wiki/concepts/echo-loops.md`)).toBe(false)
@@ -113,7 +139,7 @@ describe("duplicate merge – vector index", () => {
   it("embeds nothing while embeddings are off, and still removes the merged-away page's vectors", async () => {
     useWikiStore.getState().setEmbeddingConfig({ ...embeddingConfig, enabled: false })
 
-    await executeMerge(tmp.path, group, "echo-loop", llmConfig)
+    await reembedMergedPages(tmp.path, await executeMerge(tmp.path, group, "echo-loop", llmConfig))
 
     expect(upserted()).toEqual([])
     expect(fake.pages.has("concepts/echo-loops")).toBe(false)

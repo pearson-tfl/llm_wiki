@@ -28,17 +28,30 @@ export function fakeEmbedding(text: string): number[] {
 
 export function createFakeVectorStore() {
   const pages = new Map<string, StoredChunk[]>()
-  const state = { endpointDown: false }
+  // `hung`: while set, an embedding request for text holding `matching`
+  // waits on `until`, as on an endpoint that never answers. `rejecting`:
+  // while set, a request for text holding it is refused, as a page the
+  // endpoint cannot embed.
+  const state = {
+    endpointDown: false,
+    hung: null as { matching: string; until: Promise<void> } | null,
+    rejecting: null as string | null,
+  }
+  async function answer(texts: string[]): Promise<void> {
+    if (state.hung && texts.some((t) => t.includes(state.hung!.matching))) await state.hung.until
+    if (state.endpointDown) throw new Error("connection refused")
+    if (state.rejecting && texts.some((t) => t.includes(state.rejecting!))) throw new Error("HTTP 400: input rejected")
+  }
   const calls: { cmd: string; args: Record<string, unknown> }[] = []
 
   async function invoke(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
     calls.push({ cmd, args })
     switch (cmd) {
       case "embedding_fetch":
-        if (state.endpointDown) throw new Error("connection refused")
+        await answer([String(args.text)])
         return fakeEmbedding(String(args.text))
       case "embedding_fetch_batch":
-        if (state.endpointDown) throw new Error("connection refused")
+        await answer(args.texts as string[])
         return (args.texts as string[]).map(fakeEmbedding)
       case "vector_upsert_chunks": {
         const chunks = args.chunks as StoredChunk[]

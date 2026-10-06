@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { createDeferred, flushIO } from "@/test-helpers/deferred"
 import { createTempProject, readFileRaw, writeFileRaw } from "@/test-helpers/fs-temp"
 
-vi.mock("./dedup-runner", () => ({ executeMerge: vi.fn() }))
+vi.mock("./dedup-runner", () => ({ executeMerge: vi.fn(), reembedMergedPages: vi.fn() }))
 
 const { heldReads } = vi.hoisted(() => ({
   /** A read of one of these paths waits on its promise. */

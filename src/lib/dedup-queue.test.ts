@@ -3,6 +3,7 @@ import { createDeferred, flushMicrotasks, type Deferred } from "@/test-helpers/d
 
 vi.mock("./dedup-runner", () => ({
   executeMerge: vi.fn(),
+  reembedMergedPages: vi.fn(),
 }))
 
 vi.mock("@/commands/fs", () => ({
@@ -54,7 +55,7 @@ import {
   retryTimedOutRestore,
   dismissStaleRestoreNotice,
 } from "./dedup-queue"
-import { executeMerge } from "./dedup-runner"
+import { executeMerge, reembedMergedPages } from "./dedup-runner"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { useReviewStore } from "@/stores/review-store"
 import { readFile, writeFile } from "@/commands/fs"
@@ -63,6 +64,7 @@ import { __resetProjectLocksForTesting } from "./project-mutex"
 import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "./dedup"
 
 const mockExecuteMerge = vi.mocked(executeMerge)
+const mockReembed = vi.mocked(reembedMergedPages)
 const mockReadFile = vi.mocked(readFile)
 const mockWriteFile = vi.mocked(writeFile)
 const mockIsIngestActive = vi.mocked(isIngestActive)
@@ -1462,5 +1464,45 @@ describe("dedup-queue — outcomes a scheduled run waits for", () => {
     await pauseQueue()
 
     expect(await outcome).toBe("interrupted")
+  })
+})
+
+describe("dedup-queue — a merge's re-embed runs once its task is done (#73 gate)", () => {
+  const merged = {
+    canonicalContent: "",
+    canonicalPath: "",
+    rewrites: [],
+    pagesToDelete: [],
+    backup: [],
+  }
+
+  afterEach(() => {
+    mockReembed.mockReset()
+  })
+
+  it("reports the merge done before its re-embed, so a cancel meanwhile changes nothing and the next merge waits for it", async () => {
+    const reembed = createDeferred<void>()
+    mockReembed.mockReset()
+    mockReembed.mockImplementation(() => reembed.promise)
+    mockExecuteMerge.mockResolvedValue(merged)
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(["a", "b"]), "a", { scheduled: true })
+    let outcome: string | null = null
+    void waitForTask(first).then((o) => (outcome = o))
+    for (let i = 0; i < 50 && mockReembed.mock.calls.length === 0; i++) await flushMicrotasks(20)
+    expect(mockReembed).toHaveBeenCalledTimes(1)
+    await flushMicrotasks(20)
+    expect(outcome).toBe("done")
+    expect(getQueue().map((t) => t.id)).not.toContain(first)
+
+    await cancelTask(first)
+    await enqueueMerge(TEST_ID, makeGroup(["c", "d"]), "c")
+    await flushMicrotasks(50)
+    expect(outcome).toBe("done")
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+
+    reembed.resolve()
+    for (let i = 0; i < 50 && mockExecuteMerge.mock.calls.length < 2; i++) await flushMicrotasks(20)
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
   })
 })
