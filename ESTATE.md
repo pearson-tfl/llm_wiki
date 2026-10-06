@@ -377,14 +377,17 @@ Keep this list current. Merge conflicts can only come from these files.
   were embedded. "Changed since embedded" is a content hash: every
   successful embed (`embedPage`, so ingest, deep research, merges, hubs and
   the backfill, and the Settings re-index) records the SHA-256 of the
-  page's text in `.llm-wiki/embedded-pages.json`, and a page whose hash is
+  page's text in `.llm-wiki/embedded-pages.json` (written once per batch
+  since #73, below), and a page whose hash is
   missing or differs is re-embedded. Pages embedded through the API/MCP
   route, which keeps its own revision record, are re-embedded once by the
   next backfill. A page with nothing to embed counts as covered. The run's
   line in `maintenance-runs.jsonl` carries `vectorCoverage`: pages,
-  covered, embedded this run and failed. A duplicate merge removes the
-  merged-away pages' vectors before deleting their files, then re-embeds
-  the canonical page and every page whose links it rewrote; a hub rebuild
+  covered, embedded this run and failed (#73 adds `orphansRemoved` and
+  `stoppedEarly`, below). A duplicate merge removes the merged-away pages'
+  vectors before deleting their files; the canonical page and every page
+  whose links it rewrote are then re-embedded (since #73, by the merge
+  queue once the project lock is released, below); a hub rebuild
   re-embeds each rebuilt hub. A failed embed is logged, gets a line in
   `.llm-wiki/embedding-failures.jsonl` (time, trigger, page, reason) and
   never fails the merge, rebuild or run; the page keeps its old hash, so
