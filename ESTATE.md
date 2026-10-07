@@ -578,17 +578,19 @@ folder name ending in `/`, names a file. It does not see untracked files:
 `npm --prefix mcp-server ci`, then `npm run typecheck`, `npm run lint`,
 `npm run test:mocks`, `npm run test:llm`, `npm run mcp:build` and `cargo test`
 in `src-tauri`; it stops at the first failure with a non-zero exit, and on
-success prints the commit it checked. In a fresh worktree on this Mac the
-first run takes about 4 minutes, 3 of them `cargo test` compiling the app;
-later runs are faster. Tests: `scripts/estate/check.test.sh`, and for
-`change_list.py`, `python3 scripts/estate/test_change_list.py`.
+success prints the commit it checked. On this Mac a run in a fresh worktree
+takes under 1.5 minutes, half a minute of it `cargo test` compiling the app's
+own crate; with the shared target folder below empty, about 4 minutes. Tests:
+`scripts/estate/check.test.sh`, and for `change_list.py`,
+`python3 scripts/estate/test_change_list.py`.
 
 `cargo test` builds in one folder shared by every lane and trial on this Mac,
 `/Users/johnp/Code/llm_wiki-worktrees/.cargo-target`, not in the tree's own
 `src-tauri/target`: each tree's own target grew to about 12 GB, and on 7 Oct
 2026 they filled the Mac's disk (#99). A `CARGO_TARGET_DIR` the caller sets
-wins. Two checks at once share the folder, and cargo makes one wait while the
-other builds. Deleting the folder frees the space; the next check rebuilds it.
+wins. Trees share the folder's compiled dependencies; a check in another tree
+recompiles only the app's own crate, and while one check builds, cargo makes
+another wait. Deleting the folder frees the space; the next check rebuilds it.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
