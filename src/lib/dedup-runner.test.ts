@@ -678,8 +678,8 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     confidence: "medium",
   }
 
-  /** The vault's pairs: one concept and one entity page per slug, beside `extra` other entity pages. */
-  function setupTwinProject(extra: string[]) {
+  /** The vault's pairs: one concept and one entity page per slug in `twins`, beside `extra` other entity pages. */
+  function setupTwinProject(extra: string[], twins = ["agent-skills"]) {
     const file = (folder: string, slug: string) =>
       ({ name: `${slug}.md`, path: `/project/wiki/${folder}/${slug}.md`, is_dir: false })
     mockListDirectory.mockResolvedValue([
@@ -688,12 +688,12 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
         path: "/project/wiki",
         is_dir: true,
         children: [
-          { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: [file("concepts", "agent-skills")] },
+          { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: twins.map((slug) => file("concepts", slug)) },
           {
             name: "entities",
             path: "/project/wiki/entities",
             is_dir: true,
-            children: [file("entities", "agent-skills"), ...extra.map((slug) => file("entities", slug))],
+            children: [...twins, ...extra].map((slug) => file("entities", slug)),
           },
         ],
       },
@@ -922,6 +922,48 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     expect(result.failedBatches).toEqual([
       { pages: 2, reason: expect.stringContaining("not-duplicates list unreadable") },
     ])
+  })
+
+  it("stops calling the judge after two calls in a row fail, keeping each group left and reporting it as not checked", async () => {
+    setupTwinProject([], ["agent-skills", "hermes", "openclaw"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => new Error("Request timed out"))
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(judgeCalls()).toHaveLength(2)
+    expect(result.groups.map((g) => g.slugs)).toEqual([
+      TWIN_IDS,
+      ["concepts/hermes", "entities/hermes"],
+      ["concepts/openclaw", "entities/openclaw"],
+    ])
+    expect(result.failedBatches).toEqual([
+      { pages: 2, reason: expect.stringContaining("Request timed out") },
+      { pages: 2, reason: expect.stringContaining("Request timed out") },
+      { pages: 2, reason: "Not checked: the shared-slug judge stopped after 2 calls in a row failed" },
+    ])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it("counts only judge calls that fail in a row: an answer, or a reply it cannot read, in between resets the count", async () => {
+    setupTwinProject([], ["agent-skills", "hermes", "openclaw", "pi-agent", "zed", "zeta"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    const verdicts: (unknown[] | Error)[] = [
+      new Error("HTTP 529 overloaded"),
+      [{ paths: ["concepts/hermes"] }],
+      new Error("HTTP 529 overloaded"),
+      [],
+      new Error("HTTP 529 overloaded"),
+    ]
+    mockDetectorAndJudge([], () => verdicts.shift() ?? new Error("asked once too often"))
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(judgeCalls()).toHaveLength(6)
+    expect(result.failedBatches.map((b) => b.reason)).not.toContainEqual(expect.stringContaining("Not checked"))
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [["concepts/pi-agent", "entities/pi-agent"]])
   })
 
   it("propagates a cancel during the judge's call", async () => {

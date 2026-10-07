@@ -279,6 +279,8 @@ export async function runDuplicateDetection(
  * pair is recorded as not duplicates, so no later scan asks again. A group
  * all of whose pairs are recorded is dropped with no call. A judge call that
  * fails, or a reply it cannot read, is a failed batch, and the group stays.
+ * After DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP judge calls in a row fail,
+ * each group left stays and is reported as failed without a call (#139).
  */
 async function settleSharedSlugGroups(
   projectPath: string,
@@ -293,6 +295,7 @@ async function settleSharedSlugGroups(
   const recorded = new Set(notDup.map(normalizeSlugGroupKey))
   const out: DuplicateGroup[] = []
   const failedBatches: FailedDetectorBatch[] = []
+  let callFailuresInARow = 0
   for (const group of groups) {
     const candidates = sharedSlugCandidates(summaries, group)
     if (!candidates) {
@@ -301,13 +304,28 @@ async function settleSharedSlugGroups(
     }
     const unrecorded = (pairs: string[][]) => pairs.filter((pair) => !recorded.has(normalizeSlugGroupKey(pair)))
     if (unrecorded(allPairs(candidates)).length === 0) continue
+    if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
+      const reason = `Not checked: the shared-slug judge stopped after ${callFailuresInARow} calls in a row failed`
+      failedBatches.push({ pages: candidates.length, reason })
+      out.push(group)
+      continue
+    }
     let topics
     try {
       const pages = await Promise.all(candidates.map(async (pageId) =>
         ({ pageId, content: await readFile(`${pp}/wiki/${pageId}.md`) })))
       topics = await judgeSharedSlugPages(pages, judge, options.signal)
+      callFailuresInARow = 0
     } catch (err) {
       if (options.signal?.aborted) throw err
+      if (err instanceof DetectorCallFailedError) {
+        callFailuresInARow += 1
+        if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
+          console.warn(`[dedup] the shared-slug judge stopped after ${callFailuresInARow} calls in a row failed`)
+        }
+      } else if (err instanceof DetectorReplyUnreadableError) {
+        callFailuresInARow = 0
+      }
       failedBatches.push({ pages: candidates.length, reason: `Shared-slug judge: ${errorMessage(err)}` })
       out.push(group)
       continue
