@@ -12,7 +12,8 @@
  *
  *   1. extractEntitySummaries: walk wiki/entities and wiki/concepts,
  *      pull (slug, title, description, tags) per page. Pure-data;
- *      no LLM.
+ *      no LLM. sameSlugGroups groups the pages that share a slug
+ *      from their paths alone.
  *   2. detectDuplicateGroups: hand the summary list to an LLM, ask
  *      it to identify groups of slugs likely to refer to the same
  *      thing. Returns parsed JSON groups with reason + confidence.
@@ -57,7 +58,9 @@ export interface EntitySummary {
 }
 
 export interface DuplicateGroup {
-  /** Two or more slugs from the input list. */
+  /** Two or more pages from the input list, each named by its slug, or,
+   *  where pages share a slug, by its page id: its path under `wiki/`
+   *  without `.md`, e.g. `concepts/agent-skills` (#109). */
   slugs: string[]
   /** Why the model believes these are duplicates. Short prose. */
   reason: string
@@ -155,6 +158,43 @@ export function extractEntitySummary(
     description: description ? truncate(description, 200) : undefined,
     tags,
   }
+}
+
+/**
+ * Group the pages that share a slug – a concept and an entity page of one
+ * name – from their paths alone, with no model call (#109). The detector
+ * names pages by slug, so it cannot tell such pages apart; each is named
+ * here by its page id, its path under `wiki/` without `.md`. Groups in
+ * `notDuplicates` are left out, as the detector's are.
+ */
+export function sameSlugGroups(
+  summaries: EntitySummary[],
+  notDuplicates: string[][],
+): DuplicateGroup[] {
+  const pageIdsBySlug = new Map<string, string[]>()
+  for (const s of summaries) {
+    const pageId = pageIdFromPath(s.path)
+    pageIdsBySlug.set(s.slug, [...(pageIdsBySlug.get(s.slug) ?? []), pageId])
+  }
+  const notDupSet = new Set(notDuplicates.map(normalizeGroupKey))
+  const groups: DuplicateGroup[] = []
+  for (const [slug, found] of pageIdsBySlug) {
+    const pageIds = [...found].sort()
+    if (pageIds.length < 2 || notDupSet.has(normalizeGroupKey(pageIds))) continue
+    groups.push({
+      slugs: pageIds,
+      reason: `Pages share the slug "${slug}": ${pageIds.join(", ")}`,
+      // Not "high": a shared name is not proof of one topic, and scheduled
+      // maintenance merges high groups with no click.
+      confidence: "medium",
+    })
+  }
+  return groups
+}
+
+/** A page's id, its path under `wiki/` without `.md`: `wiki/concepts/foo.md` → `concepts/foo`. */
+export function pageIdFromPath(path: string): string {
+  return path.replace(/^wiki\//, "").replace(/\.md$/, "")
 }
 
 function slugFromPath(path: string): string {
@@ -288,8 +328,9 @@ export function parseDetectorResponse(raw: string): DuplicateGroup[] {
   for (const g of groupsRaw) {
     if (!g || typeof g !== "object") continue
     const obj = g as Record<string, unknown>
+    // A slug named twice is one page, not two (#109).
     const slugs = Array.isArray(obj.slugs)
-      ? obj.slugs.filter((s): s is string => typeof s === "string")
+      ? [...new Set(obj.slugs.filter((s): s is string => typeof s === "string"))]
       : []
     if (slugs.length < 2) continue
     const reason = typeof obj.reason === "string" ? obj.reason : ""

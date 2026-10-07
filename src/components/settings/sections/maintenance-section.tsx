@@ -19,7 +19,8 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { useWikiStore } from "@/stores/wiki-store"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { runDuplicateDetection, type FailedDetectorBatch } from "@/lib/dedup-runner"
+import { runDuplicateDetection, type FailedDetectorBatch, type ScanNotDone } from "@/lib/dedup-runner"
+import { DuplicateScanNotices } from "./dedup-scan-notices"
 import {
   addNotDuplicate,
   loadPendingDuplicateGroups,
@@ -81,6 +82,7 @@ export function MaintenanceSection() {
   const [groups, setGroups] = useState<GroupUiEntry[]>([])
   const [scanCompleted, setScanCompleted] = useState(false)
   const [failedBatches, setFailedBatches] = useState<FailedDetectorBatch[]>([])
+  const [scanNotDone, setScanNotDone] = useState<ScanNotDone | undefined>(undefined)
   const [projectToolStatus, setProjectToolStatus] = useState<string | null>(null)
   const [projectToolBusy, setProjectToolBusy] = useState(false)
   const [historyStats, setHistoryStats] = useState<FileHistoryStats | null>(null)
@@ -294,9 +296,11 @@ export function MaintenanceSection() {
     setGroups([])
     setScanCompleted(false)
     setFailedBatches([])
+    setScanNotDone(undefined)
     try {
       const detected = await runDuplicateDetection(project.path, llmConfig)
       setFailedBatches(detected.failedBatches)
+      setScanNotDone(detected.notDone)
       setGroups(
         detected.groups.map((g) => ({
           group: g,
@@ -659,30 +663,8 @@ export function MaintenanceSection() {
           </div>
         )}
 
-        {scanCompleted && failedBatches.length > 0 && (
-          <div className="flex items-start gap-1.5 rounded border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-400">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div>
-              {t("settings.sections.maintenance.dedup.batchesFailed", {
-                count: failedBatches.length,
-                pages: failedBatches.reduce((sum, batch) => sum + batch.pages, 0),
-                reason: failedBatches[0].reason,
-                defaultValue:
-                  "{{count}} detector batches ({{pages}} pages) could not be read, so those pages were not checked: {{reason}}",
-              })}
-            </div>
-          </div>
-        )}
-
-        {scanCompleted && groups.length === 0 && failedBatches.length === 0 && !scanError && (
-          <div className="flex items-start gap-1.5 rounded border border-emerald-500/40 bg-emerald-500/5 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-400">
-            <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <div>
-              {t("settings.sections.maintenance.dedup.noneFound", {
-                defaultValue: "No duplicate groups found. The wiki is clean.",
-              })}
-            </div>
-          </div>
+        {scanCompleted && !scanError && (
+          <DuplicateScanNotices groupCount={groups.length} failedBatches={failedBatches} notDone={scanNotDone} />
         )}
       </div>
 

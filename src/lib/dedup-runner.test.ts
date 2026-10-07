@@ -384,7 +384,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("short-circuits large wiki scans when the prefilter returns no candidates", async () => {
+  it("reports a large wiki whose prefilter finds no pairs as not done, not clean (#112)", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
@@ -392,12 +392,16 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [],
+      failedBatches: [],
+      notDone: { reason: "no-candidate-pairs", pages: 251 },
+    })
     expect(mockStreamChat).not.toHaveBeenCalled()
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("does not fall back to the full LLM scan for large wikis when embedding coverage is too low", async () => {
+  it("reports a large wiki whose embedding coverage is too low as not done, not clean (#112)", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
@@ -405,7 +409,23 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [],
+      failedBatches: [],
+      notDone: { reason: "embedding-coverage-low", pages: 251 },
+    })
+    expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+
+  it("reports a large wiki as checked when its only pairs are marked not duplicates (#112)", async () => {
+    setupLargeProject()
+    mockLoadNotDuplicates.mockResolvedValue([["p0", "p1"]])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([["wiki/entities/p0.md", "wiki/entities/p1.md"]])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toStrictEqual({ groups: [], failedBatches: [] })
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
@@ -453,5 +473,76 @@ describe("runDuplicateDetection embedding prefilter", () => {
     await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
       .rejects.toThrow(/cancelled/i)
     expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+})
+
+describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
+  const TWIN_GROUP = {
+    slugs: ["concepts/agent-skills", "entities/agent-skills"],
+    reason: 'Pages share the slug "agent-skills": concepts/agent-skills, entities/agent-skills',
+    confidence: "medium",
+  }
+
+  /** The vault's pairs: one concept and one entity page per slug, beside `extra` other entity pages. */
+  function setupTwinProject(extra: string[]) {
+    const file = (folder: string, slug: string) =>
+      ({ name: `${slug}.md`, path: `/project/wiki/${folder}/${slug}.md`, is_dir: false })
+    mockListDirectory.mockResolvedValue([
+      {
+        name: "wiki",
+        path: "/project/wiki",
+        is_dir: true,
+        children: [
+          { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: [file("concepts", "agent-skills")] },
+          {
+            name: "entities",
+            path: "/project/wiki/entities",
+            is_dir: true,
+            children: [file("entities", "agent-skills"), ...extra.map((slug) => file("entities", slug))],
+          },
+        ],
+      },
+    ])
+    mockReadFile.mockImplementation(async (path: string) => {
+      const type = path.includes("/concepts/") ? "concept" : "entity"
+      const slug = path.split("/").pop()?.replace(/\.md$/, "") ?? "unknown"
+      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} body`
+    })
+  }
+
+  it("reports them as one group of their page ids when the model groups nothing", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorGroup([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [TWIN_GROUP], failedBatches: [] })
+  })
+
+  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls no model", async () => {
+    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(result.groups).toEqual([TWIN_GROUP])
+    // The model's check is still reported as not done beside them (#112).
+    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
+  })
+
+  it("leaves out a pair the user marked not duplicates", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([["concepts/agent-skills", "entities/agent-skills"]])
+    setupEmbeddingConfig(false)
+    mockDetectorGroup([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([])
   })
 })
