@@ -465,7 +465,8 @@ Keep this list current. Merge conflicts can only come from these files.
   Tests in `src/lib/dedup-queue.card-merge.test.ts`,
   `src/components/settings/sections/maintenance-section.test.tsx`,
   `src/lib/dedup-storage.test.ts` and
-  `src/lib/scheduled-maintenance.test.ts`.
+  `src/lib/scheduled-maintenance.test.ts`; a live card merge and page list
+  on a vault copy in `src/lib/dedup-ambiguous-card.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
