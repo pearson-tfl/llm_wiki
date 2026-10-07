@@ -548,18 +548,18 @@ Every lane runs the check before its offer, at the head it offers:
 scripts/estate/check.sh
 ```
 
-It checks the checkout it lives in, with the same PATH set-up and missing
-tool stop as `build.sh`. It first runs `scripts/estate/change_list.py`,
-which fails on a line over 80 characters in "John's changes on `estate`"
-above, and on any file outside `docs/` that the checkout changes from its
-merge base with `origin/main` and the list does not name; a name in a
-`{a,b}` brace form, or a folder name ending in `/`, names a file. Then it
-runs `npm ci` and `npm --prefix mcp-server ci`, then `npm run typecheck`,
-`npm run test:mocks`, `npm run mcp:build` and `cargo test` in
-`src-tauri`; it stops at the first failure with a non-zero
-exit, and on success prints the commit it checked. In a fresh worktree on
-this Mac the first run takes about 4 minutes, 3 of them `cargo test`
-compiling the app; later runs are faster. Tests:
+It checks the checkout it lives in, with the same PATH set-up and missing tool
+stop as `build.sh`. It first runs `scripts/estate/change_list.py`, which fails
+on a line over 80 characters in "John's changes on `estate`" above, and on any
+file outside `docs/` that the checkout changes from its merge base with
+`origin/main` and the list does not name; a name in a `{a,b}` brace form, or a
+folder name ending in `/`, names a file. It does not see untracked files:
+`git add` a new file first. Then it runs `npm ci` and
+`npm --prefix mcp-server ci`, then `npm run typecheck`, `npm run test:mocks`,
+`npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first
+failure with a non-zero exit, and on success prints the commit it checked. In a
+fresh worktree on this Mac the first run takes about 4 minutes, 3 of them
+`cargo test` compiling the app; later runs are faster. Tests:
 `scripts/estate/check.test.sh`, and for `change_list.py`,
 `python3 scripts/estate/test_change_list.py`.
 

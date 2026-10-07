@@ -2,8 +2,9 @@
 """Checks ESTATE.md's list of John's changes on estate: no line in it runs
 past 80 characters, and it names every file outside docs/ that this checkout
 changes from its merge base with origin/main. A `{a,b}` brace form names each
-alternative; a name ending in / names every file under it. check.sh runs it
-first. Run: scripts/estate/change_list.py
+alternative; a name ending in / names every file under it. Untracked files
+are not seen: `git add` a new file first. check.sh runs it first.
+Run: scripts/estate/change_list.py
 """
 
 import re
@@ -50,7 +51,8 @@ def expand(name):
     if not brace:
         return [name]
     head, tail = name[: brace.start()], name[brace.end() :]
-    return [path for alt in brace.group(1).split(",") for path in expand(head + alt + tail)]
+    alternatives = brace.group(1).split(",")
+    return [path for alt in alternatives for path in expand(head + alt + tail)]
 
 
 def names_in(section):
@@ -60,7 +62,8 @@ def names_in(section):
 
 
 def is_named(path, names):
-    return path in names or any(name.endswith("/") and path.startswith(name) for name in names)
+    folders = (name for name in names if name.endswith("/"))
+    return path in names or any(path.startswith(folder) for folder in folders)
 
 
 def main():
@@ -74,7 +77,7 @@ def main():
     required = [path for path in changed if path and not path.startswith("docs/")]
     names = names_in(section)
 
-    long_lines = [(number, len(line)) for number, line in section if len(line) > WIDTH]
+    long_lines = [(n, len(line)) for n, line in section if len(line) > WIDTH]
     unlisted = [path for path in required if not is_named(path, names)]
     for number, width in long_lines:
         print(f"ESTATE.md:{number}: {width} characters, over {WIDTH}")
@@ -82,8 +85,10 @@ def main():
         print(f"ESTATE.md: the change list does not name {path}")
     if long_lines or unlisted:
         sys.exit(1)
-    print(f"change_list.py: ESTATE.md's change list names all {len(required)} changed files"
-          f" outside docs/, in lines of {WIDTH} characters or fewer")
+    print(
+        f"change_list.py: ESTATE.md's change list names all {len(required)}"
+        f" changed files outside docs/, in lines of {WIDTH} characters or fewer"
+    )
 
 
 if __name__ == "__main__":

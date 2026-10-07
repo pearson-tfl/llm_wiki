@@ -42,6 +42,9 @@ ENTRIES = """- `vite.config.ts` – version stamp. Settings > About shows
 - `ESTATE.md` – this file.
 """
 
+# The entry that names the script, which every passing case needs.
+LISTS_SCRIPT = "- `scripts/estate/change_list.py`.\n"
+
 LISTED = [
     "vite.config.ts",
     "src/i18n/en.json",
@@ -110,20 +113,12 @@ class ChangeListTest(unittest.TestCase):
 
     def test_passes_when_every_changed_file_is_named(self):
         # The script itself is unlisted in ENTRIES, so name it here.
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         self.commit("list the script")
         code, out = self.run_script()
         self.assertEqual(code, 0, out)
 
-    def test_fails_on_an_unlisted_file_under_src(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
-        write(self.repo, "src/lib/new-thing.ts")
-        self.commit("unlisted")
-        code, out = self.run_script()
-        self.assertEqual(code, 1, out)
-        self.assertIn("src/lib/new-thing.ts", out)
-
-    def test_names_every_unlisted_file(self):
+    def test_fails_naming_every_unlisted_file(self):
         write(self.repo, "src/lib/new-thing.ts")
         self.commit("unlisted")
         code, out = self.run_script()
@@ -148,7 +143,7 @@ class ChangeListTest(unittest.TestCase):
         self.assertNotIn("scripts/estate/change_list.py", out)
 
     def test_a_brace_form_names_only_its_alternatives(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         write(self.repo, "src/i18n/fr.json")
         self.commit("a fifth language")
         code, out = self.run_script()
@@ -157,14 +152,14 @@ class ChangeListTest(unittest.TestCase):
         self.assertNotIn("src/i18n/en.json", out)
 
     def test_files_under_docs_need_no_entry(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         write(self.repo, "docs/agents/new-doc.md")
         self.commit("a doc")
         code, out = self.run_script()
         self.assertEqual(code, 0, out)
 
     def test_a_root_markdown_file_needs_an_entry(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         write(self.repo, "README.md", "estate\n")
         self.commit("readme")
         code, out = self.run_script()
@@ -172,15 +167,15 @@ class ChangeListTest(unittest.TestCase):
         self.assertIn("README.md", out)
 
     def test_a_deleted_upstream_file_needs_an_entry(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         (self.repo / "README.md").unlink()
         self.commit("delete readme")
         code, out = self.run_script()
         self.assertEqual(code, 1, out)
         self.assertIn("README.md", out)
 
-    def test_a_renamed_upstream_file_needs_both_names(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`, `README.txt`.\n")
+    def test_a_renamed_upstream_file_needs_its_old_name_too(self):
+        self.set_entries(ENTRIES + LISTS_SCRIPT + "- `README.txt`.\n")
         git(self.repo, "mv", "README.md", "README.txt")
         self.commit("rename readme")
         code, out = self.run_script()
@@ -188,7 +183,7 @@ class ChangeListTest(unittest.TestCase):
         self.assertIn("README.md", out)
 
     def test_uncommitted_edits_count(self):
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         self.commit("list the script")
         write(self.repo, "README.md", "edited\n")
         code, out = self.run_script()
@@ -197,7 +192,7 @@ class ChangeListTest(unittest.TestCase):
 
     def test_fails_on_an_81_character_line(self):
         line = "  " + "x" * 79 + "\n"
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n" + line)
+        self.set_entries(ENTRIES + LISTS_SCRIPT + line)
         self.commit("long line")
         code, out = self.run_script()
         self.assertEqual(code, 1, out)
@@ -207,14 +202,14 @@ class ChangeListTest(unittest.TestCase):
     def test_an_80_character_line_of_en_dashes_passes(self):
         # 80 characters, 238 bytes: width counts characters.
         line = "  " + "–" * 78 + "\n"
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n" + line)
+        self.set_entries(ENTRIES + LISTS_SCRIPT + line)
         self.commit("en dashes")
         code, out = self.run_script()
         self.assertEqual(code, 0, out)
 
     def test_long_lines_outside_the_list_pass(self):
         # TAIL's code block line is over 80 characters.
-        self.set_entries(ENTRIES + "- `scripts/estate/change_list.py`.\n")
+        self.set_entries(ENTRIES + LISTS_SCRIPT)
         self.commit("list the script")
         self.assertGreater(max(len(l) for l in TAIL.splitlines()), 80)
         code, out = self.run_script()
