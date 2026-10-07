@@ -69,13 +69,44 @@ export async function addNotDuplicate(
   slugs: string[],
 ): Promise<void> {
   if (slugs.length < 2) return
-  const list = await loadNotDuplicates(projectPath)
-  const normNew = canonicalKey(slugs)
-  for (const existing of list) {
-    if (canonicalKey(existing) === normNew) return // already there
-  }
-  list.push([...slugs].sort())
-  await saveNotDuplicates(projectPath, list)
+  await editNotDuplicates(async () => {
+    const list = await loadNotDuplicates(projectPath)
+    const normNew = canonicalKey(slugs)
+    for (const existing of list) {
+      if (canonicalKey(existing) === normNew) return // already there
+    }
+    list.push([...slugs].sort())
+    await saveNotDuplicates(projectPath, list)
+  })
+}
+
+/**
+ * Record the pairs the scan's judge found distinct (#135), each sorted,
+ * leaving out one already there. With no click behind it, a list that
+ * exists and cannot be read is refused, not written over.
+ */
+export async function recordNotDuplicates(
+  projectPath: string,
+  pairs: string[][],
+): Promise<void> {
+  await editNotDuplicates(async () => {
+    const list = await readNotDuplicates(projectPath)
+    const keys = new Set(list.map(canonicalKey))
+    const added = pairs.filter((pair) => !keys.has(canonicalKey(pair)))
+    if (added.length === 0) return
+    await saveNotDuplicates(projectPath, [...list, ...added.map((pair) => [...pair].sort())])
+  })
+}
+
+/** Read-modify-writes of the not-duplicates list, one at a time, so the
+ *  scan's judge and the Maintenance screen cannot undo each other's write
+ *  (#135). */
+let notDuplicateEdits: Promise<unknown> = Promise.resolve()
+
+function editNotDuplicates(edit: () => Promise<void>): Promise<void> {
+  const run = notDuplicateEdits.then(edit)
+  notDuplicateEdits = run.catch(() => undefined)
+  return run
 }
 
 /** True when every slug of some not-duplicates entry is in `slugs`. */
@@ -118,8 +149,9 @@ export async function replacePendingDuplicateGroups(
 /**
  * Add groups to the saved ones, for a scan that did not check every page
  * (#117). A saved group with the same pages as an added one is replaced by
- * it, and one naming a page no longer on disk is dropped (#120): a merge
- * of it would be refused.
+ * it, and one naming a page no longer on disk (#120), or a slug naming two
+ * pages (#135), is dropped: a merge of it would be refused. The scan that
+ * finds such a group again settles it by judgement.
  */
 export async function addPendingDuplicateGroups(
   projectPath: string,
@@ -132,7 +164,7 @@ export async function addPendingDuplicateGroups(
     await savePendingDuplicateGroups(projectPath, [
       ...saved.filter((g) =>
         !added.has(canonicalKey(g.slugs))
-        && g.slugs.every((slug) => pagesNamed(pages, slug).length > 0)),
+        && g.slugs.every((slug) => pagesNamed(pages, slug).length === 1)),
       ...groups,
     ])
   })

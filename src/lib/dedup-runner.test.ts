@@ -17,6 +17,7 @@ const {
   mockLoadEmbeddingConfig,
   mockLoadNotDuplicates,
   mockReadFile,
+  mockRecordNotDuplicates,
   mockStreamChat,
 } = vi.hoisted(() => ({
   mockCandidatePairs: vi.fn(),
@@ -25,6 +26,7 @@ const {
   mockLoadEmbeddingConfig: vi.fn(),
   mockLoadNotDuplicates: vi.fn(),
   mockReadFile: vi.fn(),
+  mockRecordNotDuplicates: vi.fn(),
   mockStreamChat: vi.fn(),
 }))
 vi.mock("./llm-client", async () => {
@@ -42,6 +44,11 @@ vi.mock("@/lib/project-store", () => ({
 }))
 vi.mock("./dedup-storage", () => ({
   loadNotDuplicates: mockLoadNotDuplicates,
+  recordNotDuplicates: mockRecordNotDuplicates,
+}))
+// The judge's route (#135): the chat route, a model apart from the scan's.
+vi.mock("@/lib/llm-task-routing", () => ({
+  getTaskLlmConfig: (task: string) => ({ provider: "claude-code", model: `${task}-route` }),
 }))
 vi.mock("@/lib/dedup_embedding", () => ({
   candidatePairs: mockCandidatePairs,
@@ -79,6 +86,7 @@ beforeEach(() => {
   mockLoadEmbeddingConfig.mockReset()
   mockLoadNotDuplicates.mockReset()
   mockReadFile.mockReset()
+  mockRecordNotDuplicates.mockReset()
   mockStreamChat.mockReset()
 })
 
@@ -662,9 +670,10 @@ describe("runDuplicateDetection embedding prefilter", () => {
   })
 })
 
-describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
+describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", () => {
+  const TWIN_IDS = ["concepts/agent-skills", "entities/agent-skills"]
   const TWIN_GROUP = {
-    slugs: ["concepts/agent-skills", "entities/agent-skills"],
+    slugs: TWIN_IDS,
     reason: 'Pages share the slug "agent-skills": concepts/agent-skills, entities/agent-skills',
     confidence: "medium",
   }
@@ -692,44 +701,270 @@ describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
     mockReadFile.mockImplementation(async (path: string) => {
       const type = path.includes("/concepts/") ? "concept" : "entity"
       const slug = path.split("/").pop()?.replace(/\.md$/, "") ?? "unknown"
-      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} body`
+      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} ${type} body`
     })
   }
 
-  it("reports them as one group of their page ids when the model groups nothing", async () => {
+  /** The detector (the scan's route) answers `detectorGroups`; the judge
+   *  (the chat route) answers what `judge` makes of the pages it is given. */
+  function mockDetectorAndJudge(
+    detectorGroups: string[][],
+    judge: (userMessage: string) => unknown[] | Error,
+  ) {
+    mockStreamChat.mockImplementation(async (config: LlmConfig, messages: { content: string }[], cb) => {
+      if (config.model !== "chat-route") {
+        cb.onToken(JSON.stringify({
+          groups: detectorGroups.map((slugs) => ({ slugs, reason: "same topic", confidence: "medium" })),
+        }))
+        cb.onDone()
+        return
+      }
+      const verdict = judge(messages[1].content)
+      if (verdict instanceof Error) {
+        cb.onError(verdict)
+        return
+      }
+      cb.onToken(JSON.stringify({ groups: verdict }))
+      cb.onDone()
+    })
+  }
+
+  const judgeCalls = () => mockStreamChat.mock.calls.filter(([config]) => config.model === "chat-route")
+
+  it("returns a pair judged one topic as a high group naming its pages by path", async () => {
     setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig(false)
-    mockDetectorGroup([])
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Both describe the Agent Skills standard." }])
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [TWIN_GROUP], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [{
+        slugs: TWIN_IDS,
+        reason: "Judged one topic: Both describe the Agent Skills standard.",
+        confidence: "high",
+      }],
+      failedBatches: [],
+    })
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
-  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls no model", async () => {
-    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+  it("leaves no empty reason after a judge verdict that gives none", async () => {
+    setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([])
-    setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: " " }])
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(result.groups).toEqual([{ slugs: TWIN_IDS, reason: "Judged one topic", confidence: "high" }])
+  })
+
+  it("gives the judge, on the chat route, each page's path and content", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+
+    await runDuplicateDetection("/project", cfg)
+
+    expect(judgeCalls()).toHaveLength(1)
+    const userMessage = judgeCalls()[0][1][1].content as string
+    expect(userMessage).toContain("concepts/agent-skills")
+    expect(userMessage).toContain("agent-skills concept body")
+    expect(userMessage).toContain("entities/agent-skills")
+    expect(userMessage).toContain("agent-skills entity body")
+    expect(userMessage).not.toContain("entities/foo")
+  })
+
+  it("records a pair judged distinct by path and returns no group for it", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [TWIN_IDS])
+  })
+
+  it("judges a detector group naming a shared slug bare among every page the slug names", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], (userMessage) =>
+      userMessage.includes("entities/foo")
+        ? [{ pages: ["entities/agent-skills", "entities/foo"], reason: "One tool." }]
+        : [])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([
+      { slugs: ["entities/agent-skills", "entities/foo"], reason: "Judged one topic: One tool.", confidence: "high" },
+    ])
+    expect(judgeCalls()).toHaveLength(2)
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [TWIN_IDS])
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [["concepts/agent-skills", "entities/foo"]])
+  })
+
+  it("reads a judge reply placing one page in two groups as unreadable, recording nothing", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], (userMessage) =>
+      userMessage.includes("entities/foo")
+        ? [
+          { pages: TWIN_IDS, reason: "One standard." },
+          { pages: ["entities/agent-skills", "entities/foo"], reason: "One tool." },
+        ]
+        : [{ pages: TWIN_IDS, reason: "One standard." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.failedBatches).toEqual([{ pages: 3, reason: expect.stringContaining("places a page in two groups") }])
+    expect(result.groups).toContainEqual({ slugs: ["agent-skills", "foo"], reason: "same topic", confidence: "medium" })
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it("asks no model again about pages every pair of which is recorded distinct", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([
+      TWIN_IDS,
+      ["concepts/agent-skills", "entities/foo"],
+      ["entities/agent-skills", "entities/foo"],
+    ])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], () => {
+      throw new Error("the judge was asked")
+    })
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(judgeCalls()).toEqual([])
+  })
+
+  it("reports a failed judge call as a failed batch and keeps the group as it was", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => new Error("HTTP 529 overloaded"))
+
+    const result = await runDuplicateDetection("/project", cfg)
+
     expect(result.groups).toEqual([TWIN_GROUP])
-    // The model's check is still reported as not done beside them (#112).
-    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
+    expect(result.failedBatches).toEqual([
+      { pages: 2, reason: expect.stringContaining("HTTP 529 overloaded") },
+    ])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
-  it("leaves out a pair the user marked not duplicates", async () => {
+  it("reports a judge reply it cannot read as a failed batch and keeps the group as it was", async () => {
     setupTwinProject(["foo"])
-    mockLoadNotDuplicates.mockResolvedValue([["concepts/agent-skills", "entities/agent-skills"]])
+    mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig(false)
-    mockDetectorGroup([])
+    mockStreamChat.mockImplementation(async (config: LlmConfig, _m, cb) => {
+      cb.onToken(config.model === "chat-route" ? "They look like the same thing." : JSON.stringify({ groups: [] }))
+      cb.onDone()
+    })
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("no complete JSON object") }])
+  })
+
+  it.each([
+    ["a bare slug", ["agent-skills", "agent-skills"]],
+    ["a path with its folder and extension", ["wiki/concepts/agent-skills.md", "wiki/entities/agent-skills.md"]],
+  ])("reads a judge reply naming %s it was not given as unreadable, recording nothing", async (_form, pages) => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages, reason: "Same." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a page it was not given") }])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["pages given as one string", { pages: "concepts/agent-skills, entities/agent-skills", reason: "Same." }],
+    ["its pages under another key", { paths: TWIN_IDS, reason: "Same." }],
+    ["a bare string for a group", "concepts/agent-skills, entities/agent-skills"],
+  ])("reads a judge reply with %s as unreadable, recording nothing", async (_form, group) => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [group])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a group with no pages list") }])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it("keeps a distinct verdict it could not record out of the groups, and reports it", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+    mockRecordNotDuplicates.mockRejectedValue(new Error("not-duplicates list unreadable"))
 
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result.groups).toEqual([])
+    expect(result.failedBatches).toEqual([
+      { pages: 2, reason: expect.stringContaining("not-duplicates list unreadable") },
+    ])
+  })
+
+  it("propagates a cancel during the judge's call", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    const controller = new AbortController()
+    mockDetectorAndJudge([], () => {
+      controller.abort()
+      return new Error("Request cancelled")
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
+      .rejects.toThrow("Request cancelled")
+  })
+
+  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls only the judge", async () => {
+    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([])
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Same standard." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(mockStreamChat.mock.calls.map(([config]) => config.model)).toEqual(["chat-route"])
+    expect(result.groups).toEqual([
+      { slugs: TWIN_IDS, reason: "Judged one topic: Same standard.", confidence: "high" },
+    ])
+    // The model's check is still reported as not done beside them (#112).
+    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
+  })
+
+  it("leaves out, unjudged, a pair marked not duplicates", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([TWIN_IDS])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Same." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([])
+    expect(judgeCalls()).toEqual([])
   })
 })
 

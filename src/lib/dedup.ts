@@ -8,7 +8,8 @@
  * layer only catches *exact* slug collisions; this module catches
  * the soft-collision case via an LLM-driven self-check.
  *
- * Three stages, each independently testable:
+ * Three stages and a judge between the second and third, each
+ * independently testable:
  *
  *   1. extractEntitySummaries: walk wiki/entities and wiki/concepts,
  *      pull (slug, title, description, tags) per page. Pure-data;
@@ -18,6 +19,10 @@
  *      it to identify groups of slugs likely to refer to the same
  *      thing. Returns parsed JSON groups with reason + confidence.
  *      The LLM call is injected so unit tests don't hit a model.
+ *  2b. judgeSharedSlugPages: hand the pages a group names that
+ *      share a slug, by path with their content, to an LLM, ask
+ *      which are one topic. The rest are distinct (distinctPairs),
+ *      so the caller records them and never merges them (#135).
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
  *      canonical slug, merge bodies (LLM call, its reply checked as
  *      the page merge checks one), union frontmatter
@@ -243,6 +248,17 @@ export function ambiguousSlugRefusal<T extends { path: string }>(pages: T[], slu
   return `Slug "${slug}" names ${found.length} pages: ${found.map((p) => pageIdFromPath(p.path)).join(", ")}`
 }
 
+/**
+ * The page ids of every page a group's names name, when two of those pages
+ * share a slug: a same-slug group (#109), or a group naming such a slug
+ * bare. Null when no two of them do, so the group needs no judging (#135).
+ */
+export function sharedSlugCandidates<T extends { path: string }>(pages: T[], group: DuplicateGroup): string[] | null {
+  const pageIds = [...new Set(group.slugs.flatMap((name) => pagesNamed(pages, name).map((p) => pageIdFromPath(p.path))))]
+  const slugs = pageIds.map(slugFromPath)
+  return new Set(slugs).size < slugs.length ? pageIds : null
+}
+
 function slugFromPath(path: string): string {
   const base = path.split("/").pop() ?? path
   return base.replace(/\.md$/, "")
@@ -418,6 +434,120 @@ function extractFirstJsonObject(text: string): string | null {
     }
   }
   return null
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Stage 2b: judge pages that share a slug (#135)
+// ──────────────────────────────────────────────────────────────────
+
+/** The judge's system prompt holds this phrase, and no other prompt does:
+ *  a live test tells the judge's calls from the detector's by it. */
+export const JUDGE_PROMPT_MARKER = "Some wiki pages share a file name"
+
+const JUDGE_SYSTEM_PROMPT = `You are a wiki maintenance assistant. ${JUDGE_PROMPT_MARKER}, for example a concept page and an entity page both named "agent-skills". You will receive each candidate page with its path, title and full content. Decide which of them describe one and the same topic, so that they should be merged into one page.
+
+Output ONLY valid JSON. No prose, no markdown fences, no explanation outside the JSON. The schema is:
+
+{
+  "groups": [
+    {
+      "pages": ["concepts/example", "entities/example"],
+      "reason": "Both describe X."
+    }
+  ]
+}
+
+Rules:
+- Each group lists two or more of the given paths that are one topic.
+- A page in no group is a topic distinct from every other page given.
+- Pages that share a name but cover different things – for example a general idea and a specific product, person or tool of that name – are distinct: leave them out of any group.
+- A page appears in at most one group.
+- Never invent paths that aren't in the input.
+- If no pages are one topic, output {"groups": []}.`
+
+/** Each page's content is cut to this many characters in the judge's prompt,
+ *  so one very long page cannot crowd the others out of the model's context. */
+const JUDGE_PAGE_CHARS = 12_000
+
+/** Pages the judge found to be one topic, named by page id. */
+export interface JudgedTopic {
+  pages: string[]
+  reason: string
+}
+
+/**
+ * Ask the model which of the candidate pages, which include pages sharing a
+ * slug, are one topic (#135). Each page is given by its page id, title and
+ * content. A reply that cannot be read, that holds a group with no pages
+ * list, that names a page it was not given, or that places a page in two
+ * groups rejects with DetectorReplyUnreadableError: every pair no group
+ * holds is recorded as distinct, so a group it could not read or honour, or
+ * a page named in another form, must not count as left out.
+ */
+export async function judgeSharedSlugPages(
+  candidates: { pageId: string; content: string }[],
+  llmCall: DedupLlmCall,
+  signal?: AbortSignal,
+): Promise<JudgedTopic[]> {
+  const sections = candidates.map((c) => {
+    const title = stringField(parseFrontmatter(c.content).frontmatter?.title) ?? slugFromPath(c.pageId)
+    return `## Page: ${c.pageId}\nTitle: ${JSON.stringify(title)}\n\n${truncate(c.content, JUDGE_PAGE_CHARS)}\n`
+  })
+  const userMessage = `## Candidate pages (${candidates.length})\n\n${sections.join("\n---\n\n")}\nReturn the groups as JSON only.`
+  const reply = await llmCall(JUDGE_SYSTEM_PROMPT, userMessage, signal)
+
+  const jsonText = extractFirstJsonObject(reply)
+  if (!jsonText) throw new DetectorReplyUnreadableError("judge: no complete JSON object")
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(jsonText)
+  } catch {
+    throw new DetectorReplyUnreadableError("judge: invalid JSON")
+  }
+  const groupsRaw = (parsed as { groups?: unknown } | null)?.groups
+  if (!Array.isArray(groupsRaw)) throw new DetectorReplyUnreadableError("judge: no groups list")
+
+  const given = new Set(candidates.map((c) => c.pageId))
+  const placed = new Set<string>()
+  const topics: JudgedTopic[] = []
+  for (const g of groupsRaw) {
+    const obj = (g && typeof g === "object" ? g : {}) as Record<string, unknown>
+    if (!Array.isArray(obj.pages)) {
+      throw new DetectorReplyUnreadableError(`judge: a group with no pages list: ${JSON.stringify(g)}`)
+    }
+    const named: unknown[] = obj.pages
+    const unknown = named.find((p) => typeof p !== "string" || !given.has(p))
+    if (unknown !== undefined) {
+      throw new DetectorReplyUnreadableError(`judge: names a page it was not given: ${JSON.stringify(unknown)}`)
+    }
+    const pages = [...new Set(named as string[])]
+    if (pages.length < 2) continue
+    const twice = pages.find((p) => placed.has(p))
+    if (twice !== undefined) {
+      throw new DetectorReplyUnreadableError(`judge: places a page in two groups: ${JSON.stringify(twice)}`)
+    }
+    for (const p of pages) placed.add(p)
+    topics.push({ pages, reason: typeof obj.reason === "string" ? obj.reason : "" })
+  }
+  return topics
+}
+
+/** Each pair of candidates that no judged topic holds both of. */
+export function distinctPairs(candidates: string[], topics: JudgedTopic[]): string[][] {
+  const topicOf = new Map(topics.flatMap((t, i) => t.pages.map((p) => [p, i] as const)))
+  const pairs: string[][] = []
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const [a, b] = [candidates[i], candidates[j]]
+      if (topicOf.get(a) === undefined || topicOf.get(a) !== topicOf.get(b)) pairs.push([a, b].sort())
+    }
+  }
+  return pairs
+}
+
+/** Every pair of candidates, each sorted. */
+export function allPairs(candidates: string[]): string[][] {
+  return distinctPairs(candidates, [])
 }
 
 /** Canonical key for a group — lowercased, sorted, comma-joined. */

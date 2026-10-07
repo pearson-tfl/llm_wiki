@@ -3,8 +3,9 @@
  * real vault: the real runDuplicateDetection and the real scheduled
  * runMaintenanceTick, with the real embedding endpoint. The Tauri layer is
  * replaced: files through node:fs, embeddings by a direct call to the
- * endpoint, the settings store by an in-memory one. Any model call fails
- * the test: neither case may reach the model.
+ * endpoint, the settings store by an in-memory one. Any detector call
+ * fails the test: neither case may reach the detector. The shared-slug
+ * judge's calls (#135) are refused here, so its groups stay as found.
  *
  * - Coverage too low: the copy, scanned with an embedding model the
  *   endpoint does not hold, so it embeds no page.
@@ -29,6 +30,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import { useWikiStore, type EmbeddingConfig, type LlmConfig } from "@/stores/wiki-store"
+import { JUDGE_PROMPT_MARKER } from "./dedup"
 
 const ENABLED =
   process.env.RUN_LLM_TESTS === "1"
@@ -81,7 +83,9 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
         if (!response.ok) throw new Error(`embedding endpoint answered ${response.status}`)
         return (await response.json()).data[0].embedding
       }
-      if (cmd === "claude_cli_spawn") measured.modelCalls++
+      // The detector's calls are counted; the judge's (#135) are only refused.
+      const messages = (args?.messages ?? []) as { content: string }[]
+      if (cmd === "claude_cli_spawn" && !messages[0]?.content.includes(JUDGE_PROMPT_MARKER)) measured.modelCalls++
       throw new Error(`unexpected invoke ${cmd}`)
     },
   }
@@ -168,7 +172,8 @@ describe.skipIf(!ENABLED)("a duplicate scan the model does not do, on a copy of 
     expect(scan.notDone).toEqual({ reason: "embedding-coverage-low", pages })
     expect(record.duplicateScanNotDone).toEqual({ reason: "embedding-coverage-low", pages })
     expect(record.error).toBeUndefined()
-    // Only the same-slug groups (#109), which need no model.
+    // Only the same-slug groups (#109), found from file names; their
+    // judge's calls are refused here (#135), so they stay medium.
     expect(report.groupConfidences).toEqual(["medium"])
     expect(measured.modelCalls).toBe(0)
   }, 30 * 60 * 1000)

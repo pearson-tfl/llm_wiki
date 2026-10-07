@@ -156,7 +156,8 @@ export async function runMaintenanceTick(
         }
         const canonical = await chooseCanonicalSlug(pp, group)
         // A slug naming two pages fails every retry of the merge, so the
-        // group is left for a decision by hand (#114).
+        // group is kept (#114). The scan's judge settles such groups (#135):
+        // one still here had its judge call fail, and the next run asks again.
         if (canonical === null) continue
         const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
         enqueued.push(group)
