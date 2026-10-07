@@ -43,9 +43,11 @@ EOF
   done
 }
 
+# Runs check.sh failing on step $1, if given; any further arguments are
+# extra NAME=value settings for its environment.
 run() {
   env -i HOME="$case_dir/home" HOMEBREW_PREFIX="$case_dir/brew" FAIL_ON="${1:-}" \
-    PATH="$stubs:/usr/bin:/bin" bash "$repo/scripts/estate/check.sh" \
+    "${@:2}" PATH="$stubs:/usr/bin:/bin" bash "$repo/scripts/estate/check.sh" \
     > "$case_dir/out.log" 2>&1
 }
 
@@ -118,5 +120,26 @@ printf '#!/bin/sh\nnode\necho "npm $*" >> "%s/calls.log"\n' "$case_dir" > "$stub
 run || fail "node-order: exited non-zero: $(cat "$case_dir/out.log")"
 grep -q '^brew-node' "$case_dir/calls.log" && fail "node-order: Homebrew's node ran ahead of the caller's"
 grep -q '^node' "$case_dir/calls.log" || fail "node-order: the caller's node did not run"
+
+# cargo builds in the shared target folder on this Mac, unless the caller
+# names its own. The stub cargo records the target it was given.
+shared_target=/Users/johnp/Code/llm_wiki-worktrees/.cargo-target
+stub_cargo_target() {
+  printf '#!/bin/sh\necho "$CARGO_TARGET_DIR" > "%s/target.log"\n' "$case_dir" \
+    > "$stubs/cargo"
+}
+
+setup target-shared "${all_tools[@]}"
+stub_cargo_target
+run || fail "target-shared: exited non-zero: $(cat "$case_dir/out.log")"
+[ "$(cat "$case_dir/target.log")" = "$shared_target" ] \
+  || fail "target-shared: cargo's target was '$(cat "$case_dir/target.log")'"
+
+setup target-caller "${all_tools[@]}"
+stub_cargo_target
+run "" CARGO_TARGET_DIR="$case_dir/own-target" \
+  || fail "target-caller: exited non-zero: $(cat "$case_dir/out.log")"
+[ "$(cat "$case_dir/target.log")" = "$case_dir/own-target" ] \
+  || fail "target-caller: cargo's target was '$(cat "$case_dir/target.log")'"
 
 if [ "$failures" -eq 0 ]; then echo "check.test.sh: all passed"; else exit 1; fi

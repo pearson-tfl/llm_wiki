@@ -9,6 +9,12 @@ set -euo pipefail
 # its node does not displace the caller's.
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH:${HOMEBREW_PREFIX:-/opt/homebrew}/bin"
 
+# Every lane and trial on this Mac builds Rust in one shared folder: a
+# per-tree src-tauri/target is about 12 GB, and they filled the disk (#99).
+# A caller's CARGO_TARGET_DIR wins; the Estate check workflow sets its own.
+shared_target=/Users/johnp/Code/llm_wiki-worktrees/.cargo-target
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$shared_target}"
+
 for tool in node cargo protoc; do
   command -v "$tool" > /dev/null || { echo "check.sh: $tool not found on PATH" >&2; exit 1; }
 done

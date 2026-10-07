@@ -490,7 +490,8 @@ Keep this list current. Merge conflicts can only come from these files.
   lane is not refused; with `--tools ""` the fence never fires. Re-check
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
-  script and its tests (pearson-tfl/llm_wiki#88); see Build below.
+  script and its tests (pearson-tfl/llm_wiki#88), building Rust in the
+  shared target folder (#99); see Build below.
 - `src/lib/llm-client.real-llm.test.ts`, `src/lib/embedding.real-llm.test.ts`
   – `npm run test:llm` passes, so the check runs it
   (pearson-tfl/llm_wiki#89). The three fake-Ollama tests expect
@@ -514,9 +515,10 @@ Keep this list current. Merge conflicts can only come from these files.
   `check.sh` runs it first. See Build below.
 - `.github/workflows/estate-check.yml` – runs `check.sh` on each push to
   `estate` (pearson-tfl/llm_wiki#88), on a checkout with full history, which
-  `change_list.py` needs (#91). A file of its own, not an edit to
-  upstream's `ci.yml`, which runs only for `main`; it conflicts only if
-  upstream adds a workflow of the same name.
+  `change_list.py` needs (#91), building Rust in the checkout's own
+  `src-tauri/target`, which its Rust cache saves (#99). A file of its own,
+  not an edit to upstream's `ci.yml`, which runs only for `main`; it
+  conflicts only if upstream adds a workflow of the same name.
 - `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
   Wiki's 68 `learn-agent-arch-ext-*` sources to their titles
   (pearson-tfl/llm_wiki#3): the fixed old-to-new list, the script, its
@@ -580,6 +582,13 @@ success prints the commit it checked. In a fresh worktree on this Mac the
 first run takes about 4 minutes, 3 of them `cargo test` compiling the app;
 later runs are faster. Tests: `scripts/estate/check.test.sh`, and for
 `change_list.py`, `python3 scripts/estate/test_change_list.py`.
+
+`cargo test` builds in one folder shared by every lane and trial on this Mac,
+`/Users/johnp/Code/llm_wiki-worktrees/.cargo-target`, not in the tree's own
+`src-tauri/target`: each tree's own target grew to about 12 GB, and on 7 Oct
+2026 they filled the Mac's disk (#99). A `CARGO_TARGET_DIR` the caller sets
+wins. Two checks at once share the folder, and cargo makes one wait while the
+other builds. Deleting the folder frees the space; the next check rebuilds it.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
