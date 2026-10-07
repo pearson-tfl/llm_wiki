@@ -16,7 +16,7 @@ import {
 import { reembedWikiPages, removeWikiPageEmbeddings } from "@/lib/embedding-freshness"
 import { loadEmbeddingConfig } from "@/lib/project-store"
 import { normalizePath } from "@/lib/path-utils"
-import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 
 /**
@@ -84,7 +84,9 @@ import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
  * (#29): a reply cut off at the cap is rejected, and a reply whose
  * signal fired throws, since the client ends a cancelled request as
  * done with whatever text had arrived. Detection refuses a cut-off reply
- * too, as unreadable (#108): its groups may be missing.
+ * too, as unreadable (#108): its groups may be missing. A detection call
+ * that fails throws DetectorCallFailedError, so the scan reports its batch
+ * as failed (#118); a cancelled one throws the client's error.
  */
 export function buildDedupLlmCall(
   llmConfig: LlmConfig,
@@ -128,11 +130,12 @@ export function buildDedupLlmCall(
     if (options.completeReplyOnly && signal?.aborted) {
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
-    if (streamError) {
+    const failure: Error | null = streamError
+    if (failure) {
       // A detection call that fails is its batch's failure, not the scan's
       // (#118); a cancelled one still cancels the scan.
-      if (options.completeReplyOnly || signal?.aborted) throw streamError
-      throw new DetectorCallFailedError((streamError as Error).message)
+      if (options.completeReplyOnly || signal?.aborted) throw failure
+      throw new DetectorCallFailedError(failure.message)
     }
     if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
@@ -212,7 +215,8 @@ export async function loadAllWikiPages(
   return out
 }
 
-/** A detector call whose reply could not be read: its pages went unchecked. */
+/** A detector batch that failed: its reply could not be read (#108) or its
+ *  call failed (#118). Its pages went unchecked. */
 export interface FailedDetectorBatch {
   pages: number
   reason: string
@@ -274,7 +278,12 @@ async function detectWithModel(
     // detector call that fails is its batch's failure (#118).
     let pairs: CandidatePair[] | undefined
     try {
-      pairs = await embeddingCandidatePairs(summaries, embeddingConfig, options.signal)
+      pairs = await candidatePairs(summaries.map(summaryToEmbeddingPage), embeddingConfig, {
+        topK: DEDUP_PREFILTER_TOP_K,
+        threshold: DEDUP_PREFILTER_THRESHOLD,
+        maxPages: DEDUP_PREFILTER_MAX_PAGES,
+        signal: options.signal,
+      })
     } catch (err) {
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
@@ -345,19 +354,6 @@ async function detectInBatches(
     }
   }
   return { groups: uniqueDuplicateGroups(groups), failedBatches }
-}
-
-function embeddingCandidatePairs(
-  summaries: EntitySummary[],
-  embeddingConfig: EmbeddingConfig,
-  signal: AbortSignal | undefined,
-): Promise<CandidatePair[]> {
-  return candidatePairs(summaries.map(summaryToEmbeddingPage), embeddingConfig, {
-    topK: DEDUP_PREFILTER_TOP_K,
-    threshold: DEDUP_PREFILTER_THRESHOLD,
-    maxPages: DEDUP_PREFILTER_MAX_PAGES,
-    signal,
-  })
 }
 
 async function detectAmongCandidatePairs(

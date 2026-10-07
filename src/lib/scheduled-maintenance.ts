@@ -66,8 +66,9 @@ export interface MaintenanceRunRecord {
    *  page changed (#24). */
   mergesRejected?: number
   rejectedMerges?: { slugs: string[]; reason: string }[]
-  /** Detector calls whose reply could not be read, so their pages went
-   *  unchecked (#108); absent when every call was read. */
+  /** Detector batches that failed, their reply unreadable (#108) or their
+   *  call failed (#118), so their pages went unchecked; absent when every
+   *  batch was checked. */
   failedDetectorBatches?: FailedDetectorBatch[]
   /** Why the model checked none of a large wiki's pages (#112); absent
    *  when it ran. */

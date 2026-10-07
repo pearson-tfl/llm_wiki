@@ -349,7 +349,10 @@ Keep this list current. Merge conflicts can only come from these files.
   The scan reports its batch as a failed batch with that reason, as an
   unreadable reply has been since #108. The other batches' groups stand,
   and the scheduled run records the batch in `failedDetectorBatches`. A
-  cancelled call still cancels the scan. Only the prefilter's own failure
+  cancelled call still cancels the scan. This holds on every detection
+  path, the unprefiltered scan of a small wiki included, so a scan whose
+  every call fails, as with a wrong key, ends as failed batches rather than
+  as an error in the run record or a toast. Only the prefilter's own failure
   reaches the full-scan fallback and its log line. The Maintenance
   screen's failed-batch notice says the batches failed, not that they
   could not be read, in each locale; the reason after it says which.

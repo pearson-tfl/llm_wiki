@@ -13,7 +13,7 @@
  * are copied to a fresh project, so the vault copy is only read.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT, EMBEDDING_MODEL and
- * DEDUP_VAULT_COPY. Writes its measurements to `<DEDUP_REPORT>.model-error.json`
+ * DEDUP_VAULT_COPY; DEDUP_PAGES sets the page count. Writes its measurements to `<DEDUP_REPORT>.model-error.json`
  * when DEDUP_REPORT is set.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
@@ -105,7 +105,7 @@ function answer(request: http.IncomingMessage, response: http.ServerResponse) {
     try {
       prompt = JSON.parse(body).messages.map((m: { content: unknown }) => JSON.stringify(m.content)).join("\n")
     } catch {
-      // Not a model call: once, a bare GET / reached the port from outside the test.
+      // Not a model call: refused.
       console.error(`[llmw118] refused ${request.method} ${request.url}, not a model call`)
       response.writeHead(400).end()
       return
@@ -196,20 +196,26 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
         embeddingConfig: { ...embedding, enabled: false },
       })
       const warn = vi.spyOn(console, "warn")
+      let warnings: string[] = []
 
       calls.length = 0
       scanStart = 0
-      const scan = await runDuplicateDetection(project.path, llmConfig())
-      const scanCalls = [...calls]
-      scanStart = calls.length
-      await runMaintenanceTick(projectRef, { now: () => Date.now() })
+      let scan: Awaited<ReturnType<typeof runDuplicateDetection>>
+      let scanCalls: ModelCall[]
+      try {
+        scan = await runDuplicateDetection(project.path, llmConfig())
+        scanCalls = [...calls]
+        scanStart = calls.length
+        await runMaintenanceTick(projectRef, { now: () => Date.now() })
+      } finally {
+        warnings = warn.mock.calls.map((args) => String(args[0]))
+        warn.mockRestore()
+      }
       const tickCalls = calls.slice(scanStart)
       const lines = (await fs.readFile(path.join(project.path, ".llm-wiki/maintenance-runs.jsonl"), "utf8"))
         .split("\n")
         .filter(Boolean)
       const record = JSON.parse(lines[lines.length - 1])
-      const warnings = warn.mock.calls.map((args) => String(args[0]))
-      warn.mockRestore()
 
       const report = {
         pages: chosen.length,

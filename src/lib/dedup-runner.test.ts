@@ -373,8 +373,12 @@ describe("runDuplicateDetection embedding prefilter", () => {
       cb.onDone()
     })
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let logged: string[] = []
 
-    const result = await runDuplicateDetection("/project", cfg)
+    const result = await runDuplicateDetection("/project", cfg).finally(() => {
+      logged = warn.mock.calls.map((args) => String(args[0]))
+      warn.mockRestore()
+    })
 
     expect(detectorCallSlugs()).toHaveLength(3)
     expect(result.groups.map((g) => g.slugs)).toEqual([["p0", "p1"], ["p160", "p161"]])
@@ -382,10 +386,8 @@ describe("runDuplicateDetection embedding prefilter", () => {
       { pages: 80, reason: "Duplicate detector call failed: HTTP 429: rate limited" },
     ])
     expect(result.notDone).toBeUndefined()
-    const logged = warn.mock.calls.map((args) => String(args[0]))
     expect(logged.some((line) => /embedding prefilter/.test(line))).toBe(false)
     expect(logged.some((line) => /detector call failed/.test(line))).toBe(true)
-    warn.mockRestore()
   })
 
   it("propagates cancellation from a detector call instead of recording a failed batch (#118)", async () => {
