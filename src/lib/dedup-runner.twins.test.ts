@@ -98,6 +98,22 @@ describe("executeMerge – pages sharing a slug (#109)", () => {
     expect(await readFileRaw(at("wiki/index.md"))).toBe(INDEX.replace("- [Agent Skills](concepts/agent-skills.md)\n", ""))
   })
 
+  it("sends bare links to a page merged across two slugs to the kept page, and drops its bare index line (#139)", async () => {
+    const echoLinker = page("entity", ["echo-loop"], "# Hermes\n\nRuns an [[echo-loop]] beside [[agent-skills]].")
+    await writeFileRaw(at("wiki/entities/hermes.md"), echoLinker)
+    await writeFileRaw(at("wiki/index.md"), `${INDEX}- [[echo-loop]]\n`)
+    const judged = { slugs: ["concepts/agent-skills", "entities/echo-loop"], reason: "Judged one topic", confidence: "high" as const }
+
+    const result = await executeMerge(tmp.path, judged, "concepts/agent-skills", llmConfig)
+
+    expect(result.pagesToDelete).toEqual(["wiki/entities/echo-loop.md"])
+    expect(await readFileRaw(at("wiki/entities/hermes.md"))).toBe(
+      page("entity", ['"concepts/agent-skills"'], "# Hermes\n\nRuns an [[concepts/agent-skills]] beside [[agent-skills]]."),
+    )
+    expect(await readFileRaw(at("wiki/entities/claude-code.md"))).toBe(LINKER)
+    expect(await readFileRaw(at("wiki/index.md"))).toBe(INDEX)
+  })
+
   it("refuses a group that names one page twice, before any model call or write", async () => {
     const twice = { slugs: ["echo-loop", "echo-loop"], reason: "same page twice", confidence: "high" as const }
 

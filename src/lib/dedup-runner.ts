@@ -66,6 +66,7 @@ import {
   extractEntitySummary,
   judgeSharedSlugPages,
   mergeDuplicateGroup,
+  mergedAwayNames,
   MergeReplyRejectedError,
   pagesNamed,
   rewriteIndexMd,
@@ -710,9 +711,7 @@ export async function executeMerge(
   const indexPath = `${pp}/wiki/index.md`
   const indexEntry = allPages.find((p) => p.path === "wiki/index.md")
   if (indexEntry) {
-    const removed = new Set(
-      groupPages.map((p) => p.slug).filter((s) => s !== canonicalSlug),
-    )
+    const removed = new Set(mergedAwayNames(groupPages, canonicalSlug, otherPages))
     const rewritten = rewriteIndexMd(indexEntry.content, removed)
     if (rewritten !== indexEntry.content) {
       await writeFile(indexPath, rewritten)

@@ -626,10 +626,8 @@ export async function mergeDuplicateGroup(
   //    a non-canonical slug needs its wikilinks / related entries
   //    rewritten to the canonical.
   const slugRedirects = new Map<string, string>()
-  for (const page of req.group) {
-    if (page.slug !== req.canonicalSlug) {
-      slugRedirects.set(page.slug, req.canonicalSlug)
-    }
+  for (const name of mergedAwayNames(req.group, req.canonicalSlug, req.otherWikiPages)) {
+    slugRedirects.set(name, req.canonicalSlug)
   }
   const rewrites: MergeResult["rewrites"] = []
   for (const page of req.otherWikiPages) {
@@ -661,6 +659,29 @@ export async function mergeDuplicateGroup(
     pagesToDelete,
     backup,
   }
+}
+
+/**
+ * The names a merge sends to the canonical page: each merged-away page's
+ * name in the group, and its bare slug where no page left after the merge
+ * carries that slug, so a bare link to a page the group named by page id
+ * does not dangle (#139).
+ */
+export function mergedAwayNames(
+  group: { slug: string; path: string }[],
+  canonicalSlug: string,
+  otherWikiPages: { path: string }[],
+): string[] {
+  const mergedAway = group.filter((p) => p.slug !== canonicalSlug)
+  const left = new Set(
+    [...group.filter((p) => p.slug === canonicalSlug), ...otherWikiPages].map((p) => slugFromPath(p.path)),
+  )
+  const names = mergedAway.map((p) => p.slug)
+  for (const page of mergedAway) {
+    const bare = slugFromPath(page.path)
+    if (!left.has(bare) && !names.includes(bare)) names.push(bare)
+  }
+  return names
 }
 
 /**
