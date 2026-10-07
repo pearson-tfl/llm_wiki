@@ -264,7 +264,7 @@ export async function runMaintenanceTick(
   return appendRunRecord(pp, record)
 }
 
-/** Records and returns the reason merges are withheld now, if any. */
+/** Whether merges are withheld now; records the reason on the run if so. */
 async function withholdMerges(pp: string, record: MaintenanceRunRecord): Promise<boolean> {
   const withheld = await mergeBlocker(pp)
   if (withheld) record.skipReason = withheld
