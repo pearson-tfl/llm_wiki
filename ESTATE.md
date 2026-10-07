@@ -491,8 +491,8 @@ Keep this list current. Merge conflicts can only come from these files.
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
   script and its tests (pearson-tfl/llm_wiki#88), building Rust in the
-  shared target folder (#99) and naming its checkout to cargo (#104); see
-  Build below.
+  shared target folder (#99), naming its checkout to cargo (#104) and
+  locking the folder for `cargo test` (#106); see Build below.
 - `src-tauri/build.rs` – one line and its comment ahead of upstream's: cargo
   reruns the build script, and so rebuilds the app crate, whenever
   `LLM_WIKI_CHECKOUT` differs from its last build's
@@ -595,8 +595,8 @@ own crate; with the shared target folder below empty, about 4 minutes. Tests:
 `src-tauri/target`: each tree's own target grew to about 12 GB, and on 7 Oct
 2026 they filled the Mac's disk (#99). A `CARGO_TARGET_DIR` the caller sets
 wins. Trees share the folder's compiled dependencies; a check in another tree
-recompiles only the app's own crate, and while one check builds, cargo makes
-another wait. Deleting the folder frees the space; the next check rebuilds it.
+recompiles only the app's own crate. Deleting the folder frees the space; the
+next check rebuilds it.
 
 Every tree's app crate has the same file names in the shared folder, and
 cargo judges a build fresh by file times, so a tree whose files are all older
@@ -607,10 +607,20 @@ config files by absolute path, which differs per tree. Neither is a
 guarantee, so `check.sh` sets `LLM_WIKI_CHECKOUT` to the checkout's own
 root, and `src-tauri/build.rs` makes cargo rebuild the app crate whenever
 that value differs from the last build's. Cargo compares the value itself,
-not file times, so this holds when two checks wait on each other too. It
-costs nothing extra: the side effects already rebuild the app crate. A plain
-`cargo` run, with the variable unset, rebuilds the app crate once after a
-check, and the next check rebuilds it once again.
+not file times. It costs nothing extra: the side effects already rebuild the
+app crate. A plain `cargo` run, with the variable unset, rebuilds the app
+crate once after a check, and the next check rebuilds it once again.
+
+Cargo locks the folder only while it compiles, not while the tests run, and
+every tree's test programs have the same names there. So a second check
+could rebuild them between the first check's library tests and its app
+tests, and the first check would then report the other tree's results. A
+live run on 7 Oct 2026 did just that (#106). So `check.sh` runs `cargo test`
+under a lock of its own, `.estate-check.lock` in the target folder, held
+until the tests end: a second check on the same folder waits for it, with
+no message, for as long as the first check's `cargo test` takes, so a hung
+`cargo test` holds every later check until it is stopped. A plain `cargo`
+run takes no part in this lock.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's

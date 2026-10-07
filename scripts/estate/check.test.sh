@@ -44,10 +44,12 @@ EOF
 }
 
 # Runs check.sh failing on step $1, if given; any further arguments are
-# extra NAME=value settings for its environment.
+# extra NAME=value settings for its environment. cargo's target is the case's
+# own folder unless they name another, so no case locks the shared one.
 run() {
   env -i HOME="$case_dir/home" HOMEBREW_PREFIX="$case_dir/brew" FAIL_ON="${1:-}" \
-    "${@:2}" PATH="$stubs:/usr/bin:/bin" bash "$repo/scripts/estate/check.sh" \
+    CARGO_TARGET_DIR="$case_dir/target" "${@:2}" PATH="$stubs:/usr/bin:/bin" \
+    bash "$repo/scripts/estate/check.sh" \
     > "$case_dir/out.log" 2>&1
 }
 
@@ -129,9 +131,12 @@ stub_cargo_target() {
     > "$stubs/cargo"
 }
 
-setup target-shared "${all_tools[@]}"
+# Stub mkdir and lockf, which runs its command, keep the real folder untouched.
+setup target-shared "${all_tools[@]}" mkdir
 stub_cargo_target
-run || fail "target-shared: exited non-zero: $(cat "$case_dir/out.log")"
+printf '#!/bin/sh\nshift 2\nexec "$@"\n' > "$stubs/lockf"
+chmod +x "$stubs/lockf"
+run "" CARGO_TARGET_DIR= || fail "target-shared: exited non-zero: $(cat "$case_dir/out.log")"
 [ "$(cat "$case_dir/target.log")" = "$shared_target" ] \
   || fail "target-shared: cargo's target was '$(cat "$case_dir/target.log")'"
 
@@ -158,5 +163,24 @@ run "" LLM_WIKI_CHECKOUT=/elsewhere \
 grep -q '^ *println!("cargo:rerun-if-env-changed=LLM_WIKI_CHECKOUT");' \
   "$here/../../src-tauri/build.rs" \
   || fail "build.rs: no rerun-if-env-changed=LLM_WIKI_CHECKOUT"
+
+# cargo test runs holding a lock in its target folder, so another check on
+# that folder waits until this check's tests end, not only its compiling, and
+# a check on another folder does not wait (#106). The stub cargo tries both
+# locks: lockf -t 0 exits 75 when another process holds the lock.
+setup lock-held "${all_tools[@]}"
+mkdir "$case_dir/other"
+cat > "$stubs/cargo" <<EOF
+#!/bin/sh
+lockf -k -s -t 0 "\$CARGO_TARGET_DIR/.estate-check.lock" true
+echo "own \$?" > "$case_dir/lock.log"
+lockf -k -s -t 0 "$case_dir/other/.estate-check.lock" true
+echo "other \$?" >> "$case_dir/lock.log"
+EOF
+run || fail "lock-held: exited non-zero: $(cat "$case_dir/out.log")"
+[ "$(cat "$case_dir/lock.log")" = "$(printf 'own 75\nother 0')" ] \
+  || fail "lock-held: locks during cargo test were: $(cat "$case_dir/lock.log")"
+lockf -k -s -t 0 "$case_dir/target/.estate-check.lock" true \
+  || fail "lock-held: the lock cannot be taken after the check"
 
 if [ "$failures" -eq 0 ]; then echo "check.test.sh: all passed"; else exit 1; fi
