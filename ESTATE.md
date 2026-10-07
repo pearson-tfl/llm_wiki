@@ -437,11 +437,13 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/components/settings/sections/maintenance-section.tsx` – the
   duplicate scan's pairwise compare keeps the app responsive and can be
   cancelled (pearson-tfl/llm_wiki#122). It ran in one go on the app's
-  main thread, so the app froze for the whole compare, about 10 seconds on
-  John's vault, and nothing could stop it. It now hands the thread back
-  every 25 ms and checks for a cancel each time. Each page's vector length
-  is worked out once and each pair scored once, where every pair was
-  scored from both sides; the pairs found are the same, in the same order.
+  main thread, so the app froze for the whole compare, and nothing could
+  stop it. It now hands the thread back every 25 ms and checks for a
+  cancel each time. Each page's vector length is worked out once and each
+  pair scored once, where every pair was scored from both sides; the pairs
+  found are the same, in the same order. On a copy of John's vault (2,406
+  pages) on the Dell the compare took 5.9 seconds, the app never waiting
+  more than 34 ms, where before it froze the app for 12.8 seconds.
   The Maintenance screen's scan has a Cancel button: a cancelled scan
   shows no result and no error. The scheduled run's scan still cannot be
   cancelled. Upstream edits to the compare or the scan button need
