@@ -18,6 +18,7 @@ npm ci
 npm --prefix mcp-server ci
 npm run typecheck
 npm run test:mocks
+npm run test:llm
 npm run mcp:build
 (cd src-tauri && cargo test)
 

@@ -308,7 +308,11 @@ async function startFakeEmbeddingServer(
   }
 }
 
-describe("fetchEmbedding against a fake small-context server (real TCP)", () => {
+// Skipped (pearson-tfl/llm_wiki#89): upstream 6cffec9 moved the halve-and-
+// retry loop into Rust (`fetch_embedding_with_retry` in
+// src-tauri/src/commands/search.rs). `fetchEmbedding` is now one Tauri
+// invoke, mocked in this file, so no request reaches the fake server.
+describe.skip("fetchEmbedding against a fake small-context server (real TCP) – skipped, pearson-tfl/llm_wiki#89", () => {
   it("halves an oversize input and eventually succeeds", async () => {
     const server = await startFakeEmbeddingServer(/* maxInputChars */ 200)
     try {

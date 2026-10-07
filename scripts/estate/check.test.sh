@@ -47,6 +47,7 @@ steps=(
   "npm --prefix mcp-server ci"
   "npm run typecheck"
   "npm run test:mocks"
+  "npm run test:llm"
   "npm run mcp:build"
   "cargo test"
 )
@@ -70,6 +71,7 @@ expected_calls="npm ci in repo
 npm --prefix mcp-server ci in repo
 npm run typecheck in repo
 npm run test:mocks in repo
+npm run test:llm in repo
 npm run mcp:build in repo
 cargo test in src-tauri"
 [ "$(grep -E '^(npm|cargo) ' "$case_dir/calls.log")" = "$expected_calls" ] \

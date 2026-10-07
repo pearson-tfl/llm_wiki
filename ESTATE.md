@@ -489,6 +489,16 @@ Keep this list current. Merge conflicts can only come from these files.
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
   script and its tests (pearson-tfl/llm_wiki#88); see Build below.
+- `src/lib/llm-client.real-llm.test.ts`, `src/lib/embedding.real-llm.test.ts`
+  – `npm run test:llm` passes, so the check runs it
+  (pearson-tfl/llm_wiki#89). The three fake-Ollama tests expect
+  `Origin: http://localhost`, which the app has sent since upstream v0.4.3;
+  they still expected the server's own address. The three fake-server
+  embedding halving tests are skipped, naming #89: upstream moved the
+  halve-and-retry loop into Rust (`fetch_embedding_with_retry` in
+  `src-tauri/src/commands/search.rs`), out of reach of a Node test. At an
+  upstream merge that touches either file, keep these two changes unless
+  upstream made the same fix.
 - `.github/workflows/estate-check.yml` – runs `check.sh` on each push to
   `estate` (pearson-tfl/llm_wiki#88). A file of its own, not an edit to
   upstream's `ci.yml`, which runs only for `main`; it conflicts only if
@@ -544,11 +554,11 @@ scripts/estate/check.sh
 
 It checks the checkout it lives in, with the same PATH set-up and missing
 tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
-then `npm run typecheck`, `npm run test:mocks`, `npm run mcp:build` and
-`cargo test` in `src-tauri`; it stops at the first failure with a non-zero
-exit, and on success prints the commit it checked. In a fresh worktree on
-this Mac the first run takes about 4 minutes, 3 of them `cargo test`
-compiling the app; later runs are faster. Tests:
+then `npm run typecheck`, `npm run test:mocks`, `npm run test:llm`,
+`npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first
+failure with a non-zero exit, and on success prints the commit it checked.
+In a fresh worktree on this Mac the first run takes about 4 minutes, 3 of
+them `cargo test` compiling the app; later runs are faster. Tests:
 `scripts/estate/check.test.sh`.
 
 The Estate check workflow (`.github/workflows/estate-check.yml`) runs the
