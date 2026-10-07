@@ -85,6 +85,7 @@ import {
   addNotDuplicate,
   loadPendingDuplicateGroups,
   removePendingDuplicateGroup,
+  savePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import {
   loadScheduledMaintenanceConfig,
@@ -434,6 +435,40 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
       groupsFound: { high: 0, medium: 0, low: 0 },
       duplicateScanNotDone: notDone,
     })
+  })
+
+  it.each([
+    ["embedding-coverage-low"],
+    ["no-candidate-pairs"],
+  ] as const)("keeps the groups an earlier run saved when the scan is not done, %s, adding its same-slug groups (#117)", async (reason) => {
+    await setConfig(null)
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    const sameSlug = group(["concepts/seat", "entities/seat"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound, sameSlug])
+    // Found again, so its fresh copy replaces the saved one rather than
+    // standing beside it.
+    const sameSlugAgain = { ...sameSlug, slugs: ["entities/seat", "concepts/seat"], reason: "fresh" }
+    const newSameSlug = group(["concepts/lane", "entities/lane"], "medium")
+    mockDetect.mockResolvedValue({
+      groups: [sameSlugAgain, newSameSlug],
+      failedBatches: [],
+      notDone: { reason, pages: 251 },
+    })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, sameSlugAgain, newSameSlug])
+  })
+
+  it("replaces the groups an earlier run saved when the scan is done", async () => {
+    await setConfig(null)
+    await savePendingDuplicateGroups(tmp.path, [group(["pstack", "p-stack"], "medium")])
+    const found = group(["seat", "lane"], "low")
+    mockDetect.mockResolvedValue({ groups: [found], failedBatches: [] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([found])
   })
 
   it("never enqueues a high-confidence group holding a pair marked not duplicates", async () => {

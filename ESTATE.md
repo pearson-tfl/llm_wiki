@@ -363,6 +363,33 @@ Keep this list current. Merge conflicts can only come from these files.
   scan and scheduled run of a vault copy, with real embeddings and an
   endpoint that fails two calls, in
   `src/lib/dedup-scan-model-error.real-llm.test.ts`.
+- `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – a
+  scheduled run whose duplicate scan is not done keeps the groups an
+  earlier run saved for the Maintenance screen (pearson-tfl/llm_wiki#117).
+  Before, it replaced them with the same-slug groups it found, so a night
+  with the embedding server down lost every group the model had found for
+  a decision by hand. It now adds its groups to the saved ones, a saved
+  group with the same pages giving way to the fresh copy; a scan that is
+  done still replaces the list. The run's addition and the Maintenance
+  screen's drop of a group it acted on run one at a time, so neither undoes
+  the other's write.
+  Upstream edits to how the scheduled run saves its groups need
+  re-checking against this.
+  Tests in `src/lib/scheduled-maintenance.test.ts` and
+  `src/lib/dedup-storage.test.ts`; a live run of a vault
+  copy with the embedding server unreachable in
+  `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup_embedding.ts`, `src/lib/dedup-runner.ts` – the duplicate
+  scan's embedding prefilter takes every page
+  (pearson-tfl/llm_wiki#116). Upstream cut it to the first 5,000 entity
+  and concept pages, with only a console warning, so a larger wiki's later
+  pages were never checked and the scan could still call it clean. The
+  `maxPages` option and the runner's cap are gone. The pairwise compare
+  grows with the square of the page count and does not yield: for 5,000
+  pages the compare alone took about 42 seconds on the Dell. Upstream
+  edits that bound the prefilter again need re-checking against this.
+  Test in `src/lib/__tests__/dedup_embedding.test.ts`; a live scan of a
+  vault copy in `src/lib/dedup-prefilter-coverage.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
