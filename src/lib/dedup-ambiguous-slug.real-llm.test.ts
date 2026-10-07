@@ -55,7 +55,10 @@ const storage = vi.hoisted(() => new Map<string, unknown>())
 const measured = vi.hoisted(() => ({
   scans: [] as DuplicateGroup[][],
   merges: [] as { slugs: string[]; canonical: string; outcome: string }[],
-  judgeCalls: [] as { pages: string[]; reply: string }[],
+  judgeCalls: [] as { pages: string[]; reply: string; inScan: boolean }[],
+  // A judge call made while a scan runs is #135's; one after it, the
+  // scheduled run's judge before a high-confidence merge (#145).
+  scanning: false,
 }))
 
 vi.mock("@/commands/fs", () => realFs)
@@ -80,9 +83,14 @@ vi.mock("@/lib/dedup-runner", async (importOriginal) => {
   return {
     ...actual,
     runDuplicateDetection: async (...args: Parameters<typeof actual.runDuplicateDetection>) => {
-      const scan = await actual.runDuplicateDetection(...args)
-      measured.scans.push(scan.groups)
-      return scan
+      measured.scanning = true
+      try {
+        const scan = await actual.runDuplicateDetection(...args)
+        measured.scans.push(scan.groups)
+        return scan
+      } finally {
+        measured.scanning = false
+      }
     },
     executeMerge: async (...args: Parameters<typeof actual.executeMerge>) => {
       const entry = { slugs: args[1].slugs, canonical: args[2], outcome: "" }
@@ -148,6 +156,7 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
     measured.judgeCalls.push({
       pages: [...user.matchAll(/^## Page: (.+)$/gm)].map((m) => m[1]),
       reply: String(result?.result ?? ""),
+      inScan: measured.scanning,
     })
   }
   for (const line of lines) listeners.get(`claude-cli:${args.streamId}`)?.({ payload: line })
@@ -286,8 +295,11 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
     for (const slug of PAIRS) expect(pagesNamed(before, slug), slug).toHaveLength(2)
 
     const judgeStart = measured.judgeCalls.length
+    // #135's judge only: the scheduled run's own judge (#145) also asks
+    // about the high-confidence groups the detector finds.
+    const scanJudgeCalls = () => measured.judgeCalls.slice(judgeStart).filter((c) => c.inScan)
     const first = await runMaintenanceTick(project, { now: () => Date.now() })
-    const firstJudgeCalls = measured.judgeCalls.length - judgeStart
+    const firstJudgeCalls = scanJudgeCalls().length
     const afterFirst = await listWikiPages(vault)
     const notDuplicates = await readNotDuplicates(vault)
 
@@ -300,7 +312,7 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       const ids = [`concepts/${slug}`, `entities/${slug}`]
       const merge = measured.merges.find((m) => [...m.slugs].sort().join() === ids.join())
       return {
-        judged: measured.judgeCalls.slice(judgeStart).filter((c) => c.pages.some((p) => p.endsWith(`/${slug}`))),
+        judged: scanJudgeCalls().filter((c) => c.pages.some((p) => p.endsWith(`/${slug}`))),
         merge,
         recordedDistinct: notDuplicates.some((e) => [...e].sort().join() === ids.join()),
         pagesAfterFirstRun: pagesNamed(afterFirst, slug).map((p) => p.path),
@@ -313,7 +325,8 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       firstRun: first,
       secondRun: second,
       judgeCallsFirstRun: firstJudgeCalls,
-      judgeCallsSecondRun: measured.judgeCalls.length - judgeStart - firstJudgeCalls,
+      judgeCallsSecondRun: scanJudgeCalls().length - firstJudgeCalls,
+      highGroupJudgeCalls: measured.judgeCalls.slice(judgeStart).filter((c) => !c.inScan),
       notDuplicates,
       pending,
       queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
