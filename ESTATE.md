@@ -487,6 +487,12 @@ Keep this list current. Merge conflicts can only come from these files.
   is fenced like the lane that starts it, and the same command typed in a
   lane is not refused; with `--tools ""` the fence never fires. Re-check
   the flags here when `build_claude_cli_args` changes. Not part of the app.
+- `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
+  script and its tests (pearson-tfl/llm_wiki#88); see Build below.
+- `.github/workflows/estate-check.yml` – runs `check.sh` on each push to
+  `estate` (pearson-tfl/llm_wiki#88). A file of its own, not an edit to
+  upstream's `ci.yml`, which runs only for `main`; it conflicts only if
+  upstream adds a workflow of the same name.
 - `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
   Wiki's 68 `learn-agent-arch-ext-*` sources to their titles
   (pearson-tfl/llm_wiki#3): the fixed old-to-new list, the script, its
@@ -528,6 +534,27 @@ upstream's README lists (`brew install protobuf`). First build about 10
 minutes, later builds faster. `--bundles app` skips the `.dmg`: making it
 scripts Finder, which can raise a macOS permission dialog.
 
+### Check
+
+Every lane runs the check before its offer, at the head it offers:
+
+```sh
+scripts/estate/check.sh
+```
+
+It checks the checkout it lives in, with the same PATH set-up and missing
+tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
+then `npm run typecheck`, `npm run test:mocks`, `npm run mcp:build` and
+`cargo test` in `src-tauri`; it stops at the first failure with a non-zero
+exit, and on success prints the commit it checked. In a fresh worktree on
+this Mac the first run takes about 4 minutes, 3 of them `cargo test`
+compiling the app; later runs are faster. Tests:
+`scripts/estate/check.test.sh`.
+
+The Estate check workflow (`.github/workflows/estate-check.yml`) runs the
+same script on GitHub on each push to `estate`, so a broken trunk shows on
+the repository's Actions page within minutes of the seat's push.
+
 ## Install
 
 John's yes first; record it on the ticket.
@@ -561,14 +588,9 @@ git diff --name-only main...estate        # files estate changed; compare with t
 git switch main && git merge --ff-only vX.Y.Z && git push origin main
 git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
                                           # in vite.config.ts keep the estate stamp
-npm ci && npm run typecheck && npm run test:mocks
-(cd src-tauri && cargo test --lib -- claude_cli agent::runtime)
+scripts/estate/check.sh                   # the check, as in Build above
 git push origin estate
 ```
-
-In a fresh checkout or worktree, `cargo test` stops in the build script
-until `mcp-server` is installed and built:
-`npm --prefix mcp-server ci && npm run mcp:build`.
 
 Then Build and Install as above. Record the release, the new commit and the
 test result on the ticket.
