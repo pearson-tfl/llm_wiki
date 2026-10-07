@@ -315,6 +315,26 @@ Keep this list current. Merge conflicts can only come from these files.
   Tests in `src/lib/dedup.test.ts`, `src/lib/dedup-runner.test.ts` and
   `src/lib/dedup-runner.twins.test.ts`; a live scan and merge of a vault
   copy in `src/lib/dedup-scan.real-llm.test.ts`.
+- `src/lib/dedup-runner.ts`, `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/maintenance-section.tsx`, the new
+  `src/components/settings/sections/dedup-scan-notices.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – a duplicate scan the model did not do is
+  reported as not done, not clean (pearson-tfl/llm_wiki#112). On a wiki of
+  more than 250 pages, upstream calls no model when the embedding
+  prefilter could not embed enough pages or found no candidate pairs, and
+  returned no groups, so the Maintenance screen called the wiki clean
+  although nothing was checked. The scan result now carries `notDone`, with
+  the reason (`embedding-coverage-low` or `no-candidate-pairs`) and the page
+  count, beside any same-slug groups; the scheduled run records it in
+  `duplicateScanNotDone`; and the Maintenance screen says the scan was not
+  done and why, in each locale, instead of calling the wiki clean. The
+  screen's scan notices moved into `dedup-scan-notices.tsx`.
+  Upstream edits to the prefilter's large-wiki skip or the scan's notices
+  need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts`,
+  `src/lib/scheduled-maintenance.test.ts` and
+  `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
+  scan of a vault copy in `src/lib/dedup-scan-not-done.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

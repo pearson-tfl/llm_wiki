@@ -212,12 +212,26 @@ export interface FailedDetectorBatch {
   reason: string
 }
 
+/** Why the model checked none of a large wiki's pages (#112). */
+export type ScanNotDoneReason = "embedding-coverage-low" | "no-candidate-pairs"
+
+/** A large wiki the model did not check: no group it would find is reported. */
+export interface ScanNotDone {
+  reason: ScanNotDoneReason
+  pages: number
+}
+
 export interface DuplicateScanResult {
   groups: DuplicateGroup[]
   failedBatches: FailedDetectorBatch[]
+  /** Present when the model's check was skipped; absent when it ran. */
+  notDone?: ScanNotDone
 }
 
 const noGroups = (): DuplicateScanResult => ({ groups: [], failedBatches: [] })
+
+const notDoneResult = (reason: ScanNotDoneReason, pages: number): DuplicateScanResult =>
+  ({ ...noGroups(), notDone: { reason, pages } })
 
 /**
  * Stage 1 + 2 from the user's perspective: scan the project for
@@ -264,7 +278,7 @@ async function detectWithModel(
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
         console.warn("[dedup] embedding prefilter coverage too low; skipping full fallback for large wiki:", err)
-        return noGroups()
+        return notDoneResult("embedding-coverage-low", summaries.length)
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
     }
@@ -338,10 +352,11 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
     // Preserve recall for small/medium wikis: a weak or non-multilingual
     // embedder can miss exactly the cross-language aliases the LLM detector
     // is meant to find. For large wikis, the old full scan is what caused
-    // #359 hangs, so no candidates means no detector call.
+    // #359 hangs, so no candidates means no detector call, and the scan
+    // says so rather than reporting the wiki clean (#112).
     return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
       ? detectDuplicateGroupsInBoundedBatches(summaries, llm, options)
-      : noGroups()
+      : notDoneResult("no-candidate-pairs", summaries.length)
   }
 
   const summaryByPath = new Map(summaries.map((s) => [s.path, s]))

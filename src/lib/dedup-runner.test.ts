@@ -384,7 +384,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("short-circuits large wiki scans when the prefilter returns no candidates", async () => {
+  it("reports a large wiki whose prefilter finds no pairs as not done, not clean (#112)", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
@@ -392,12 +392,16 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [],
+      failedBatches: [],
+      notDone: { reason: "no-candidate-pairs", pages: 251 },
+    })
     expect(mockStreamChat).not.toHaveBeenCalled()
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
 
-  it("does not fall back to the full LLM scan for large wikis when embedding coverage is too low", async () => {
+  it("reports a large wiki whose embedding coverage is too low as not done, not clean (#112)", async () => {
     setupLargeProject()
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig()
@@ -405,7 +409,23 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [],
+      failedBatches: [],
+      notDone: { reason: "embedding-coverage-low", pages: 251 },
+    })
+    expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+
+  it("reports a large wiki as checked when its only pairs are marked not duplicates (#112)", async () => {
+    setupLargeProject()
+    mockLoadNotDuplicates.mockResolvedValue([["p0", "p1"]])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([["wiki/entities/p0.md", "wiki/entities/p1.md"]])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toStrictEqual({ groups: [], failedBatches: [] })
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
@@ -511,6 +531,8 @@ describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
 
     expect(mockStreamChat).not.toHaveBeenCalled()
     expect(result.groups).toEqual([TWIN_GROUP])
+    // The model's check is still reported as not done beside them (#112).
+    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
   })
 
   it("leaves out a pair the user marked not duplicates", async () => {

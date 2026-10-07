@@ -946,6 +946,8 @@
           "scanning": "扫描中…",
           "noneFound": "未发现重复分组，wiki 很干净。",
           "batchesFailed": "{{count}} 个检测批次（{{pages}} 个页面）的回复无法读取，这些页面未被检查：{{reason}}",
+          "notDoneCoverageLow": "重复扫描未完成：{{pages}} 个页面中能为预筛选生成嵌入的太少，而这么大的 wiki 没有预筛选就不会扫描。请检查嵌入设置后重新扫描。",
+          "notDoneNoPairs": "重复扫描未完成：嵌入预筛选在 {{pages}} 个页面中未找到候选页面对，而这么大的 wiki 没有候选对就不会扫描，因此可能仍有重复。",
           "candidates": "{{n}} 个候选",
           "canonicalLabel": "保留以下 slug 作为主条目：",
           "mergeButton": "合并到 {{slug}}",
