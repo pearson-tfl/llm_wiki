@@ -335,6 +335,31 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts` and
   `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
   scan of a vault copy in `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/components/settings/sections/dedup-scan-notices.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – a detector call that fails no longer
+  restarts the duplicate scan unprefiltered (pearson-tfl/llm_wiki#118).
+  Upstream caught a network or HTTP error from any detector call, a 429, a
+  5xx or a dropped connection, as if the embedding prefilter had failed:
+  it logged an embedding failure, dropped every group the prefiltered
+  batches had found, and scanned every page again in file order: about 80
+  calls on John's vault, which seldom put real twins in one call. The call
+  now fails with `DetectorCallFailedError`, named "Duplicate detector call
+  failed".
+  The scan reports its batch as a failed batch with that reason, as an
+  unreadable reply has been since #108. The other batches' groups stand,
+  and the scheduled run records the batch in `failedDetectorBatches`. A
+  cancelled call still cancels the scan. Only the prefilter's own failure
+  reaches the full-scan fallback and its log line. The Maintenance
+  screen's failed-batch notice says the batches failed, not that they
+  could not be read, in each locale; the reason after it says which.
+  Upstream edits to the detector's model call or the prefilter's fallback
+  need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts` and
+  `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
+  scan and scheduled run of a vault copy, with real embeddings and an
+  endpoint that fails two calls, in
+  `src/lib/dedup-scan-model-error.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
