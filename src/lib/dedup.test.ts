@@ -341,7 +341,9 @@ describe("rewriteIndexMd", () => {
   })
 
   it("keeps the line of a page whose slug only ends in a merged-away bare slug (#139)", () => {
-    // Line forms from the vault's index and the #109 fixture.
+    // Line forms from the vault's index, where a line reads
+    // `- [[entities/openclaw-boot-md-hook]] — OpenClaw boot-md Bundled Hook (BOOT.md)`,
+    // and the markdown links of the #109 fixture (dedup-runner.twins.test.ts).
     const input = [
       "- [OpenAI Swarm](entities/openai-swarm.md)",
       "- [[entities/openai-swarm]] — OpenAI Swarm (openai-swarm.md)",
