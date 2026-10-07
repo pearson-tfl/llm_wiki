@@ -744,6 +744,7 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
         slugs: TWIN_IDS,
         reason: "Judged one topic: Both describe the Agent Skills standard.",
         confidence: "high",
+        judged: true,
       }],
       failedBatches: [],
     })
@@ -758,7 +759,7 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result.groups).toEqual([{ slugs: TWIN_IDS, reason: "Judged one topic", confidence: "high" }])
+    expect(result.groups).toEqual([{ slugs: TWIN_IDS, reason: "Judged one topic", confidence: "high", judged: true }])
   })
 
   it("gives the judge, on the chat route, each page's path and content", async () => {
@@ -802,7 +803,7 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result.groups).toEqual([
-      { slugs: ["entities/agent-skills", "entities/foo"], reason: "Judged one topic: One tool.", confidence: "high" },
+      { slugs: ["entities/agent-skills", "entities/foo"], reason: "Judged one topic: One tool.", confidence: "high", judged: true },
     ])
     expect(judgeCalls()).toHaveLength(2)
     expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [TWIN_IDS])
@@ -1012,7 +1013,7 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
 
     expect(mockStreamChat.mock.calls.map(([config]) => config.model)).toEqual(["chat-route"])
     expect(result.groups).toEqual([
-      { slugs: TWIN_IDS, reason: "Judged one topic: Same standard.", confidence: "high" },
+      { slugs: TWIN_IDS, reason: "Judged one topic: Same standard.", confidence: "high", judged: true },
     ])
     // The model's check is still reported as not done beside them (#112).
     expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })

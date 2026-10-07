@@ -11,7 +11,14 @@ import {
   saveScheduledMaintenanceConfig,
   type ScheduledMaintenanceConfig,
 } from "@/lib/project-store"
-import { runDuplicateDetection, type FailedDetectorBatch, type ScanNotDone } from "@/lib/dedup-runner"
+import {
+  buildDedupLlmCall,
+  DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP,
+  DEDUP_JUDGE_MAX_TOKENS,
+  runDuplicateDetection,
+  type FailedDetectorBatch,
+  type ScanNotDone,
+} from "@/lib/dedup-runner"
 import { sweepResolvedReviews } from "@/lib/sweep-reviews"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
@@ -23,13 +30,22 @@ import {
   holdsNotDuplicate,
   listWikiPages,
   readNotDuplicates,
+  recordNotDuplicates,
   replacePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { runHubRebuildRequest } from "@/lib/hub-rebuild"
 import { runEmbeddingBackfill, type VectorCoverage } from "@/lib/embedding-freshness"
 import { parseSources } from "@/lib/sources-merge"
-import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
+import {
+  DetectorCallFailedError,
+  DetectorReplyUnreadableError,
+  distinctPairs,
+  judgeDuplicateGroupPages,
+  pageIdFromPath,
+  pagesNamed,
+  type DuplicateGroup,
+} from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { WikiProject } from "@/types/wiki"
 
@@ -147,18 +163,26 @@ export async function runMaintenanceTick(
       const toMerge = groups.filter(
         (g) => g.confidence === "high" && !holdsNotDuplicate(g.slugs, notDuplicates),
       )
+      const judge = highGroupJudge(pp)
       for (const group of toMerge) {
         // The scan took a while: re-read what gates a merge before each one.
-        const withheld = await mergeBlocker(pp)
-        if (withheld) {
-          record.skipReason = withheld
-          break
-        }
+        if (await withholdMerges(pp, record)) break
         const canonical = await chooseCanonicalSlug(pp, group)
         // A slug naming two pages fails every retry of the merge, so the
         // group is kept (#114). The scan's judge settles such groups (#135):
         // one still here had its judge call fail, and the next run asks again.
         if (canonical === null) continue
+        // A group the shared-slug judge confirmed is not judged again (#145).
+        if (!group.judged) {
+          const verdict = await judge(group)
+          if (verdict.failedBatch) {
+            record.failedDetectorBatches = [...record.failedDetectorBatches ?? [], verdict.failedBatch]
+          }
+          if (verdict.demoted) groups[groups.indexOf(group)] = verdict.demoted
+          if (!verdict.oneTopic) continue
+          // The judge's call took a while too.
+          if (await withholdMerges(pp, record)) break
+        }
         const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
         enqueued.push(group)
         taskIds.push(taskId)
@@ -238,6 +262,83 @@ export async function runMaintenanceTick(
   }
   record.finishedAt = new Date(clock.now()).toISOString()
   return appendRunRecord(pp, record)
+}
+
+/** Records and returns the reason merges are withheld now, if any. */
+async function withholdMerges(pp: string, record: MaintenanceRunRecord): Promise<boolean> {
+  const withheld = await mergeBlocker(pp)
+  if (withheld) record.skipReason = withheld
+  return withheld !== null
+}
+
+/** A high group's judgement: whether it merges, and what the run reports. */
+interface HighGroupVerdict {
+  oneTopic: boolean
+  /** The group as saved for the Maintenance screen once judged not one topic. */
+  demoted?: DuplicateGroup
+  failedBatch?: FailedDetectorBatch
+}
+
+/**
+ * The judge the scheduled run asks, on the chat route, before it merges a
+ * high-confidence group with no click (#145). It is given the group's pages
+ * by path with their content, as the shared-slug judge is (#135). Pages it
+ * puts in one group are one topic, and the merge goes ahead. Otherwise
+ * nothing is merged, the group is kept at medium for the Maintenance screen,
+ * and each pair it did not put together is recorded as not duplicates,
+ * named as the group names it, so no later scan raises it. A failed call or
+ * an unreadable reply keeps the group as found and is a failed batch; after
+ * DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP calls in a row fail, each group
+ * left is kept and reported as not checked, with no call (#139).
+ */
+function highGroupJudge(pp: string): (group: DuplicateGroup) => Promise<HighGroupVerdict> {
+  const llm = buildDedupLlmCall(getTaskLlmConfig("chat"), DEDUP_JUDGE_MAX_TOKENS)
+  let callFailuresInARow = 0
+  return async (group) => {
+    const failed = (reason: string): HighGroupVerdict =>
+      ({ oneTopic: false, failedBatch: { pages: group.slugs.length, reason } })
+    if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
+      const reason = `Not checked: the high-group judge stopped after ${callFailuresInARow} calls in a row failed`
+      console.warn(`[dedup] ${reason}: ${group.slugs.join(", ")}`)
+      return failed(reason)
+    }
+    // Each name names at most one page here: chooseCanonicalSlug has refused
+    // the rest. A name with no page is left to the merge, which reports it.
+    const pages = await listWikiPages(pp)
+    const nameOf = new Map<string, string>()
+    for (const name of group.slugs) {
+      const [page] = pagesNamed(pages, name)
+      if (page) nameOf.set(pageIdFromPath(page.path), name)
+    }
+    let topics
+    try {
+      const candidates = await Promise.all([...nameOf.keys()].map(async (pageId) =>
+        ({ pageId, content: await readFile(`${pp}/wiki/${pageId}.md`) })))
+      topics = await judgeDuplicateGroupPages(candidates, llm)
+      callFailuresInARow = 0
+    } catch (err) {
+      if (err instanceof DetectorCallFailedError) callFailuresInARow += 1
+      else if (err instanceof DetectorReplyUnreadableError) callFailuresInARow = 0
+      return failed(`High-group judge: ${errorMessage(err)}`)
+    }
+    const pageIds = [...nameOf.keys()]
+    if (topics.some((t) => t.pages.length === pageIds.length)) return { oneTopic: true }
+    const demoted: DuplicateGroup = { ...group, confidence: "medium" }
+    const distinct = distinctPairs(pageIds, topics).map((pair) => pair.map((id) => nameOf.get(id)!))
+    try {
+      await recordNotDuplicates(pp, distinct)
+    } catch (err) {
+      return {
+        ...failed(`High-group judge: the pages judged distinct could not be recorded: ${errorMessage(err)}`),
+        demoted,
+      }
+    }
+    return { oneTopic: false, demoted }
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 function startBlocker(llmConfig: LlmConfig): MaintenanceSkipReason | null {
