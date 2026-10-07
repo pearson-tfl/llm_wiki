@@ -369,6 +369,24 @@ Keep this list current. Merge conflicts can only come from these files.
   scan and scheduled run of a vault copy, with real embeddings and an
   endpoint that fails two calls, in
   `src/lib/dedup-scan-model-error.real-llm.test.ts`.
+- `src/lib/dedup-runner.ts` – the duplicate scan stops calling the model
+  after two detector calls in a row fail (pearson-tfl/llm_wiki#124). Since
+  #118 a failed call is its batch's failure and the scan carries on, so a
+  hung endpoint waited out the client's 30-minute timeout on every batch
+  left, and a rate-limited one (429) was fired at again at once. The
+  batches left are now reported as failed batches without a call, with
+  the reason "Not checked: the scan stopped after 2 detector calls in a
+  row failed", and the log says how many were left. A reply that arrives
+  but cannot be read (#108) is not a call failure and resets the count,
+  as an answered call does. A cancelled scan still cancels. The scheduled
+  run records the batches in `failedDetectorBatches` and keeps the saved
+  groups, as for any failed batch (#118).
+  Upstream edits to the detector's batch loop need re-checking against
+  this.
+  Tests in `src/lib/dedup-runner.test.ts`; a live scan and scheduled run
+  of a vault copy, with real embeddings and an endpoint that answers 429
+  from the second call on, in
+  `src/lib/dedup-scan-model-error.real-llm.test.ts`.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – a
   scheduled run whose duplicate scan is not done keeps the groups an
   earlier run saved for the Maintenance screen (pearson-tfl/llm_wiki#117).

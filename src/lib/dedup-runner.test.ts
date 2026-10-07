@@ -264,6 +264,17 @@ function detectorCallSlugs(): string[][] {
   )
 }
 
+/** `count` prefilter clusters of 80 pages each, one detector batch apiece. */
+function setupPrefilteredClusters(count: number) {
+  setupLargeProject(count * 80)
+  mockLoadNotDuplicates.mockResolvedValue([])
+  setupEmbeddingConfig()
+  const rel = (i: number) => `wiki/entities/p${i}.md`
+  const starts = Array.from({ length: count }, (_, i) => i * 80)
+  mockCandidatePairs.mockResolvedValue(starts.map((from) => [rel(from), rel(from + 1)]))
+  mockClusterByPairs.mockReturnValue(starts.map((from) => Array.from({ length: 80 }, (_, i) => rel(from + i))))
+}
+
 describe("runDuplicateDetection embedding prefilter", () => {
   it("sends only embedding candidate summaries to the LLM detector", async () => {
     setupThreePageProject()
@@ -388,6 +399,106 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(result.notDone).toBeUndefined()
     expect(logged.some((line) => /embedding prefilter/.test(line))).toBe(false)
     expect(logged.some((line) => /detector call failed/.test(line))).toBe(true)
+  })
+
+  it("stops calling after two detector calls in a row fail, recording the rest as failed (#124)", async () => {
+    setupPrefilteredClusters(5)
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, messages, cb) => {
+      call += 1
+      if (call >= 2) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      const slugs = [...(messages[1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1])
+      cb.onToken(JSON.stringify({
+        groups: [{ slugs: slugs.slice(0, 2), reason: "same topic", confidence: "high" }],
+      }))
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let logged: string[] = []
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => {
+      logged = warn.mock.calls.map((args) => String(args[0]))
+      warn.mockRestore()
+    })
+
+    expect(detectorCallSlugs()).toHaveLength(3)
+    expect(result.groups.map((g) => g.slugs)).toEqual([["p0", "p1"]])
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: rate limited" }
+    const notChecked = {
+      pages: 80,
+      reason: "Not checked: the scan stopped after 2 detector calls in a row failed",
+    }
+    expect(result.failedBatches).toEqual([failed, failed, notChecked, notChecked])
+    expect(logged.some((line) => /stopped after 2 detector calls in a row failed/.test(line))).toBe(true)
+  })
+
+  it("counts only consecutive call failures: an answered call in between resets the count (#124)", async () => {
+    setupPrefilteredClusters(6)
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      call += 1
+      if (call === 1 || call === 3 || call === 5) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      // Calls 2 and 6 answer; call 4's reply cannot be read, which is not a call failure.
+      cb.onToken(call === 4 ? "no JSON here" : '{"groups": []}')
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => warn.mockRestore())
+
+    expect(detectorCallSlugs()).toHaveLength(6)
+    expect(result.failedBatches.map((b) => b.reason)).toEqual([
+      expect.stringMatching(/^Duplicate detector call failed/),
+      expect.stringMatching(/^Duplicate detector call failed/),
+      expect.stringMatching(/could not be read/),
+      expect.stringMatching(/^Duplicate detector call failed/),
+    ])
+  })
+
+  it("stops the unprefiltered scan too after two detector calls in a row fail (#124)", async () => {
+    setupLargeProject(400)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 429: rate limited"))
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => warn.mockRestore())
+
+    expect(mockStreamChat).toHaveBeenCalledTimes(2)
+    expect(result.failedBatches.slice(0, 2).map((b) => b.reason)).toEqual([
+      "Duplicate detector call failed: HTTP 429: rate limited",
+      "Duplicate detector call failed: HTTP 429: rate limited",
+    ])
+    const notChecked = result.failedBatches.slice(2)
+    expect(notChecked.length).toBeGreaterThan(0)
+    for (const batch of notChecked) {
+      expect(batch.reason).toBe("Not checked: the scan stopped after 2 detector calls in a row failed")
+    }
+  })
+
+  it("still cancels when the signal aborts after the second call in a row fails (#124)", async () => {
+    setupPrefilteredClusters(5)
+    const controller = new AbortController()
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 429: rate limited"))
+    })
+    // The user cancels once the second failure is recorded, before the next batch.
+    let failuresLogged = 0
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => {
+      if (/detector call failed/.test(String(line)) && ++failuresLogged === 2) controller.abort()
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }).finally(() => warn.mockRestore()))
+      .rejects.toThrow("Duplicate scan cancelled")
+    expect(mockStreamChat).toHaveBeenCalledTimes(2)
   })
 
   it("propagates cancellation from a detector call instead of recording a failed batch (#118)", async () => {
