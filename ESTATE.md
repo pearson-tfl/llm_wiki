@@ -529,9 +529,10 @@ Keep this list current. Merge conflicts can only come from these files.
   which the next scan that finds it settles. Upstream edits to the scan's
   result or the not-duplicates list need re-checking against this.
   Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup-storage.test.ts`
-  and `src/lib/scheduled-maintenance.test.ts`; a live scheduled run of the
-  vault's `agent-skills` and `openclaw-code-mode` pairs and a built
-  distinct pair in `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
+  and `src/lib/scheduled-maintenance.test.ts`; a live Maintenance-screen
+  scan and scheduled run of the vault's `agent-skills` and
+  `openclaw-code-mode` pairs and a built distinct pair in
+  `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
