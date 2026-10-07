@@ -115,6 +115,27 @@ describe("executeMerge – pages sharing a slug (#109)", () => {
     expect(await fileExists(at("wiki/entities/echo-loop.md"))).toBe(true)
   })
 
+  it("finds a bare slug among the entity and concept pages only, not a page of another folder with that name", async () => {
+    await writeFileRaw(at("wiki/comparisons/echo-loop.md"), page("comparison", [], "# Echo loop comparison"))
+    const group = { slugs: ["echo-loop", "claude-code"], reason: "model's group", confidence: "high" as const }
+
+    const result = await executeMerge(tmp.path, group, "claude-code", llmConfig)
+
+    expect(model.prompts[0]).toContain("# Echo loop\n")
+    expect(model.prompts[0]).not.toContain("# Echo loop comparison")
+    expect(result.pagesToDelete).toEqual(["wiki/entities/echo-loop.md"])
+    expect(await fileExists(at("wiki/comparisons/echo-loop.md"))).toBe(true)
+  })
+
+  it("refuses a page id that names no page, before any model call or write", async () => {
+    const missing = { slugs: ["concepts/no-such-page", "echo-loop"], reason: "stale group", confidence: "medium" as const }
+
+    await expect(executeMerge(tmp.path, missing, "echo-loop", llmConfig))
+      .rejects.toThrow('Slug "concepts/no-such-page" not found on disk')
+    expect(model.prompts).toEqual([])
+    expect(written.paths).toEqual([])
+  })
+
   it("refuses a bare slug that names two pages, rather than merging whichever was read last", async () => {
     const ambiguous = { slugs: ["agent-skills", "echo-loop"], reason: "model's group", confidence: "low" as const }
 
