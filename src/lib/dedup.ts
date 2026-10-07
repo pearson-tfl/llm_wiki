@@ -172,7 +172,7 @@ export function sameSlugGroups(
 ): DuplicateGroup[] {
   const pageIdsBySlug = new Map<string, string[]>()
   for (const s of summaries) {
-    const pageId = s.path.replace(/^wiki\//, "").replace(/\.md$/, "")
+    const pageId = pageIdFromPath(s.path)
     pageIdsBySlug.set(s.slug, [...(pageIdsBySlug.get(s.slug) ?? []), pageId])
   }
   const notDupSet = new Set(notDuplicates.map(normalizeGroupKey))
@@ -187,6 +187,11 @@ export function sameSlugGroups(
     })
   }
   return groups
+}
+
+/** A page's id, its path under `wiki/` without `.md`: `wiki/concepts/foo.md` → `concepts/foo`. */
+export function pageIdFromPath(path: string): string {
+  return path.replace(/^wiki\//, "").replace(/\.md$/, "")
 }
 
 function slugFromPath(path: string): string {
