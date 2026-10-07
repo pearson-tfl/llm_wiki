@@ -57,7 +57,9 @@ import {
   extractEntitySummary,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
+  pageIdFromPath,
   rewriteIndexMd,
+  sameSlugGroups,
   type DedupLlmCall,
   type DuplicateGroup,
   type EntitySummary,
@@ -230,6 +232,18 @@ export async function runDuplicateDetection(
   const summaries = await loadAllEntitySummaries(projectPath)
   if (summaries.length < 2) return noGroups()
   const notDup = await loadNotDuplicates(projectPath)
+  const sameSlug = sameSlugGroups(summaries, notDup)
+  const detected = await detectWithModel(summaries, notDup, llmConfig, options)
+  return { ...detected, groups: [...sameSlug, ...detected.groups] }
+}
+
+/** The model's part of the scan: the embedding prefilter, then the detector. */
+async function detectWithModel(
+  summaries: EntitySummary[],
+  notDup: string[][],
+  llmConfig: LlmConfig,
+  options: { signal?: AbortSignal },
+): Promise<DuplicateScanResult> {
   const llm = buildDedupLlmCall(llmConfig, DEDUP_DETECTION_MAX_TOKENS)
   const embeddingConfig = await loadEmbeddingConfig()
 
@@ -504,28 +518,13 @@ export async function executeMerge(
 ): Promise<MergeResult> {
   const pp = normalizePath(projectPath)
 
-  // 1. Resolve each group slug to its actual on-disk path + content
+  // 1. Resolve each group page to its on-disk path + content. A page named
+  //    twice, by one name or by its slug and its page id, is one page (#109).
   const allPages = await loadAllWikiPages(pp)
-  const pathBySlug = new Map<string, string>()
-  for (const p of allPages) {
-    const base = p.path.split("/").pop() ?? ""
-    if (base.endsWith(".md")) {
-      pathBySlug.set(base.slice(0, -3), p.path)
-    }
-  }
   const groupPages: { slug: string; path: string; content: string }[] = []
   for (const slug of group.slugs) {
-    const relPath = pathBySlug.get(slug)
-    if (!relPath) {
-      throw new Error(
-        `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
-      )
-    }
-    const page = allPages.find((p) => p.path === relPath)
-    if (!page) {
-      throw new Error(`Internal: page lookup miss for ${relPath}`)
-    }
-    groupPages.push({ slug, path: relPath, content: page.content })
+    const page = findGroupPage(allPages, slug)
+    if (!groupPages.some((p) => p.path === page.path)) groupPages.push({ slug, ...page })
   }
 
   const groupPaths = new Set(groupPages.map((p) => p.path))
@@ -580,7 +579,7 @@ export async function executeMerge(
   const indexEntry = allPages.find((p) => p.path === "wiki/index.md")
   if (indexEntry) {
     const removed = new Set(
-      group.slugs.filter((s) => s !== canonicalSlug),
+      groupPages.map((p) => p.slug).filter((s) => s !== canonicalSlug),
     )
     const rewritten = rewriteIndexMd(indexEntry.content, removed)
     if (rewritten !== indexEntry.content) {
@@ -589,6 +588,33 @@ export async function executeMerge(
   }
 
   return result
+}
+
+/**
+ * The page a group names: by its page id (`concepts/foo`) where pages share
+ * a slug, else by its slug among the scanned entity and concept pages. A
+ * slug that names more than one page is refused, not resolved to one of
+ * them (#109).
+ */
+function findGroupPage(
+  allPages: { path: string; content: string }[],
+  slug: string,
+): { path: string; content: string } {
+  const found = slug.includes("/")
+    ? allPages.filter((p) => p.path === `wiki/${slug}.md`)
+    : allPages.filter((p) =>
+      (p.path.startsWith("wiki/entities/") || p.path.startsWith("wiki/concepts/"))
+      && p.path.endsWith(`/${slug}.md`))
+  if (found.length === 0) {
+    throw new Error(
+      `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
+    )
+  }
+  if (found.length > 1) {
+    const pageIds = found.map((p) => pageIdFromPath(p.path)).join(", ")
+    throw new Error(`Slug "${slug}" names ${found.length} pages: ${pageIds}`)
+  }
+  return found[0]
 }
 
 /**

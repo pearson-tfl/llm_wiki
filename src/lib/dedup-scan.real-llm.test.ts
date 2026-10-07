@@ -3,8 +3,11 @@
  * runDuplicateDetection, the real embedding endpoint, and the real Claude
  * Code CLI through `scripts/estate/live-cli.sh`, which runs it under the
  * lane fence with the app's arguments. The Tauri layer is replaced: files
- * through node:fs, embeddings by a direct call to the endpoint, and the
- * CLI's stdout lines handed to the transport as the app's events.
+ * through node:fs, embeddings by a direct call to the endpoint, the vector
+ * store by an in-memory one, and the CLI's stdout lines handed to the
+ * transport as the app's events. Then the real executeMerge of one pair of
+ * pages sharing a slug (#109), which writes to the copy: take a fresh copy
+ * for each run.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT, EMBEDDING_MODEL and
  * DEDUP_VAULT_COPY, the path of the copy. Never point it at a live vault.
@@ -16,6 +19,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { realFs } from "@/test-helpers/fs-temp"
+import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 
 const ENABLED =
@@ -62,6 +66,7 @@ vi.mock("@/lib/dedup_embedding", async (importOriginal) => {
   }
 })
 
+const vectors = createFakeVectorStore()
 const listeners = new Map<string, (event: { payload: unknown }) => void>()
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -91,6 +96,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
         return undefined
       }
       if (cmd === "claude_cli_kill") return undefined
+      if (cmd.startsWith("vector_")) return vectors.invoke(cmd, args)
       throw new Error(`unexpected invoke ${cmd}`)
     },
   }
@@ -121,9 +127,8 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
 }
 
 /** The #69 twins (comment 6013017770), as `type/slug`. A concept and an
- *  entity sharing a slug are found when a group lists that slug twice; the
- *  detector names pages by slug, so those two are reported, not required
- *  (#109 owns them). */
+ *  entity sharing a slug are found when a group names both by page id
+ *  (#109). */
 const TWINS: [string, string][] = [
   ["entity/claude-3-7-sonnet", "entity/claude-sonnet-3-7"],
   ["entity/openclaw-secretref", "entity/openclaw-secretrefs"],
@@ -155,7 +160,9 @@ describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => 
       sharedCalls: measured.calls.flatMap((pages, i) => (pages.includes(a) && pages.includes(b) ? [i] : [])),
       found: result.groups.some((g) => {
         const [sa, sb] = [slugOf(a), slugOf(b)]
-        return sa === sb ? g.slugs.filter((s) => s === sa).length >= 2 : g.slugs.includes(sa) && g.slugs.includes(sb)
+        return sa === sb
+          ? g.slugs.includes(`concepts/${sa}`) && g.slugs.includes(`entities/${sa}`)
+          : g.slugs.includes(sa) && g.slugs.includes(sb)
       }),
     }))
     const report = {
@@ -174,9 +181,63 @@ describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => 
     console.log(JSON.stringify({ ...report, batchSizes: undefined, groupList: undefined }))
 
     expect(Math.max(...measured.batchSizes)).toBeLessThanOrEqual(80)
-    for (const [i, [a, b]] of TWINS.entries()) {
-      expect(twins[i].sharedCalls.length, twins[i].twin).toBeGreaterThan(0)
-      if (slugOf(a) !== slugOf(b)) expect(twins[i].found, twins[i].twin).toBe(true)
+    for (const twin of twins) {
+      expect(twin.sharedCalls.length, twin.twin).toBeGreaterThan(0)
+      expect(twin.found, twin.twin).toBe(true)
     }
   }, 4 * 60 * 60 * 1000)
+
+  it("merges a concept and an entity page sharing a slug into one, leaving no link broken (#109)", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const llmConfig: LlmConfig = {
+      provider: "claude-code",
+      apiKey: "",
+      model: "claude-opus-5-5",
+      ollamaUrl: "",
+      customEndpoint: "",
+      apiMode: "chat_completions",
+      maxContextSize: 200_000,
+    }
+    const group = { slugs: ["concepts/agent-skills", "entities/agent-skills"], reason: "same slug", confidence: "high" as const }
+    const { executeMerge } = await import("./dedup-runner")
+    const brokenBefore = await brokenLinks(vault)
+    const concept = await fs.readFile(path.join(vault, "wiki/concepts/agent-skills.md"), "utf8")
+
+    await executeMerge(vault, group, "entities/agent-skills", llmConfig)
+
+    const kept = await fs.readFile(path.join(vault, "wiki/entities/agent-skills.md"), "utf8")
+    const brokenAfter = await brokenLinks(vault)
+    const report = {
+      conceptPageLeft: await fs.access(path.join(vault, "wiki/concepts/agent-skills.md")).then(() => true, () => false),
+      keptPageBytes: kept.length,
+      keptPageHead: kept.split("\n").slice(0, 8),
+      brokenLinksBefore: brokenBefore.size,
+      newlyBroken: [...brokenAfter].filter((link) => !brokenBefore.has(link)),
+    }
+    if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.merge.json`, JSON.stringify(report, null, 2))
+    console.log(JSON.stringify(report))
+
+    expect(report.conceptPageLeft).toBe(false)
+    expect(kept).toContain("instruction-pointers") // the concept page's related entry
+    expect(kept).toContain("matt-pocock-ai-coding-crash-course.md") // and its source
+    expect(concept).toContain("instruction-pointers")
+    expect(report.newlyBroken).toEqual([])
+  }, 30 * 60 * 1000)
 })
+
+/** Every `[[target]]` under wiki/ that names no page, by slug or page id, as `file -> target`. */
+async function brokenLinks(vault: string): Promise<Set<string>> {
+  const wiki = path.join(vault, "wiki")
+  const files = (await fs.readdir(wiki, { recursive: true }))
+    .map(String)
+    .filter((f) => f.endsWith(".md") && !path.basename(f).startsWith("._"))
+  const names = new Set(files.flatMap((f) => [f.slice(0, -3), path.basename(f, ".md")]))
+  const broken = new Set<string>()
+  for (const file of files) {
+    const text = await fs.readFile(path.join(wiki, file), "utf8")
+    for (const [, target] of text.matchAll(/\[\[([^\]|#]+)/g)) {
+      if (!names.has(target.trim())) broken.add(`${file} -> ${target.trim()}`)
+    }
+  }
+  return broken
+}
