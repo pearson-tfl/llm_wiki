@@ -84,9 +84,14 @@ vi.mock("@/lib/llm-client", async (importOriginal) => {
     ...actual,
     streamChat: async (
       _config: unknown,
-      _messages: unknown,
-      callbacks: { onToken: (t: string) => void; onDone: () => void },
+      messages: { content: string }[],
+      callbacks: { onToken: (t: string) => void; onDone: () => void; onError: (err: Error) => void },
     ) => {
+      // The shared-slug judge (#135) is refused, so it records no verdict in the copy.
+      if (messages[0]?.content.includes("share a file name")) {
+        callbacks.onError(new Error("the judge is not this test's"))
+        return
+      }
       measured.modelCalls++
       callbacks.onToken('{"groups": []}')
       callbacks.onDone()

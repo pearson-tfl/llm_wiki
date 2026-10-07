@@ -103,12 +103,16 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
 })
 
 /** As `build_claude_stdin` does for a system and a user message: one user
- *  turn, the system text first. The detector's prompt holds no turn tags. */
+ *  turn, the system text first. The detector's prompt holds no turn tags.
+ *  Only the detector's calls are measured, not the shared-slug judge's (#135). */
 async function runCli(args: { streamId: string; messages: { role: string; content: string }[] }) {
   const system = args.messages.find((m) => m.role === "system")?.content ?? ""
   const user = args.messages.find((m) => m.role === "user")?.content ?? ""
-  measured.batchSizes.push(Number(user.match(/Wiki pages to scan \((\d+) entries\)/)?.[1]))
-  measured.calls.push([...user.matchAll(/type=([^,]+), slug=([^,]+),/g)].map((m) => `${m[1]}/${m[2]}`))
+  const batchSize = user.match(/Wiki pages to scan \((\d+) entries\)/)?.[1]
+  if (batchSize) {
+    measured.batchSizes.push(Number(batchSize))
+    measured.calls.push([...user.matchAll(/type=([^,]+), slug=([^,]+),/g)].map((m) => `${m[1]}/${m[2]}`))
+  }
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmw108-cli-"))
   const stdinFile = path.join(dir, "stdin.jsonl")
   const outFile = path.join(dir, "out.jsonl")
