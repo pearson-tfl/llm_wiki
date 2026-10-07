@@ -273,6 +273,25 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup-queue.test.ts`, `src/lib/merge-ingest-safety.test.ts`,
   `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
   `src/lib/ingest-queue.test.ts`.
+- `src/lib/dedup-runner.ts`, `src/lib/dedup.ts`,
+  `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/maintenance-section.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – the duplicate scan bounds every detector
+  call (pearson-tfl/llm_wiki#108). Candidate pairs chain into clusters,
+  and upstream sent a cluster bigger than the 80-summary cap to the model
+  whole: on John's vault one cluster held 1,643 pages and its known twins
+  were missed. Such a cluster is now split so every candidate pair shares
+  at least one call: each page's pairs are walked in turn, and a batch
+  closes when the next pair would take it past 80. A detector reply that
+  cannot be read, or that the client reports cut off, no longer counts as
+  no duplicates: the scan result lists it as a failed batch, with its
+  page count and reason, the scheduled run records it in
+  `failedDetectorBatches`, and the Maintenance screen says how many pages
+  went unchecked instead of calling the wiki clean. Upstream edits to the
+  detector's batching or reply parsing need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live scan of a vault copy
+  through the Claude Code CLI in `src/lib/dedup-scan.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
