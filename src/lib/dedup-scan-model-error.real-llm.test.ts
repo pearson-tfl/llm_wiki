@@ -13,8 +13,8 @@
  * are copied to a fresh project, so the vault copy is only read.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT, EMBEDDING_MODEL and
- * DEDUP_VAULT_COPY; DEDUP_PAGES sets the page count. Writes its measurements to `<DEDUP_REPORT>.model-error.json`
- * when DEDUP_REPORT is set.
+ * DEDUP_VAULT_COPY; DEDUP_PAGES sets the page count. Writes its
+ * measurements to `<DEDUP_REPORT>.model-error.json` when DEDUP_REPORT is set.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
@@ -144,6 +144,13 @@ function pairedSlugs(): Set<string> {
   return new Set([...paired.pages].map((page) => path.basename(page, ".md")))
 }
 
+/** A group saved for the Maintenance screen before the scheduled run (#118). */
+const SAVED_GROUP = {
+  slugs: ["llmw118-saved-a", "llmw118-saved-b"],
+  reason: "saved before the run",
+  confidence: "medium" as const,
+}
+
 function llmConfig(): LlmConfig {
   return {
     provider: "custom",
@@ -171,6 +178,7 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
     const { loadAllEntitySummaries, runDuplicateDetection } = await import("./dedup-runner")
     const { runMaintenanceTick } = await import("./scheduled-maintenance")
     const { saveEmbeddingConfig, saveScheduledMaintenanceConfig } = await import("@/lib/project-store")
+    const { loadPendingDuplicateGroups, savePendingDuplicateGroups } = await import("./dedup-storage")
 
     const chosen = (await loadAllEntitySummaries(vault)).slice(0, pageCount)
     const project = await createTempProject("llmw118-model-error")
@@ -206,6 +214,7 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
         scan = await runDuplicateDetection(project.path, llmConfig())
         scanCalls = [...calls]
         scanStart = calls.length
+        await savePendingDuplicateGroups(project.path, [SAVED_GROUP])
         await runMaintenanceTick(projectRef, { now: () => Date.now() })
       } finally {
         warnings = warn.mock.calls.map((args) => String(args[0]))
@@ -216,6 +225,7 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
         .split("\n")
         .filter(Boolean)
       const record = JSON.parse(lines[lines.length - 1])
+      const pending = await loadPendingDuplicateGroups(project.path)
 
       const report = {
         pages: chosen.length,
@@ -228,6 +238,8 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
         prefilterFailedLogged: warnings.some((line) => /embedding prefilter failed/.test(line)),
         detectorCallFailedLogged: warnings.filter((line) => /detector call failed/.test(line)).length,
         record,
+        pendingAfterRun: pending.length,
+        savedGroupKept: pending.some((g) => g.reason === SAVED_GROUP.reason),
       }
       if (process.env.DEDUP_REPORT) {
         await fs.writeFile(`${process.env.DEDUP_REPORT}.model-error.json`, JSON.stringify(report, null, 2))
@@ -258,6 +270,9 @@ describe.skipIf(!ENABLED)("a detector call that fails mid-scan, on a copy of a r
       })))
       expect(record.error).toBeUndefined()
       expect(record.groupsFound.high).toBe(0)
+      // The run's batches did not all answer, so the group saved before it stays.
+      expect(pending).toContainEqual(SAVED_GROUP)
+      expect(pending).toHaveLength(1 + record.groupsFound.medium + record.groupsFound.low)
     } finally {
       await project.cleanup()
     }

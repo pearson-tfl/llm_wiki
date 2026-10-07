@@ -166,10 +166,11 @@ export async function runMaintenanceTick(
 
     if (record.groupsFound) {
       // Every group not queued for a merge, withheld ones included, is kept
-      // for the Maintenance screen. A scan the model did not do found no
-      // group it would find, so the groups an earlier run saved stay (#117).
+      // for the Maintenance screen. A scan the model did not do (#117), or
+      // whose batches did not all answer (#118), did not check every page,
+      // so the groups an earlier run saved stay.
       const pending = groups.filter((g) => !enqueued.includes(g))
-      await (record.duplicateScanNotDone
+      await (record.duplicateScanNotDone || record.failedDetectorBatches
         ? addPendingDuplicateGroups(pp, pending)
         : savePendingDuplicateGroups(pp, pending))
       record.mergesEnqueued = outcomes.length

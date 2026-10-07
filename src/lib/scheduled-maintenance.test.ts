@@ -460,6 +460,32 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, sameSlugAgain, newSameSlug])
   })
 
+  it("keeps the groups an earlier run saved when every detector call fails (#118)", async () => {
+    await setConfig(null)
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound])
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }
+    mockDetect.mockResolvedValue({ groups: [], failedBatches: [failed, failed] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.failedDetectorBatches).toEqual([failed, failed])
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound])
+  })
+
+  it("adds the groups a scan with failed batches found to the saved ones (#118)", async () => {
+    await setConfig(null)
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound])
+    const found = group(["seat", "lane"], "low")
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 503: Service Unavailable" }
+    mockDetect.mockResolvedValue({ groups: [found], failedBatches: [failed] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, found])
+  })
+
   it("replaces the groups an earlier run saved when the scan is done", async () => {
     await setConfig(null)
     await savePendingDuplicateGroups(tmp.path, [group(["pstack", "p-stack"], "medium")])
