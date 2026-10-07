@@ -20,6 +20,15 @@ for tool in node cargo protoc; do
 done
 
 cd "$(dirname "$0")/../.."
+
+# In the shared folder every checkout's app crate has the same artefact
+# names, and cargo judges them fresh by file times, so a tree whose sources
+# are older than another tree's build would test that tree's code (#104).
+# src-tauri/build.rs makes cargo rebuild the app crate whenever this value
+# differs from its last build's; cargo compares the value itself, not times.
+LLM_WIKI_CHECKOUT="$(pwd -P)"
+export LLM_WIKI_CHECKOUT
+
 scripts/estate/change_list.py
 npm ci
 npm --prefix mcp-server ci

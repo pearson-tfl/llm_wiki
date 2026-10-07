@@ -142,4 +142,15 @@ run "" CARGO_TARGET_DIR="$case_dir/own-target" \
 [ "$(cat "$case_dir/target.log")" = "$case_dir/own-target" ] \
   || fail "target-caller: cargo's target was '$(cat "$case_dir/target.log")'"
 
+# cargo is told which checkout it builds, so the app's build script makes it
+# rebuild the app crate whenever the shared folder's last build came from
+# another checkout. Set by check.sh itself, whatever the caller's value.
+setup checkout-env "${all_tools[@]}"
+printf '#!/bin/sh\necho "$LLM_WIKI_CHECKOUT" > "%s/checkout.log"\n' "$case_dir" \
+  > "$stubs/cargo"
+run "" LLM_WIKI_CHECKOUT=/elsewhere \
+  || fail "checkout-env: exited non-zero: $(cat "$case_dir/out.log")"
+[ "$(cat "$case_dir/checkout.log")" = "$(cd "$repo" && pwd -P)" ] \
+  || fail "checkout-env: cargo's LLM_WIKI_CHECKOUT was '$(cat "$case_dir/checkout.log")'"
+
 if [ "$failures" -eq 0 ]; then echo "check.test.sh: all passed"; else exit 1; fi
