@@ -541,7 +541,7 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
   })
 
   it.each<[string, Partial<DuplicateScanResult>]>([
-    ["not done", { notDone: { reason: "embedding-coverage-low", pages: 251 } }],
+    ["that is not done", { notDone: { reason: "embedding-coverage-low", pages: 251 } }],
     ["with a failed batch", { failedBatches: [{ pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }] }],
   ])("drops a saved group naming a page no longer on disk after a scan %s (#120)", async (_, scan) => {
     await setConfig(null)
