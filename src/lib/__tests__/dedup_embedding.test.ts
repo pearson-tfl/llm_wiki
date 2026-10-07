@@ -211,6 +211,29 @@ describe('candidatePairs', () => {
       ),
     ).rejects.toThrow(/cancelled/i);
   });
+
+  it("embeds and compares every page of a wiki over 5,000 pages (#116)", async () => {
+    const { fetchEmbedding } = await import("../embedding");
+    const origFetch = (fetchEmbedding as any).getMockImplementation();
+    // A zero vector embeds but matches nothing, so only the last two pages,
+    // past the old 5,000-page cap, can pair.
+    (fetchEmbedding as any).mockImplementation(async (text: string) =>
+      /^(late|twin)\n/.test(text) ? [1, 0] : [0, 0],
+    );
+    (fetchEmbedding as any).mockClear();
+
+    const pages = [
+      ...Array.from({ length: 5000 }, (_, i) => page(`p${i}`, `t${i}`)),
+      page("late", "Late"),
+      page("twin", "Twin"),
+    ];
+    const pairs = await candidatePairs(pages, testCfg);
+
+    expect((fetchEmbedding as any).mock.calls).toHaveLength(5002);
+    expect(pairs).toEqual([["late", "twin"]]);
+
+    (fetchEmbedding as any).mockImplementation(origFetch);
+  });
 });
 
 describe('clusterByPairs', () => {

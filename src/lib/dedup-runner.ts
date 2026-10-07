@@ -37,7 +37,6 @@ const DEDUP_DETECTION_MAX_TOKENS = 8_192
 // aliases, where cosine scores can be weaker on non-multilingual embedders.
 const DEDUP_PREFILTER_TOP_K = 8
 const DEDUP_PREFILTER_THRESHOLD = 0.68
-const DEDUP_PREFILTER_MAX_PAGES = 5_000
 const DEDUP_DETECTOR_BATCH_SUMMARIES = 80
 const DEDUP_FALLBACK_BATCH_OVERLAP = 8
 const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
@@ -345,7 +344,6 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
   const pairs = await candidatePairs(pages, embeddingConfig, {
     topK: DEDUP_PREFILTER_TOP_K,
     threshold: DEDUP_PREFILTER_THRESHOLD,
-    maxPages: DEDUP_PREFILTER_MAX_PAGES,
     signal: options.signal,
   })
   if (pairs.length === 0) {
