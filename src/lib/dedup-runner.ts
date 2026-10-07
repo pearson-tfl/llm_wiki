@@ -40,6 +40,10 @@ const DEDUP_PREFILTER_THRESHOLD = 0.68
 const DEDUP_DETECTOR_BATCH_SUMMARIES = 80
 const DEDUP_FALLBACK_BATCH_OVERLAP = 8
 const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
+// A hung endpoint waits out the client's 30-min timeout on every call, and a
+// rate-limited one is fired at again at once, so the scan stops calling after
+// this many detector calls in a row fail (#124).
+const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
 
 /**
  * Merge rewrites a COMPLETE page that gets written to disk, so it needs
@@ -332,7 +336,9 @@ async function detectDuplicateGroupsInBoundedBatches(
 
 /** One detector call per batch. A reply that cannot be read (#108), or a
  *  call that fails (#118), is reported as a failed batch, not counted as no
- *  duplicates, and the other batches' groups stand. */
+ *  duplicates, and the other batches' groups stand. After
+ *  DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP calls in a row fail, the batches
+ *  left are reported as failed without a call (#124). */
 async function detectInBatches(
   batches: EntitySummary[][],
   llm: DedupLlmCall,
@@ -340,14 +346,25 @@ async function detectInBatches(
 ): Promise<DuplicateScanResult> {
   const groups: DuplicateGroup[] = []
   const failedBatches: FailedDetectorBatch[] = []
-  for (const batch of batches) {
+  let callFailuresInARow = 0
+  for (const [index, batch] of batches.entries()) {
     if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
+    if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
+      const reason = `Not checked: the scan stopped after ${callFailuresInARow} detector calls in a row failed`
+      console.warn(`[dedup] ${reason}; ${batches.length - index} batches left unchecked`)
+      for (const left of batches.slice(index)) failedBatches.push({ pages: left.length, reason })
+      break
+    }
     try {
       groups.push(...await detectDuplicateGroups(batch, llm, options))
+      callFailuresInARow = 0
     } catch (err) {
       if (err instanceof DetectorCallFailedError) {
         console.warn("[dedup] detector call failed; its batch is reported as failed:", err)
-      } else if (!(err instanceof DetectorReplyUnreadableError)) {
+        callFailuresInARow += 1
+      } else if (err instanceof DetectorReplyUnreadableError) {
+        callFailuresInARow = 0
+      } else {
         throw err
       }
       failedBatches.push({ pages: batch.length, reason: err.message })
