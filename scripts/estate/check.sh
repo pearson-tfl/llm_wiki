@@ -39,6 +39,11 @@ npm run lint
 npm run test:mocks
 npm run test:llm
 npm run mcp:build
-(cd src-tauri && cargo test)
+# Cargo releases its lock on the target folder once compiling ends, before
+# the test programs run, so another check could relink them between this
+# check's library tests and its later ones (#106). This lock, in the target
+# folder, holds until this check's tests end; a second check waits for it.
+(cd src-tauri && mkdir -p "$CARGO_TARGET_DIR" &&
+  lockf -k "$CARGO_TARGET_DIR/.estate-check.lock" cargo test)
 
 echo "check.sh: all checks passed on estate $(git describe --always --dirty --exclude '*')"
