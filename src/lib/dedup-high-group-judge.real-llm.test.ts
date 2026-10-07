@@ -24,6 +24,10 @@
  * high. The detector's own groups are kept as it returned them, for the
  * report; the judge, the merge and the run after the scan are all real.
  *
+ * The Maintenance screen's own Merge is then run on group 46, copied to a
+ * fresh project: the card's merge, the real enqueueCardMerge with the real
+ * merge queue, merges the pair the judge kept apart, with no judge call.
+ *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of a copy
  * holding those pages. Writes its measurements to DEDUP_REPORT when set.
  */
@@ -258,4 +262,51 @@ describe.skipIf(!ENABLED)("the judge before a high-confidence merge, on #111's p
       await fresh.cleanup()
     }
   }, 60 * 60 * 1000)
+
+  it("the Maintenance screen's Merge of group 46 merges it with no judge call: the click is the judgement", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { enqueueCardMerge, restoreQueue, getQueue } = await import("./dedup-queue")
+    const { listWikiPages } = await import("./dedup-storage")
+    const { pagesNamed } = await import("./dedup")
+
+    const fresh = await createTempProject("llmw145-card")
+    try {
+      await fs.mkdir(`${fresh.path}/wiki/entities`, { recursive: true })
+      for (const slug of GROUP_46) {
+        await fs.copyFile(`${vault}/wiki/entities/${slug}.md`, `${fresh.path}/wiki/entities/${slug}.md`)
+      }
+      const projectId = `${PROJECT_ID}-card`
+      storage.set("projectRegistry", { [projectId]: { id: projectId, path: fresh.path, name: "card", lastOpened: Date.now() } })
+      useWikiStore.setState({
+        project: { id: projectId, name: "card", path: fresh.path },
+        llmConfig: LLM_CONFIG,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+      await restoreQueue(projectId, fresh.path)
+      const judgeCallsBefore = measured.judgeCalls.length
+      const mergesBefore = measured.merges.length
+
+      const refusal = await enqueueCardMerge(projectId, fresh.path, { slugs: GROUP_46, reason: "Clicked", confidence: "medium" }, GROUP_46[0])
+      const deadline = Date.now() + 10 * 60 * 1000
+      while (measured.merges.slice(mergesBefore).every((m) => m.outcome === "") && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500))
+      }
+      const after = await listWikiPages(fresh.path)
+      const card = {
+        refusal,
+        merges: measured.merges.slice(mergesBefore),
+        judgeCalls: measured.judgeCalls.length - judgeCallsBefore,
+        pagesAfter: GROUP_46.flatMap((s) => pagesNamed(after, s).map((p) => p.path)),
+        queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.card.json`, JSON.stringify(card, null, 2))
+
+      expect(refusal).toBeNull()
+      expect(card.merges.map((m) => m.outcome)).toEqual(["merged"])
+      expect(card.judgeCalls).toBe(0)
+      expect(card.pagesAfter).toEqual([`wiki/entities/${GROUP_46[0]}.md`])
+    } finally {
+      await fresh.cleanup()
+    }
+  }, 30 * 60 * 1000)
 })
