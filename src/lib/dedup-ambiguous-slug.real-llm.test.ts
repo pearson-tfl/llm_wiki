@@ -14,7 +14,8 @@
  * `openclaw-code-mode`, each a concept and an entity page. The test adds a
  * third, built pair: `swarm`, a general idea and a product of that name,
  * which are two topics. A second run then shows a distinct verdict is not
- * asked again.
+ * asked again. The Maintenance screen's scan (`startDuplicateScan`) is run
+ * first, on the pairs copied to a fresh project, so the copy is unchanged.
  *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy.
  * Never point it at a live vault. Writes its measurements to DEDUP_REPORT
@@ -25,7 +26,7 @@ import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { realFs } from "@/test-helpers/fs-temp"
+import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
 import type { DuplicateGroup } from "./dedup"
@@ -180,6 +181,58 @@ Swarm is an experimental, educational Python library OpenAI published in October
 `
 
 describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, judged with no one asked (#135)", () => {
+  it("the Maintenance screen's scan returns only groups naming pages by path, and records the distinct pair", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { startDuplicateScan } = await import("./dedup-runner")
+    const { listWikiPages, readNotDuplicates } = await import("./dedup-storage")
+    const { pagesNamed } = await import("./dedup")
+    const fresh = await createTempProject("llmw135-screen")
+    try {
+      for (const slug of PAIRS.slice(0, 2)) {
+        for (const folder of ["concepts", "entities"]) {
+          await fs.mkdir(`${fresh.path}/wiki/${folder}`, { recursive: true })
+          await fs.copyFile(`${vault}/wiki/${folder}/${slug}.md`, `${fresh.path}/wiki/${folder}/${slug}.md`)
+        }
+      }
+      await fs.writeFile(`${fresh.path}/wiki/concepts/swarm.md`, SWARM_CONCEPT)
+      await fs.writeFile(`${fresh.path}/wiki/entities/swarm.md`, SWARM_ENTITY)
+      // The screen scans the open project.
+      useWikiStore.setState({
+        project: { id: "llmw-135-screen", name: "screen", path: fresh.path },
+        llmConfig: LLM_CONFIG,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+      const judgeCallsBefore = measured.judgeCalls.length
+
+      const result = await startDuplicateScan(fresh.path, LLM_CONFIG).done
+      const pages = await listWikiPages(fresh.path)
+      const notDuplicates = await readNotDuplicates(fresh.path)
+      const screen = {
+        groups: result?.groups,
+        failedBatches: result?.failedBatches,
+        judgeCalls: measured.judgeCalls.slice(judgeCallsBefore),
+        notDuplicates,
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.screen.json`, JSON.stringify(screen, null, 2))
+
+      expect(result?.failedBatches).toEqual([])
+      expect(screen.judgeCalls).toHaveLength(3)
+      for (const g of result?.groups ?? []) {
+        expect(g.slugs.some((s) => pagesNamed(pages, s).length > 1), g.slugs.join()).toBe(false)
+      }
+      // Each real pair is offered as one group by path, or recorded distinct.
+      for (const slug of PAIRS.slice(0, 2)) {
+        const ids = [`concepts/${slug}`, `entities/${slug}`]
+        const offered = result?.groups.some((g) => [...g.slugs].sort().join() === ids.join() && g.confidence === "high")
+        const recorded = notDuplicates.some((e) => [...e].sort().join() === ids.join())
+        expect(offered !== recorded, slug).toBe(true)
+      }
+      expect(notDuplicates).toContainEqual(["concepts/swarm", "entities/swarm"])
+    } finally {
+      await fresh.cleanup()
+    }
+  }, 30 * 60 * 1000)
+
   it("merges the pairs judged one topic, records the pair judged distinct, and asks nothing again", async () => {
     const vault = process.env.DEDUP_VAULT_COPY ?? ""
     const { saveScheduledMaintenanceConfig } = await import("@/lib/project-store")
@@ -202,8 +255,9 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
     const before = await listWikiPages(vault)
     for (const slug of PAIRS) expect(pagesNamed(before, slug), slug).toHaveLength(2)
 
+    const judgeStart = measured.judgeCalls.length
     const first = await runMaintenanceTick(project, { now: () => Date.now() })
-    const firstJudgeCalls = measured.judgeCalls.length
+    const firstJudgeCalls = measured.judgeCalls.length - judgeStart
     const afterFirst = await listWikiPages(vault)
     const notDuplicates = await readNotDuplicates(vault)
 
@@ -216,7 +270,7 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       const ids = [`concepts/${slug}`, `entities/${slug}`]
       const merge = measured.merges.find((m) => [...m.slugs].sort().join() === ids.join())
       return {
-        judged: measured.judgeCalls.filter((c) => c.pages.some((p) => p.endsWith(`/${slug}`))),
+        judged: measured.judgeCalls.slice(judgeStart).filter((c) => c.pages.some((p) => p.endsWith(`/${slug}`))),
         merge,
         recordedDistinct: notDuplicates.some((e) => [...e].sort().join() === ids.join()),
         pagesAfterFirstRun: pagesNamed(afterFirst, slug).map((p) => p.path),
@@ -229,7 +283,7 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       firstRun: first,
       secondRun: second,
       judgeCallsFirstRun: firstJudgeCalls,
-      judgeCallsSecondRun: measured.judgeCalls.length - firstJudgeCalls,
+      judgeCallsSecondRun: measured.judgeCalls.length - judgeStart - firstJudgeCalls,
       notDuplicates,
       pending,
       queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
