@@ -357,8 +357,8 @@ Keep this list current. Merge conflicts can only come from these files.
   failed batches did not check every page, so, as a not-done scan does
   (#117), it adds its groups to the ones saved for the Maintenance screen
   rather than replacing them: an outage during the run keeps every saved
-  group. Only the prefilter's own failure
-  reaches the full-scan fallback and its log line. The Maintenance
+  group. Only the prefilter's own failure reaches the full-scan fallback
+  and its log line. The Maintenance
   screen's failed-batch notice says the batches failed, not that they
   could not be read, in each locale; the reason after it says which.
   Upstream edits to the detector's model call or the prefilter's fallback
@@ -376,7 +376,8 @@ Keep this list current. Merge conflicts can only come from these files.
   with the embedding server down lost every group the model had found for
   a decision by hand. It now adds its groups to the saved ones, a saved
   group with the same pages giving way to the fresh copy; a scan that is
-  done still replaces the list. The run's addition and the Maintenance
+  done, with no failed batch (#118), still replaces the list. The run's
+  addition and the Maintenance
   screen's drop of a group it acted on run one at a time, so neither undoes
   the other's write.
   Upstream edits to how the scheduled run saves its groups need
