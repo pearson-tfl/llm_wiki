@@ -14,6 +14,9 @@
  * - The embedding server down (#117): the copy's scheduled run, with an
  *   endpoint that never resolves, keeps the pending groups an earlier run
  *   saved in the copy.
+ * - A saved group's page gone (#120): the same run, after a page of one of
+ *   those groups is deleted from the copy, drops that group and keeps the
+ *   others.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT, EMBEDDING_MODEL and
  * DEDUP_VAULT_COPY, the path of the copy, which the scheduled run writes its
@@ -253,6 +256,41 @@ describe.skipIf(!(process.env.RUN_LLM_TESTS === "1" && process.env.DEDUP_VAULT_C
       expect(saved).toEqual(expect.arrayContaining(earlier))
       expect(saved).toEqual(expect.arrayContaining(scan.groups))
       expect(saved).toHaveLength(earlier.length + scan.groups.length)
+      expect(measured.modelCalls).toBe(0)
+    }, 30 * 60 * 1000)
+  },
+)
+
+describe.skipIf(!(process.env.RUN_LLM_TESTS === "1" && process.env.DEDUP_VAULT_COPY))(
+  "a scheduled run that adds to the saved groups, on a copy of a real vault (#120)",
+  () => {
+    it("drops a saved group whose page is no longer on disk and keeps the rest, with the embedding server down", async () => {
+      const vault = process.env.DEDUP_VAULT_COPY ?? ""
+      measured.modelCalls = 0
+      const pendingPath = path.join(vault, ".llm-wiki/dedup-pending-groups.json")
+      const earlier: { slugs: string[] }[] = JSON.parse(await fs.readFile(pendingPath, "utf8"))
+      // As if the first earlier group's first page had since been merged away.
+      const { pagesNamed } = await import("./dedup")
+      const { listWikiPages } = await import("./dedup-storage")
+      const [gone] = pagesNamed(await listWikiPages(vault), earlier[0].slugs[0])
+      await fs.rm(gone.file)
+
+      const { scan, record } = await scanAndRun(vault, {
+        ...embeddingConfig("qwen3-embedding:0.6b"),
+        endpoint: "http://embedding-server-down.invalid/v1/embeddings",
+      })
+      const saved = JSON.parse(await fs.readFile(pendingPath, "utf8"))
+
+      await writeReport("prunes-pending", { earlier, deleted: gone.path, scanGroups: scan.groups, saved, modelCalls: measured.modelCalls, record })
+
+      expect(earlier.length).toBeGreaterThan(1)
+      expect(record.duplicateScanNotDone?.reason).toBe("embedding-coverage-low")
+      expect(saved).not.toContainEqual(earlier[0])
+      expect(saved).toEqual(expect.arrayContaining(earlier.slice(1)))
+      expect(saved).toEqual(expect.arrayContaining(scan.groups))
+      // A group found again stands once, as its fresh copy.
+      const pages = (g: { slugs: string[] }) => [...g.slugs].sort().join()
+      expect(saved).toHaveLength(new Set([...earlier.slice(1), ...scan.groups].map(pages)).size)
       expect(measured.modelCalls).toBe(0)
     }, 30 * 60 * 1000)
   },

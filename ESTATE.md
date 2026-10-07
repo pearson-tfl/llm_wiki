@@ -377,7 +377,7 @@ Keep this list current. Merge conflicts can only come from these files.
   a decision by hand. It now adds its groups to the saved ones, a saved
   group with the same pages giving way to the fresh copy; a scan that is
   done, with no failed batch (#118), still replaces the list. The run's
-  addition and the Maintenance
+  save, an addition or since #120 a replacement, and the Maintenance
   screen's drop of a group it acted on run one at a time, so neither undoes
   the other's write.
   Upstream edits to how the scheduled run saves its groups need
@@ -385,6 +385,24 @@ Keep this list current. Merge conflicts can only come from these files.
   Tests in `src/lib/scheduled-maintenance.test.ts` and
   `src/lib/dedup-storage.test.ts`; a live run of a vault
   copy with the embedding server unreachable in
+  `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – the
+  groups saved for the Maintenance screen stay current
+  (pearson-tfl/llm_wiki#120). A scan that checked every page replaced the
+  saved list with a plain write outside the one-at-a-time edits of #117,
+  so a Maintenance-screen drop that had read the old list could write it
+  back over the fresh one; the replacement now waits its turn like the
+  other edits. A run that adds to the list, its scan not done or with a
+  failed batch, drops each saved group naming a page no longer on disk,
+  found as a merge finds pages; before, such a group stayed on the screen
+  until a scan was done, and its merge was refused. A slug naming two
+  pages (#114) is on disk and stays. The scheduled run's choice of the page
+  to keep lists the wiki's pages through the same function.
+  Upstream edits to how the scheduled run saves its groups need
+  re-checking against this.
+  Tests in `src/lib/dedup-storage.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live run of a vault copy with
+  a saved group's page deleted and the embedding server unreachable in
   `src/lib/dedup-scan-not-done.real-llm.test.ts`.
 - `src/lib/dedup_embedding.ts`, `src/lib/dedup-runner.ts` – the duplicate
   scan's embedding prefilter takes every page
