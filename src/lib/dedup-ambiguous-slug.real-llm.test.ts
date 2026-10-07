@@ -17,6 +17,14 @@
  * asked again. The Maintenance screen's scan (`startDuplicateScan`) is run
  * first, on the pairs copied to a fresh project, so the copy is unchanged.
  *
+ * A scheduled run on a third fresh project shows a judged merge across two
+ * slugs leaves no link dangling (#139): the `agent-skills` pair, every page
+ * of the copy linking to it and the index, beside the built `swarm` pair
+ * and a built entity page of another slug, `openai-swarm`, on the library,
+ * linked bare. The app's structural lint lists the broken links before and
+ * after; a link to a page of the copy left out of the project is not
+ * counted as broken.
+ *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy.
  * Never point it at a live vault. Writes its measurements to DEDUP_REPORT
  * when set.
@@ -180,6 +188,20 @@ updated: 2026-10-07
 Swarm is an experimental, educational Python library OpenAI published in October 2024 for orchestrating multiple agents. Its two primitives are agents, each with instructions and tools, and handoffs, where one agent passes the conversation to another. It runs client-side, keeps no state between calls, and was later succeeded by the OpenAI Agents SDK.
 `
 
+const OPENAI_SWARM = `---
+type: entity
+title: OpenAI Swarm
+tags: [openai, python, multi-agent, handoffs]
+related: []
+sources: ["openai-swarm-cookbook.md"]
+created: 2026-10-08
+updated: 2026-10-08
+---
+# OpenAI Swarm
+
+OpenAI Swarm is the lightweight, experimental Python framework OpenAI released in October 2024 for coordinating several agents. An agent bundles instructions with functions it may call, and a handoff returns another agent from a function so the conversation moves to it. Swarm runs entirely on the client over the Chat Completions API, keeps no state between calls, and was replaced by the OpenAI Agents SDK for production use.
+`
+
 describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, judged with no one asked (#135)", () => {
   it("the Maintenance screen's scan returns only groups naming pages by path, and records the distinct pair", async () => {
     const vault = process.env.DEDUP_VAULT_COPY ?? ""
@@ -316,5 +338,99 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
     expect(first?.mergesFailed ?? 0).toBe(0)
     expect(first?.failedDetectorBatches).toBeUndefined()
     expect(getQueue().filter((t) => t.status === "failed")).toEqual([])
+  }, 60 * 60 * 1000)
+
+  it("merges pages judged one topic across two slugs, leaving no link dangling (#139)", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { saveScheduledMaintenanceConfig } = await import("@/lib/project-store")
+    const { restoreQueue, getQueue } = await import("./dedup-queue")
+    const { listWikiPages } = await import("./dedup-storage")
+    const { pageIdFromPath } = await import("./dedup")
+    const { runMaintenanceTick } = await import("./scheduled-maintenance")
+    const { runStructuralLint } = await import("./lint")
+    const fresh = await createTempProject("llmw139-links")
+    try {
+      const linksAgentSkills = /\[\[(concepts\/|entities\/)?agent-skills(\||\]\])/
+      const copied: string[] = []
+      for (const rel of await fs.readdir(`${vault}/wiki`, { recursive: true })) {
+        if (!rel.endsWith(".md")) continue
+        const content = await fs.readFile(`${vault}/wiki/${rel}`, "utf8")
+        if (rel !== "index.md" && !/^(concepts|entities)\/agent-skills\.md$/.test(rel) && !linksAgentSkills.test(content)) continue
+        await fs.mkdir(path.dirname(`${fresh.path}/wiki/${rel}`), { recursive: true })
+        await fs.writeFile(`${fresh.path}/wiki/${rel}`, content)
+        copied.push(rel)
+      }
+      await fs.writeFile(`${fresh.path}/wiki/concepts/swarm.md`, SWARM_CONCEPT)
+      await fs.writeFile(`${fresh.path}/wiki/entities/swarm.md`, SWARM_ENTITY)
+      await fs.writeFile(`${fresh.path}/wiki/entities/openai-swarm.md`, OPENAI_SWARM)
+      // Bare links to the built page of another slug: two pages' bodies and the index.
+      const linkers = copied.filter((rel) => /^(concepts|entities)\/(?!agent-skills\.md)/.test(rel)).sort().slice(0, 2)
+      for (const rel of linkers) {
+        await fs.appendFile(`${fresh.path}/wiki/${rel}`, "\nOpenAI's handoff library is [[openai-swarm]].\n")
+      }
+      await fs.appendFile(`${fresh.path}/wiki/index.md`, "\n- [[openai-swarm]] – OpenAI's multi-agent library\n")
+
+      const projectId = "llmw-139-links"
+      const project = { id: projectId, name: "links", path: fresh.path }
+      storage.set("projectRegistry", { [projectId]: { id: projectId, path: fresh.path, name: "links", lastOpened: Date.now() } })
+      await saveScheduledMaintenanceConfig(fresh.path, { enabled: true, intervalHours: 24, lastRun: null })
+      useWikiStore.setState({
+        project,
+        llmConfig: LLM_CONFIG,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+      await restoreQueue(projectId, fresh.path)
+      const pagesBefore = await listWikiPages(fresh.path)
+      const vaultPages = (await fs.readdir(`${vault}/wiki`, { recursive: true }))
+        .filter((rel) => rel.endsWith(".md")).map((rel) => ({ path: `wiki/${rel}` }))
+      const resolvesIn = (pages: { path: string }[], target: string) => pages.some((p) =>
+        pageIdFromPath(p.path) === target || p.path.endsWith(`/${target.split("/").pop()}.md`))
+      // A link to a page of the copy that the project never held would resolve in the vault.
+      const leftOut = (target: string) => resolvesIn(vaultPages, target) && !resolvesIn(pagesBefore, target)
+      const brokenLinks = async () => (await runStructuralLint(fresh.path))
+        .filter((r) => r.type === "broken-link" && !leftOut(r.brokenTarget ?? ""))
+        .map((r) => `${r.page} -> ${r.brokenTarget}`)
+      const indexLinks = async () => [...(await fs.readFile(`${fresh.path}/wiki/index.md`, "utf8")).matchAll(/\[\[([^\]|]+)/g)]
+        .map((m) => m[1]).filter((t) => !leftOut(t))
+      const brokenBefore = await brokenLinks()
+      const indexDanglingBefore = (await indexLinks()).filter((t) => !resolvesIn(pagesBefore, t))
+      const mergesBefore = measured.merges.length
+      const judgeStart = measured.judgeCalls.length
+
+      const run = await runMaintenanceTick(project, { now: () => Date.now() })
+
+      const merges = measured.merges.slice(mergesBefore)
+      const pagesAfter = await listWikiPages(fresh.path)
+      const removed = pagesBefore.filter((p) => !pagesAfter.some((a) => a.path === p.path)).map((p) => pageIdFromPath(p.path))
+      const brokenAfter = await brokenLinks()
+      const report = {
+        copied: copied.length,
+        linkers,
+        run,
+        judgeCalls: measured.judgeCalls.slice(judgeStart),
+        merges,
+        removed,
+        brokenBefore: brokenBefore.length,
+        newlyBroken: brokenAfter.filter((b) => !brokenBefore.includes(b)),
+        newlyDanglingIndexLinks: (await indexLinks())
+          .filter((t) => !resolvesIn(pagesAfter, t) && !indexDanglingBefore.includes(t)),
+        linkersAfter: await Promise.all(linkers.map((rel) => fs.readFile(`${fresh.path}/wiki/${rel}`, "utf8").then((c) => c.slice(-200)))),
+        queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.links.json`, JSON.stringify(report, null, 2))
+
+      // The library's two pages, of two slugs, were merged into the older,
+      // and the bare links to the newer now name the page kept.
+      const library = ["entities/openai-swarm", "entities/swarm"]
+      expect(merges.find((m) => m.outcome === "merged" && [...m.slugs].sort().join() === library.join())).toBeDefined()
+      expect(removed).toContain("entities/openai-swarm")
+      expect(removed).not.toContain("entities/swarm")
+      for (const tail of report.linkersAfter) expect(tail).toContain("OpenAI's handoff library is [[entities/swarm]].")
+      // No link the run touched is left pointing at nothing.
+      expect(report.newlyBroken).toEqual([])
+      expect(report.newlyDanglingIndexLinks).toEqual([])
+    } finally {
+      await fresh.cleanup()
+    }
   }, 60 * 60 * 1000)
 })
