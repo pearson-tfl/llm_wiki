@@ -420,6 +420,22 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     })
   })
 
+  it.each([
+    ["embedding-coverage-low"],
+    ["no-candidate-pairs"],
+  ] as const)("records a scan the model did not do, %s, in the run record (#112)", async (reason) => {
+    await setConfig(null)
+    const notDone = { reason, pages: 251 }
+    mockDetect.mockResolvedValue({ groups: [], failedBatches: [], notDone })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record).toMatchObject({
+      groupsFound: { high: 0, medium: 0, low: 0 },
+      duplicateScanNotDone: notDone,
+    })
+  })
+
   it("never enqueues a high-confidence group holding a pair marked not duplicates", async () => {
     await setConfig(null)
     await addNotDuplicate(tmp.path, ["harness", "harnesses"])

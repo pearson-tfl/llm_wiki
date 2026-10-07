@@ -11,7 +11,7 @@ import {
   saveScheduledMaintenanceConfig,
   type ScheduledMaintenanceConfig,
 } from "@/lib/project-store"
-import { runDuplicateDetection, type FailedDetectorBatch } from "@/lib/dedup-runner"
+import { runDuplicateDetection, type FailedDetectorBatch, type ScanNotDone } from "@/lib/dedup-runner"
 import { sweepResolvedReviews } from "@/lib/sweep-reviews"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
@@ -69,6 +69,9 @@ export interface MaintenanceRunRecord {
   /** Detector calls whose reply could not be read, so their pages went
    *  unchecked (#108); absent when every call was read. */
   failedDetectorBatches?: FailedDetectorBatch[]
+  /** Why the model checked none of a large wiki's pages (#112); absent
+   *  when it ran. */
+  duplicateScanNotDone?: ScanNotDone
   /** The vector backfill's counts (#67); absent while embeddings are off. */
   vectorCoverage?: VectorCoverage
   error?: string
@@ -129,6 +132,7 @@ export async function runMaintenanceTick(
       const scan = await runDuplicateDetection(pp, llmConfig)
       groups = scan.groups
       if (scan.failedBatches.length > 0) record.failedDetectorBatches = scan.failedBatches
+      if (scan.notDone) record.duplicateScanNotDone = scan.notDone
       record.groupsFound = {
         high: groups.filter((g) => g.confidence === "high").length,
         medium: groups.filter((g) => g.confidence === "medium").length,
