@@ -73,7 +73,7 @@ vi.mock("@/lib/project-mutex", async (importOriginal) => {
   return { ...real, withProjectLock: vi.fn(real.withProjectLock) }
 })
 
-import { buildDedupLlmCall, executeMerge, runDuplicateDetection } from "@/lib/dedup-runner"
+import { buildDedupLlmCall, executeMerge, runDuplicateDetection, type DuplicateScanResult } from "@/lib/dedup-runner"
 import { getLastEmbeddingError, resetEmbeddingOptimizeAccountingForTests, searchByEmbedding } from "@/lib/embedding"
 import { withProjectLock } from "@/lib/project-mutex"
 import {
@@ -169,7 +169,7 @@ beforeEach(async () => {
   mockBackfill.mockImplementation(realBackfill)
   mockDetect.mockReset()
   mockMerge.mockReset()
-  mockDetect.mockResolvedValue([])
+  mockDetect.mockResolvedValue({ groups: [], failedBatches: [] })
   mockSearch.mockReset()
   mockEmbeddingError.mockReset()
   mockEmbeddingError.mockReturnValue(null)
@@ -238,13 +238,13 @@ describe("scheduled maintenance tick – skips, with the reason recorded", () =>
 
   it("skips while a previous tick is still running", async () => {
     await setConfig(null)
-    const held = createDeferred<DuplicateGroup[]>()
+    const held = createDeferred<DuplicateScanResult>()
     mockDetect.mockReturnValueOnce(held.promise)
 
     const first = runMaintenanceTick(project, { now: () => T0 })
     await waitFor(() => mockDetect.mock.calls.length === 1)
     const second = await runMaintenanceTick(project, { now: () => T0 + 1 })
-    held.resolve([])
+    held.resolve({ groups: [], failedBatches: [] })
     await first
 
     expect(second?.skipReason).toBe("previous-tick-running")
@@ -301,12 +301,12 @@ describe("scheduled maintenance tick – duplicate scan", () => {
     // One whose merge fails every retry.
     await writeFileRaw(`${tmp.path}/wiki/concepts/seat-one.md`, page("Seat", "2026-10-02", ["g.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/seat-two.md`, page("Seats", "2026-10-03", ["h.md"]))
-    mockDetect.mockResolvedValue([
+    mockDetect.mockResolvedValue({ groups: [
       group(["agent-loop", "agent-loops"], "high"),
       group(["hook-new", "hook-old"], "high"),
       group(["lane-b", "lane-a"], "high"),
       group(["seat-one", "seat-two"], "high"),
-    ])
+    ], failedBatches: [] })
     mergeOnDisk(["seat-one"])
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
@@ -337,10 +337,10 @@ describe("scheduled maintenance tick – duplicate scan", () => {
     await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["a.md", "b.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/seat-one.md`, page("Seat", "2026-10-02", ["g.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/seat-two.md`, page("Seats", "2026-10-03", ["h.md"]))
-    mockDetect.mockResolvedValue([
+    mockDetect.mockResolvedValue({ groups: [
       group(["agent-loop", "agent-loops"], "high"),
       group(["seat-one", "seat-two"], "high"),
-    ])
+    ], failedBatches: [] })
     mergeOnDisk()
     const merge = mockMerge.getMockImplementation()!
     mockMerge.mockImplementation(async (...args) => {
@@ -378,9 +378,9 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
     await writeFileRaw(`${tmp.path}/wiki/entities/tools/codex-bridge.md`, dated)
     await writeFileRaw(`${tmp.path}/wiki/entities/codex-bridge-x.md`, undated)
     await writeFileRaw(`${tmp.path}/wiki/concepts/codex-bridges.md`, noSources)
-    mockDetect.mockResolvedValue([
+    mockDetect.mockResolvedValue({ groups: [
       group(["missing-page", "codex-bridges", "codex-bridge-x", "codex-bridge"], "high"),
-    ])
+    ], failedBatches: [] })
     mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
 
     await runMaintenanceTick(project, { now: () => T0 })
@@ -394,7 +394,7 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     await setConfig(null)
     const medium = group(["pstack", "p-stack"], "medium")
     const low = group(["seat", "lane"], "low")
-    mockDetect.mockResolvedValue([medium, low])
+    mockDetect.mockResolvedValue({ groups: [medium, low], failedBatches: [] })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
 
@@ -407,13 +407,26 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([medium, low])
   })
 
+  it("records the scan's failed detector batches in the run record (#108)", async () => {
+    await setConfig(null)
+    const failed = { pages: 80, reason: "Duplicate detector reply could not be read: invalid JSON" }
+    mockDetect.mockResolvedValue({ groups: [group(["seat", "lane"], "low")], failedBatches: [failed] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record).toMatchObject({
+      groupsFound: { high: 0, medium: 0, low: 1 },
+      failedDetectorBatches: [failed],
+    })
+  })
+
   it("never enqueues a high-confidence group holding a pair marked not duplicates", async () => {
     await setConfig(null)
     await addNotDuplicate(tmp.path, ["harness", "harnesses"])
     // The detector drops an exact match itself; a larger group that still
     // holds the pair is the tick's to refuse.
     const holdsPair = group(["harness", "harnesses", "agent-harness"], "high")
-    mockDetect.mockResolvedValue([holdsPair])
+    mockDetect.mockResolvedValue({ groups: [holdsPair], failedBatches: [] })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
 
@@ -430,7 +443,7 @@ describe("saved groups – the Maintenance screen's manual actions", () => {
     await setConfig(null)
     const acted = group(["pstack", "p-stack"], "medium")
     const left = group(["seat", "lane"], "low")
-    mockDetect.mockResolvedValue([acted, left])
+    mockDetect.mockResolvedValue({ groups: [acted, left], failedBatches: [] })
     await runMaintenanceTick(project, { now: () => T0 })
 
     await removePendingDuplicateGroup(tmp.path, ["P-Stack", "pstack"])
@@ -456,7 +469,7 @@ describe("scheduled maintenance tick – after merges", () => {
         createdAt: T0,
       },
     ])
-    mockDetect.mockResolvedValue([group(["agent-loop", "agent-loops"], "high")])
+    mockDetect.mockResolvedValue({ groups: [group(["agent-loop", "agent-loops"], "high")], failedBatches: [] })
     mockMerge.mockImplementation(async (pp) => {
       await realFs.deleteFile(`${pp}/wiki/concepts/agent-loop.md`)
       return { canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] }
@@ -474,7 +487,7 @@ describe("scheduled maintenance tick – after merges", () => {
     await setConfig(null, true, 24)
     let clock = T0
     const now = () => clock++
-    mockDetect.mockResolvedValue([group(["a", "b"], "low")])
+    mockDetect.mockResolvedValue({ groups: [group(["a", "b"], "low")], failedBatches: [] })
 
     await runMaintenanceTick(project, { now })
     clock = T0 + 25 * HOUR
@@ -633,7 +646,7 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     await setConfig(null)
     mockDetect.mockImplementation(async () => {
       ingestSummary.pending = 1
-      return [group(["agent-loop", "agent-loops"], "high")]
+      return { groups: [group(["agent-loop", "agent-loops"], "high")], failedBatches: [] }
     })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
@@ -651,10 +664,10 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     await setConfig(null)
     await writeFileRaw(`${tmp.path}/wiki/concepts/hook-a.md`, page("Hook", "2026-09-01", ["c.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/hook-b.md`, page("Hooks", "2026-10-01", ["d.md"]))
-    mockDetect.mockResolvedValue([
+    mockDetect.mockResolvedValue({ groups: [
       group(["agent-loop", "agent-loops"], "high"),
       group(["hook-a", "hook-b"], "high"),
-    ])
+    ], failedBatches: [] })
     // An ingest starts while the first merge runs, and the run's check
     // before the second group waits until that merge has started.
     const firstMergeStarted = createDeferred()
@@ -682,7 +695,7 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
     await setConfig(null)
     mockDetect.mockImplementation(async () => {
       await saveScheduledMaintenanceConfig(tmp.path, { enabled: false, intervalHours: 24, lastRun: null })
-      return [group(["agent-loop", "agent-loops"], "high")]
+      return { groups: [group(["agent-loop", "agent-loops"], "high")], failedBatches: [] }
     })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
@@ -694,7 +707,7 @@ describe("scheduled maintenance tick – state that changes during the scan", ()
   it("merges nothing when the not-duplicates list cannot be read", async () => {
     await setConfig(null)
     await writeFileRaw(`${tmp.path}/.llm-wiki/dedup-not-duplicates.json`, "[[\"agent-loop\", \"agent-loo")
-    mockDetect.mockResolvedValue([group(["agent-loop", "agent-loops"], "high")])
+    mockDetect.mockResolvedValue({ groups: [group(["agent-loop", "agent-loops"], "high")], failedBatches: [] })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
 
@@ -1149,7 +1162,7 @@ describe("scheduled maintenance tick – hub rebuild", () => {
     await writeRequest([HUB])
     mockDetect.mockImplementation(async () => {
       ingestSummary.pending = 1
-      return []
+      return { groups: [], failedBatches: [] }
     })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })

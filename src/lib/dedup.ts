@@ -107,6 +107,17 @@ export class MergeReplyRejectedError extends Error {
 }
 
 /**
+ * The detector's reply could not be read as its JSON, or was cut off: the
+ * pages in that batch went unchecked, which is not "no duplicates" (#108).
+ */
+export class DetectorReplyUnreadableError extends Error {
+  constructor(reason: string) {
+    super(`Duplicate detector reply could not be read: ${reason}`)
+    this.name = "DetectorReplyUnreadableError"
+  }
+}
+
+/**
  * Generic two-prompt LLM call. Both detector and merger use it.
  * Production wraps `streamChat`; tests use mocks.
  */
@@ -215,7 +226,8 @@ Rules:
  * (typically every entity + concept page in the wiki) and a
  * function that wraps an LLM call. Returns parsed, validated
  * groups — invalid entries (slugs not in the input, single-element
- * groups) are filtered out so the caller never sees garbage.
+ * groups) are filtered out so the caller never sees garbage. A
+ * reply that cannot be read rejects with DetectorReplyUnreadableError.
  *
  * Already-confirmed-not-duplicate groups passed in `notDuplicates`
  * are filtered out before returning so the same false positive
@@ -256,22 +268,21 @@ function buildDetectorUserMessage(summaries: EntitySummary[]): string {
  * Tolerant JSON extraction. The LLM might wrap output in code
  * fences (\`\`\`json), prepend "Sure, here you go:", or trail
  * with a polite "Let me know if...". Pull the first {…} block
- * with balanced braces and parse it. Returns [] for any failure
- * — the caller treats "no duplicates found" identically to "LLM
- * output garbled".
+ * with balanced braces and parse it. A reply with no readable
+ * `groups` list throws DetectorReplyUnreadableError, so a garbled
+ * reply is never taken for "no duplicates found" (#108).
  */
 export function parseDetectorResponse(raw: string): DuplicateGroup[] {
   const jsonText = extractFirstJsonObject(raw)
-  if (!jsonText) return []
+  if (!jsonText) throw new DetectorReplyUnreadableError("no complete JSON object")
   let parsed: unknown
   try {
     parsed = JSON.parse(jsonText)
   } catch {
-    return []
+    throw new DetectorReplyUnreadableError("invalid JSON")
   }
-  if (!parsed || typeof parsed !== "object") return []
-  const groupsRaw = (parsed as { groups?: unknown }).groups
-  if (!Array.isArray(groupsRaw)) return []
+  const groupsRaw = (parsed as { groups?: unknown } | null)?.groups
+  if (!Array.isArray(groupsRaw)) throw new DetectorReplyUnreadableError("no groups list")
 
   const out: DuplicateGroup[] = []
   for (const g of groupsRaw) {

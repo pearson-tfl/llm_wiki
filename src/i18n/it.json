@@ -945,6 +945,7 @@
           "scheduleNever": "mai",
           "scanning": "Analisi…",
           "noneFound": "Nessun gruppo di duplicati trovato. Il wiki è pulito.",
+          "batchesFailed": "{{count}} lotti del rilevatore ({{pages}} pagine) non sono leggibili, quindi quelle pagine non sono state controllate: {{reason}}",
           "candidates": "{{n}} candidati",
           "canonicalLabel": "Mantieni questo slug come canonico:",
           "mergeButton": "Unisci in {{slug}}",

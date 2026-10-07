@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest"
 import {
   extractEntitySummary,
   detectDuplicateGroups,
+  DetectorReplyUnreadableError,
   parseDetectorResponse,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
@@ -103,14 +104,19 @@ describe("parseDetectorResponse", () => {
     expect(parseDetectorResponse(raw)[0].confidence).toBe("low")
   })
 
-  it("returns [] for malformed JSON", () => {
-    expect(parseDetectorResponse("not json at all")).toEqual([])
-    expect(parseDetectorResponse('{"groups": [unclosed')).toEqual([])
-    expect(parseDetectorResponse("")).toEqual([])
+  // An unreadable reply is not "no duplicates" (#108).
+  it("throws DetectorReplyUnreadableError for malformed JSON", () => {
+    expect(() => parseDetectorResponse("not json at all")).toThrow(DetectorReplyUnreadableError)
+    expect(() => parseDetectorResponse('{"groups": [unclosed')).toThrow(DetectorReplyUnreadableError)
+    expect(() => parseDetectorResponse("")).toThrow(DetectorReplyUnreadableError)
   })
 
-  it("returns [] when the JSON object has no groups field", () => {
-    expect(parseDetectorResponse('{"other_field": []}')).toEqual([])
+  it("throws DetectorReplyUnreadableError when the JSON object has no groups field", () => {
+    expect(() => parseDetectorResponse('{"other_field": []}')).toThrow(DetectorReplyUnreadableError)
+  })
+
+  it("returns [] for a readable reply with no groups", () => {
+    expect(parseDetectorResponse('{"groups": []}')).toEqual([])
   })
 
   it("survives quoted braces inside reason strings", () => {
@@ -132,6 +138,13 @@ describe("detectDuplicateGroups", () => {
     type,
     title,
     tags: [],
+  })
+
+  it("rejects with DetectorReplyUnreadableError when the reply cannot be read (#108)", async () => {
+    const llm = vi.fn().mockResolvedValue('{"groups": [{"slugs": ["foo", "bar"]')
+    await expect(
+      detectDuplicateGroups([summary("foo", "Foo"), summary("bar", "Bar")], llm),
+    ).rejects.toThrow(DetectorReplyUnreadableError)
   })
 
   it("returns [] when fewer than 2 summaries are passed", async () => {
