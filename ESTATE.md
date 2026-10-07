@@ -491,7 +491,13 @@ Keep this list current. Merge conflicts can only come from these files.
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
   script and its tests (pearson-tfl/llm_wiki#88), building Rust in the
-  shared target folder (#99); see Build below.
+  shared target folder (#99) and naming its checkout to cargo (#104); see
+  Build below.
+- `src-tauri/build.rs` – one line and its comment ahead of upstream's: cargo
+  reruns the build script, and so rebuilds the app crate, whenever
+  `LLM_WIKI_CHECKOUT` differs from its last build's
+  (pearson-tfl/llm_wiki#104); see Build, Check, below. If upstream changes
+  the file, keep the line; `check.test.sh` fails without it.
 - `src/lib/llm-client.real-llm.test.ts`, `src/lib/embedding.real-llm.test.ts`
   – `npm run test:llm` passes, so the check runs it
   (pearson-tfl/llm_wiki#89). The three fake-Ollama tests expect
@@ -591,6 +597,20 @@ own crate; with the shared target folder below empty, about 4 minutes. Tests:
 wins. Trees share the folder's compiled dependencies; a check in another tree
 recompiles only the app's own crate, and while one check builds, cargo makes
 another wait. Deleting the folder frees the space; the next check rebuilds it.
+
+Every tree's app crate has the same file names in the shared folder, and
+cargo judges a build fresh by file times, so a tree whose files are all older
+than another tree's last build could have its check test that tree's code
+(#104). Two side effects prevent that today: `npm run mcp:build` rewrites
+files the app's build script watches, and Tauri's build script records its
+config files by absolute path, which differs per tree. Neither is a
+guarantee, so `check.sh` sets `LLM_WIKI_CHECKOUT` to the checkout's own
+root, and `src-tauri/build.rs` makes cargo rebuild the app crate whenever
+that value differs from the last build's. Cargo compares the value itself,
+not file times, so this holds when two checks wait on each other too. It
+costs nothing extra: the side effects already rebuild the app crate. A plain
+`cargo` run, with the variable unset, rebuilds the app crate once after a
+check, and the next check rebuilds it once again.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
