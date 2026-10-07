@@ -30,6 +30,8 @@ const measured = {
   pairs: 0,
   clusterSizes: [] as number[],
   batchSizes: [] as number[],
+  /** Each call's pages as `type/slug`, read from the prompt the model got. */
+  calls: [] as string[][],
 }
 
 vi.mock("@/commands/fs", () => realFs)
@@ -100,6 +102,7 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
   const system = args.messages.find((m) => m.role === "system")?.content ?? ""
   const user = args.messages.find((m) => m.role === "user")?.content ?? ""
   measured.batchSizes.push(Number(user.match(/Wiki pages to scan \((\d+) entries\)/)?.[1]))
+  measured.calls.push([...user.matchAll(/type=([^,]+), slug=([^,]+),/g)].map((m) => `${m[1]}/${m[2]}`))
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmw108-cli-"))
   const stdinFile = path.join(dir, "stdin.jsonl")
   const outFile = path.join(dir, "out.jsonl")
@@ -117,15 +120,16 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
   await fs.rm(dir, { recursive: true, force: true })
 }
 
-/** The #69 twins (comment 6013017770). A concept and an entity sharing a
- *  slug are found when a group lists that slug twice. */
+/** The #69 twins (comment 6013017770), as `type/slug`. A concept and an
+ *  entity sharing a slug are found when a group lists that slug twice. */
 const TWINS: [string, string][] = [
-  ["claude-3-7-sonnet", "claude-sonnet-3-7"],
-  ["openclaw-secretref", "openclaw-secretrefs"],
-  ["agent-skills", "agent-skills"],
-  ["openclaw-code-mode", "openclaw-code-mode"],
-  ["openclaw-compaction-provider", "openclaw-compaction-provider-api"],
+  ["entity/claude-3-7-sonnet", "entity/claude-sonnet-3-7"],
+  ["entity/openclaw-secretref", "entity/openclaw-secretrefs"],
+  ["concept/agent-skills", "entity/agent-skills"],
+  ["concept/openclaw-code-mode", "entity/openclaw-code-mode"],
+  ["entity/openclaw-compaction-provider", "entity/openclaw-compaction-provider-api"],
 ]
+const slugOf = (page: string) => page.split("/")[1]
 
 describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => {
   it("bounds every detector call and finds the known twins", async () => {
@@ -146,8 +150,11 @@ describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => 
 
     const twins = TWINS.map(([a, b]) => ({
       twin: `${a} / ${b}`,
-      found: result.groups.some((g) =>
-        a === b ? g.slugs.filter((s) => s === a).length >= 2 : g.slugs.includes(a) && g.slugs.includes(b)),
+      sharedCalls: measured.calls.flatMap((pages, i) => (pages.includes(a) && pages.includes(b) ? [i] : [])),
+      found: result.groups.some((g) => {
+        const [sa, sb] = [slugOf(a), slugOf(b)]
+        return sa === sb ? g.slugs.filter((s) => s === sa).length >= 2 : g.slugs.includes(sa) && g.slugs.includes(sb)
+      }),
     }))
     const report = {
       candidatePairs: measured.pairs,
@@ -162,7 +169,7 @@ describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => 
       groupList: result.groups,
     }
     if (process.env.DEDUP_REPORT) await fs.writeFile(process.env.DEDUP_REPORT, JSON.stringify(report, null, 2))
-    console.log(JSON.stringify({ ...report, batchSizes: undefined, groupList: undefined }, null, 2))
+    console.log(JSON.stringify({ ...report, batchSizes: undefined, groupList: undefined }))
 
     expect(Math.max(...measured.batchSizes)).toBeLessThanOrEqual(80)
     expect(twins.filter((t) => t.found).length).toBeGreaterThanOrEqual(4)
