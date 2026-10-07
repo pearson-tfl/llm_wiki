@@ -555,8 +555,8 @@ tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
 then `npm run typecheck`, `npm run lint`, `npm run test:mocks`,
 `npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first
 failure with a non-zero exit, and on success prints the commit it checked.
-In a fresh worktree on this Mac the first run takes about 4 minutes, 3 of them `cargo test`
-compiling the app; later runs are faster. Tests:
+In a fresh worktree on this Mac the first run takes about 4 minutes, 3 of
+them `cargo test` compiling the app; later runs are faster. Tests:
 `scripts/estate/check.test.sh`.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
