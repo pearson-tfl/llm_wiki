@@ -579,7 +579,7 @@ folder name ending in `/`, names a file. It does not see untracked files:
 `npm run test:mocks`, `npm run test:llm`, `npm run mcp:build` and `cargo test`
 in `src-tauri`; it stops at the first failure with a non-zero exit, and on
 success prints the commit it checked. On this Mac a run in a fresh worktree
-takes under 1.5 minutes, half a minute of it `cargo test` compiling the app's
+takes about 1.5 minutes, half a minute of it `cargo test` compiling the app's
 own crate; with the shared target folder below empty, about 4 minutes. Tests:
 `scripts/estate/check.test.sh`, and for `change_list.py`,
 `python3 scripts/estate/test_change_list.py`.
