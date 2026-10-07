@@ -55,6 +55,26 @@ export function seedStoreFromAppState(state: SavedAppState, project: WikiProject
   })
 }
 
+export interface PageNote {
+  path: string
+  title: string
+  firstLine: string
+}
+
+/** Every page a group member names: a bare slug by file name, as a merge
+ *  resolves it, or a page id such as `concepts/x` by its path (#135). */
+export function pagesFor(member: string, pages: { path: string; content: string }[]): PageNote[] {
+  return pages
+    .filter((p) => p.path.endsWith(`/${member}.md`))
+    .map((p) => {
+      const body = p.content.replace(/^---\n[\s\S]*?\n---\n/, "")
+      const title = p.content.match(/^title:\s*"?(.*?)"?\s*$/m)?.[1] ?? ""
+      const firstLine = body.split("\n").map((l) => l.trim())
+        .find((l) => l && !l.startsWith("#")) ?? ""
+      return { path: p.path, title, firstLine: firstLine.slice(0, 240) }
+    })
+}
+
 /** Minutes since `start`, to one decimal place. */
 export function minutesSince(start: number): number {
   return Math.round((Date.now() - start) / 60_000 * 10) / 10

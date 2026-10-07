@@ -19,9 +19,8 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
-import path from "node:path"
 import { appFs } from "@/test-helpers/fs-temp"
-import { minutesSince, seedStoreFromAppState, tempVaultCopy, type SavedAppState } from "@/test-helpers/scheduled-preview"
+import { minutesSince, pagesFor, seedStoreFromAppState, tempVaultCopy, type SavedAppState } from "@/test-helpers/scheduled-preview"
 import type { EmbeddingConfig } from "@/stores/wiki-store"
 
 const ENABLED =
@@ -108,25 +107,6 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
     },
   }
 })
-
-interface PageNote {
-  path: string
-  title: string
-  firstLine: string
-}
-
-/** Every page whose file name is the slug, as executeMerge resolves it. */
-function pagesFor(slug: string, pages: { path: string; content: string }[]): PageNote[] {
-  return pages
-    .filter((p) => path.basename(p.path, ".md") === slug)
-    .map((p) => {
-      const body = p.content.replace(/^---\n[\s\S]*?\n---\n/, "")
-      const title = p.content.match(/^title:\s*"?(.*?)"?\s*$/m)?.[1] ?? ""
-      const firstLine = body.split("\n").map((l) => l.trim())
-        .find((l) => l && !l.startsWith("#")) ?? ""
-      return { path: p.path, title, firstLine: firstLine.slice(0, 240) }
-    })
-}
 
 describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vault", () => {
   it("runs on the scheduled run's own route and lists what it would merge", async () => {
