@@ -186,6 +186,7 @@ describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vaul
       callErrors: measured.calls.filter((c) => c.error),
       slowestCallSeconds: Math.max(...measured.calls.map((c) => c.seconds)),
       failedBatches: result.failedBatches,
+      notDone: result.notDone ?? null,
       groups: {
         total: result.groups.length,
         high: high.length,

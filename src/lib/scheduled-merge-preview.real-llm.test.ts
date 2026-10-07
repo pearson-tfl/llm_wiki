@@ -32,7 +32,7 @@ const ENABLED =
   && !!process.env.PREVIEW_VAULT_COPY
 
 const settings = vi.hoisted(() => new Map<string, unknown>())
-const scan = vi.hoisted(() => ({ groups: [] as DuplicateGroup[], failedBatches: [] as unknown[] }))
+const scan = vi.hoisted(() => ({ groups: [] as DuplicateGroup[], failedBatches: [] as unknown[], notDone: undefined as unknown }))
 const vectors = createFakeVectorStore()
 
 vi.mock("@/commands/fs", () => realFs)
@@ -102,6 +102,7 @@ describe.skipIf(!ENABLED)("the scheduled merges on a copy of a real vault", () =
       ...preview.otherGroups,
     ]
     scan.failedBatches = preview.failedBatches
+    scan.notDone = preview.notDone ?? undefined
 
     const { runStructuralLint } = await import("./lint")
     const brokenLinks = async () => (await runStructuralLint(vault)).filter((f) => f.type === "broken-link").length
