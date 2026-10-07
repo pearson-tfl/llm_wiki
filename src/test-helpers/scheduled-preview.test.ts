@@ -11,6 +11,14 @@ afterEach(async () => {
   for (const dir of made.splice(0)) await fs.rm(dir, { recursive: true, force: true })
 })
 
+/** A folder never under the OS temp folder, wherever the checkout is. */
+async function outsideTemp(): Promise<string> {
+  const home = await fs.realpath(os.homedir())
+  const temps = await Promise.all([os.tmpdir(), "/tmp"].map((root) => fs.realpath(root)))
+  expect(temps.some((root) => home.startsWith(`${root}/`))).toBe(false)
+  return home
+}
+
 async function tempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmw111-guard-"))
   made.push(dir)
@@ -24,12 +32,12 @@ describe("tempVaultCopy", () => {
   })
 
   it("refuses a folder outside the OS temp folder", async () => {
-    await expect(tempVaultCopy(__dirname)).rejects.toThrow("not a copy under the OS temp folder")
+    await expect(tempVaultCopy(await outsideTemp())).rejects.toThrow("not a copy under the OS temp folder")
   })
 
   it("refuses a link under the temp folder that points outside it", async () => {
     const link = path.join(await tempDir(), "vault")
-    await fs.symlink(__dirname, link)
+    await fs.symlink(await outsideTemp(), link)
     await expect(tempVaultCopy(link)).rejects.toThrow("not a copy under the OS temp folder")
   })
 
