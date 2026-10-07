@@ -428,11 +428,30 @@ Keep this list current. Merge conflicts can only come from these files.
   and concept pages, with only a console warning, so a larger wiki's later
   pages were never checked and the scan could still call it clean. The
   `maxPages` option and the runner's cap are gone. The pairwise compare
-  grows with the square of the page count and does not yield: for 5,000
-  pages the compare alone took about 42 seconds on the Dell. Upstream
-  edits that bound the prefilter again need re-checking against this.
+  grows with the square of the page count: for 5,000 pages it took about
+  42 seconds on the Dell before #122. Upstream edits that bound the
+  prefilter again need re-checking against this.
   Test in `src/lib/__tests__/dedup_embedding.test.ts`; a live scan of a
   vault copy in `src/lib/dedup-prefilter-coverage.real-llm.test.ts`.
+- `src/lib/dedup_embedding.ts`, `src/lib/dedup-runner.ts`,
+  `src/components/settings/sections/maintenance-section.tsx` – the
+  duplicate scan's pairwise compare keeps the app responsive and can be
+  cancelled (pearson-tfl/llm_wiki#122). It ran in one go on the app's
+  main thread, so the app froze for the whole compare, and nothing could
+  stop it. It now hands the thread back every 25 ms and checks for a
+  cancel each time. Each page's vector length is worked out once and each
+  pair scored once, where every pair was scored from both sides; the pairs
+  found are the same, in the same order. On a copy of John's vault (2,406
+  pages) on the Dell the compare took 5.1 seconds, the app never waiting
+  more than 34 ms, where before it froze the app for 12.8 seconds.
+  The Maintenance screen's scan has a Cancel button: a cancelled scan
+  shows no result and no error. The scheduled run's scan still cannot be
+  cancelled. Upstream edits to the compare or the scan button need
+  re-checking against this.
+  Tests in `src/lib/__tests__/dedup_embedding.test.ts` and
+  `src/lib/dedup-runner.test.ts`, with the compare before #122 kept in
+  `src/test-helpers/dedup-pairs-before-122.ts`; a live scan of a vault
+  copy in `src/lib/dedup-compare-responsive.real-llm.test.ts`.
 - `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
   `src/lib/scheduled-maintenance.ts` – a high-confidence group whose slug
   names both a concept and an entity page is saved for the Maintenance

@@ -49,17 +49,51 @@ function throwIfAborted(signal?: AbortSignal) {
  * zero, vectors differ in length, or either is null/undefined (embedding failed).
  */
 export function cosineSimilarity(a: number[] | null | undefined, b: number[] | null | undefined): number {
-  if (!a || !b || a.length !== b.length) return 0
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
+  if (!a || !b) return 0
+  return similarityOfLengths(a, vectorLength(a), b, vectorLength(b))
+}
+
+function vectorLength(v: number[]): number {
+  let sum = 0
+  for (let i = 0; i < v.length; i++) {
+    const x = v[i]
+    sum += x * x
   }
-  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return Math.sqrt(sum)
+}
+
+/** Cosine similarity of two vectors whose lengths are already known. */
+function similarityOfLengths(a: number[], lengthA: number, b: number[], lengthB: number): number {
+  if (a.length !== b.length) return 0
+  let dot = 0
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i]
+  const denom = lengthA * lengthB
   return denom === 0 ? 0 : dot / denom
+}
+
+/**
+ * How long the compare runs before handing the main thread back (#122). A
+ * zero-delay timer can be held to 4 ms once timers nest, so a slice of 25 ms
+ * costs at most about a seventh of the compare's time.
+ */
+const COMPARE_SLICE_MS = 25
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+interface Neighbour {
+  j: number
+  sim: number
+}
+
+/** Keeps `best` as the top `topK` by score, an earlier page first on a tie. */
+function keepBest(best: Neighbour[], j: number, sim: number, topK: number) {
+  let at = best.length
+  while (at > 0 && best[at - 1].sim < sim) at--
+  if (at >= topK) return
+  best.splice(at, 0, { j, sim })
+  if (best.length > topK) best.pop()
 }
 
 /**
@@ -132,24 +166,38 @@ export async function candidatePairs(
     )
   }
 
+  // Each vector's length once, and each pair scored once for both its pages.
+  // Neighbours reach a page in page order, so on a tie the earlier stays
+  // ahead, as when each page's scores were sorted.
+  const vectors = pages.map((p) => embeddings.get(p.id))
+  const lengths = vectors.map((v) => (v ? vectorLength(v) : 0))
+  const best: Neighbour[][] = pages.map(() => [])
+  let sliceStart = performance.now()
+  for (let i = 0; i < pages.length; i++) {
+    const vi = vectors[i]
+    for (let j = i + 1; j < pages.length; j++) {
+      const vj = vectors[j]
+      // A page whose embedding failed is no page's source, but it scores 0
+      // as a target, so a threshold of 0 keeps it.
+      if (!vi && !vj) continue
+      const sim = vi && vj ? similarityOfLengths(vi, lengths[i], vj, lengths[j]) : 0
+      if (!(sim >= threshold)) continue
+      if (vi) keepBest(best[i], j, sim, topK)
+      if (vj) keepBest(best[j], i, sim, topK)
+    }
+    if (performance.now() - sliceStart >= COMPARE_SLICE_MS) {
+      await nextTask()
+      throwIfAborted(opts.signal)
+      sliceStart = performance.now()
+    }
+  }
+
   const pairSet = new Set<string>()
   const pairs: CandidatePair[] = []
-
   for (let i = 0; i < pages.length; i++) {
-    const vi = embeddings.get(pages[i].id)
-    if (!vi) continue
-    const scored: Array<{ j: number; sim: number }> = []
-    for (let j = 0; j < pages.length; j++) {
-      if (i === j) continue
-      const vj = embeddings.get(pages[j].id)
-      const sim = cosineSimilarity(vi, vj)
-      if (sim >= threshold) scored.push({ j, sim })
-    }
-    scored.sort((a, b) => b.sim - a.sim)
-
-    for (let k = 0; k < Math.min(topK, scored.length); k++) {
+    for (const { j } of best[i]) {
       const a = pages[i].id
-      const b = pages[scored[k].j].id
+      const b = pages[j].id
       const key = a < b ? `${a}\t${b}` : `${b}\t${a}`
       if (!pairSet.has(key)) {
         pairSet.add(key)

@@ -51,7 +51,8 @@ vi.mock("@/lib/dedup_embedding", () => ({
   },
 }))
 
-import { buildDedupLlmCall, runDuplicateDetection } from "./dedup-runner"
+import { buildDedupLlmCall, runDuplicateDetection, startDuplicateScan } from "./dedup-runner"
+import { DuplicatePrefilterCancelledError } from "@/lib/dedup_embedding"
 import { DetectorCallFailedError, DetectorReplyUnreadableError } from "./dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 
@@ -729,5 +730,56 @@ describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result.groups).toEqual([])
+  })
+})
+
+describe("startDuplicateScan, the Maintenance screen's scan (#122)", () => {
+  /** A prefilter still comparing until its signal is aborted, as the real one is. */
+  function prefilterUntilCancelled() {
+    let received: AbortSignal | undefined
+    mockCandidatePairs.mockImplementation((_pages, _cfg, opts?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        received = opts?.signal
+        received?.addEventListener("abort", () =>
+          reject(new DuplicatePrefilterCancelledError("Duplicate scan cancelled")))
+      }))
+    return { signal: () => received }
+  }
+
+  it("cancelled during the prefilter's compare, ends with no result and no error, and calls no model", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    const prefilter = prefilterUntilCancelled()
+
+    const scan = startDuplicateScan("/project", cfg)
+    await vi.waitFor(() => expect(prefilter.signal()).toBeDefined())
+    expect(prefilter.signal()!.aborted).toBe(false)
+    scan.cancel()
+
+    await expect(scan.done).resolves.toBeNull()
+    expect(prefilter.signal()!.aborted).toBe(true)
+    expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+
+  it("not cancelled, ends with the scan's result", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
+    mockDetectorGroup()
+
+    const scan = startDuplicateScan("/project", cfg)
+
+    await expect(scan.done).resolves.toMatchObject({
+      groups: [{ slugs: ["foo", "bar"], reason: "same topic", confidence: "high" }],
+    })
+  })
+
+  it("failing, not cancelled, still ends in the error", async () => {
+    mockListDirectory.mockRejectedValue(new Error("wiki folder unreadable"))
+
+    await expect(startDuplicateScan("/project", cfg).done).rejects.toThrow("wiki folder unreadable")
   })
 })
