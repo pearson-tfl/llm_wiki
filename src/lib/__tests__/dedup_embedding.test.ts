@@ -143,22 +143,24 @@ describe('candidatePairs', () => {
     (fetchEmbedding as any).mockImplementationOnce(async () => [1, 0]); // p3 axis 0
     (fetchEmbedding as any).mockImplementationOnce(async () => [1, 0]); // p3 dup axis 0
 
-    const pages = [
-      page('p1', 'A'),
-      page('p2', 'B'),
-      page('p3', 'C'),
-      page('p4', 'D'),
-    ];
-    // p3 and p4 both have id-axes → high sim → should pair
-    const pairs = await candidatePairs(pages, testCfg, {
-      minSuccessRatio: 0.5,
-      threshold: 0.5,
-    });
-    // null embeddings: p1 and p2 won't contribute as SOURCE; may still appear as TARGET
-    // but no pairs should reference them since no other page has a vector to compare
-    expect(pairs.every(([a, b]) => a !== 'p1' && b !== 'p1' && a !== 'p2' && b !== 'p2')).toBe(true);
-    // restore
-    (fetchEmbedding as any).mockImplementation(origFetch);
+    try {
+      const pages = [
+        page('p1', 'A'),
+        page('p2', 'B'),
+        page('p3', 'C'),
+        page('p4', 'D'),
+      ];
+      // p3 and p4 both have id-axes → high sim → should pair
+      const pairs = await candidatePairs(pages, testCfg, {
+        minSuccessRatio: 0.5,
+        threshold: 0.5,
+      });
+      // null embeddings: p1 and p2 won't contribute as SOURCE; may still appear as TARGET
+      // but no pairs should reference them since no other page has a vector to compare
+      expect(pairs.every(([a, b]) => a !== 'p1' && b !== 'p1' && a !== 'p2' && b !== 'p2')).toBe(true);
+    } finally {
+      (fetchEmbedding as any).mockImplementation(origFetch);
+    }
   });
 
   it("throws when too few pages embed successfully", async () => {
@@ -233,6 +235,181 @@ describe('candidatePairs', () => {
     expect(pairs).toEqual([["late", "twin"]]);
 
     (fetchEmbedding as any).mockImplementation(origFetch);
+  });
+});
+
+describe("the compare (#122)", () => {
+  /** Each page's vector by page id: the stub embeds the id on the text's first line. */
+  async function stubVectors(vectors: Map<string, number[] | null>) {
+    const { fetchEmbedding } = await import("../embedding");
+    const origFetch = (fetchEmbedding as any).getMockImplementation();
+    (fetchEmbedding as any).mockImplementation(async (text: string) =>
+      vectors.get(text.split("\n")[0]) ?? null,
+    );
+    (fetchEmbedding as any).mockClear();
+    return {
+      embedCalls: () => (fetchEmbedding as any).mock.calls.length as number,
+      restore: () => (fetchEmbedding as any).mockImplementation(origFetch),
+    };
+  }
+
+  /** A clock that moves a second on every read, so every slice of the compare runs out. */
+  function slowClock() {
+    let now = 0;
+    return vi.spyOn(performance, "now").mockImplementation(() => (now += 1000));
+  }
+
+  const axisPages = (n: number) => {
+    const vectors = new Map<string, number[] | null>();
+    for (let i = 0; i < n; i++) vectors.set(`p${i}`, i % 2 === 0 ? [1, 0] : [0.9, 0.1]);
+    return { vectors, pages: [...vectors.keys()].map((id) => page(id, id)) };
+  };
+
+  it("hands the main thread back during the compare", async () => {
+    const { vectors, pages } = axisPages(6);
+    const stub = await stubVectors(vectors);
+    const clock = slowClock();
+    try {
+      // The stub embeds without a timer, so the timer can only run once the
+      // compare hands the thread back.
+      let embeddedWhenTimerRan = -1;
+      setTimeout(() => { embeddedWhenTimerRan = stub.embedCalls(); }, 0);
+
+      await candidatePairs(pages, testCfg, { threshold: 0.5 });
+
+      expect(embeddedWhenTimerRan).toBe(pages.length);
+    } finally {
+      clock.mockRestore();
+      stub.restore();
+    }
+  });
+
+  it("stops the compare when the scan is cancelled during it", async () => {
+    const { vectors, pages } = axisPages(6);
+    const stub = await stubVectors(vectors);
+    const clock = slowClock();
+    try {
+      const controller = new AbortController();
+      let embeddedWhenCancelled = -1;
+      setTimeout(() => {
+        embeddedWhenCancelled = stub.embedCalls();
+        controller.abort();
+      }, 0);
+
+      await expect(
+        candidatePairs(pages, testCfg, { threshold: 0.5, signal: controller.signal }),
+      ).rejects.toThrow(/cancelled/i);
+      expect(embeddedWhenCancelled).toBe(pages.length);
+    } finally {
+      clock.mockRestore();
+      stub.restore();
+    }
+  });
+
+  it("reads each vector once for its length and once for each pair", async () => {
+    const dim = 4;
+    const n = 6;
+    const reads = new Map<string, number>();
+    const vectors = new Map<string, number[] | null>();
+    for (let i = 0; i < n; i++) {
+      const id = `p${i}`;
+      reads.set(id, 0);
+      const values = Array.from({ length: dim }, (_, k) => (k === i % dim ? 1 : 0.1));
+      vectors.set(id, new Proxy(values, {
+        get(target, key, receiver) {
+          if (typeof key === "string" && /^\d+$/.test(key)) reads.set(id, reads.get(id)! + 1);
+          return Reflect.get(target, key, receiver);
+        },
+      }));
+    }
+    const stub = await stubVectors(vectors);
+    try {
+      await candidatePairs([...vectors.keys()].map((id) => page(id, id)), testCfg, { threshold: 0.5 });
+    } finally {
+      stub.restore();
+    }
+
+    // Before #122 each pair was scored from both sides, each score reading
+    // both vectors three times: 6 * (n - 1) * dim reads per vector.
+    for (const [id, count] of reads) {
+      expect(count, id).toBe(dim + (n - 1) * dim);
+    }
+  });
+
+  /** The compare as it was before #122, kept to check the results did not change. */
+  function pairsBefore122(
+    pages: Page[],
+    embeddings: Map<string, number[] | null>,
+    topK: number,
+    threshold: number,
+  ): Array<readonly [string, string]> {
+    const cosine = (a: number[] | null | undefined, b: number[] | null | undefined) => {
+      if (!a || !b || a.length !== b.length) return 0;
+      let dot = 0;
+      let na = 0;
+      let nb = 0;
+      for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+      }
+      const denom = Math.sqrt(na) * Math.sqrt(nb);
+      return denom === 0 ? 0 : dot / denom;
+    };
+    const pairSet = new Set<string>();
+    const pairs: Array<readonly [string, string]> = [];
+    for (let i = 0; i < pages.length; i++) {
+      const vi = embeddings.get(pages[i].id);
+      if (!vi) continue;
+      const scored: Array<{ j: number; sim: number }> = [];
+      for (let j = 0; j < pages.length; j++) {
+        if (i === j) continue;
+        const sim = cosine(vi, embeddings.get(pages[j].id));
+        if (sim >= threshold) scored.push({ j, sim });
+      }
+      scored.sort((a, b) => b.sim - a.sim);
+      for (let k = 0; k < Math.min(topK, scored.length); k++) {
+        const a = pages[i].id;
+        const b = pages[scored[k].j].id;
+        const key = a < b ? `${a}\t${b}` : `${b}\t${a}`;
+        if (!pairSet.has(key)) {
+          pairSet.add(key);
+          pairs.push([a, b] as const);
+        }
+      }
+    }
+    return pairs;
+  }
+
+  it("finds the same pairs, in the same order, as the compare before #122", async () => {
+    // A seeded generator, so a failure can be replayed.
+    let seed = 122;
+    const random = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const dim = 8;
+    const vectors = new Map<string, number[] | null>();
+    for (let i = 0; i < 80; i++) {
+      const id = `p${i}`;
+      const kind = i % 10;
+      if (kind === 0) vectors.set(id, null); // failed embedding
+      else if (kind === 1) vectors.set(id, new Array(dim).fill(0)); // zero vector
+      else if (kind === 2) vectors.set(id, [1, 0, 0]); // another length
+      else if (kind === 3 && i > 10) vectors.set(id, vectors.get(`p${i - 10}`)!); // a twin: tied scores
+      // Coarse values, so many pairs tie on score.
+      else vectors.set(id, Array.from({ length: dim }, () => Math.round(random() * 4) - 1));
+    }
+    const pages = [...vectors.keys()].map((id) => page(id, id));
+    const stub = await stubVectors(vectors);
+    try {
+      for (const threshold of [0, 0.3, 0.68, 0.9]) {
+        for (const topK of [1, 3, 8, 100]) {
+          const got = await candidatePairs(pages, testCfg, { threshold, topK, minSuccessRatio: 0 });
+          expect(got, `threshold ${threshold}, topK ${topK}`)
+            .toEqual(pairsBefore122(pages, vectors, topK, threshold));
+        }
+      }
+    } finally {
+      stub.restore();
+    }
   });
 });
 
