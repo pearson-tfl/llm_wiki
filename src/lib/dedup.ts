@@ -623,9 +623,9 @@ export async function mergeDuplicateGroup(
   // If LLM output's frontmatter parses cleanly we leave its title;
   // if not, the application layer doesn't try to manufacture one.
 
-  // 4. Cross-reference rewrites: every other wiki page that mentions
-  //    a non-canonical slug needs its wikilinks / related entries
-  //    rewritten to the canonical.
+  // 4. Cross-reference rewrites: the canonical page itself, and every
+  //    other wiki page, that mentions a non-canonical slug needs its
+  //    wikilinks / related entries rewritten to the canonical.
   //    A page id goes to the kept page's page id, so a path-style link
   //    stays path-style (#141).
   const canonicalPageId = pageIdFromPath(canonical.path)
