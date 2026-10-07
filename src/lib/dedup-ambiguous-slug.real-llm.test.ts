@@ -1,17 +1,24 @@
 /**
- * A high-confidence group naming a slug that two pages share (#114), end to
- * end on pages copied from a real vault: the real scheduled
- * runMaintenanceTick, the real runDuplicateDetection with the real Claude
- * Code CLI through `scripts/estate/live-cli.sh`, the real merge queue and
- * the real executeMerge, which writes to the copy: take a fresh copy for
- * each run. Embeddings are off, so the detector sees every page in one
- * call. The Tauri layer is replaced: files through node:fs, the settings
- * store by an in-memory one, the vector store by an in-memory one, and the
- * CLI's stdout lines handed to the transport as the app's events.
+ * Pages sharing a slug, settled by the judge with no one asked (#135), end
+ * to end on pages copied from a real vault: the real scheduled
+ * runMaintenanceTick, the real runDuplicateDetection and its judge with the
+ * real Claude Code CLI on Opus through `scripts/estate/live-cli.sh`, the
+ * real merge queue and the real executeMerge, which writes to the copy:
+ * take a fresh copy for each run. Embeddings are off, so the detector sees
+ * every page in one call. The Tauri layer is replaced: files through
+ * node:fs, the settings store by an in-memory one, the vector store by an
+ * in-memory one, and the CLI's stdout lines handed to the transport as the
+ * app's events.
  *
- * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy,
- * which must hold a concept and an entity page of one slug. Never point it
- * at a live vault. Writes its measurements to DEDUP_REPORT when set.
+ * The copy must hold the vault's two pairs, `agent-skills` and
+ * `openclaw-code-mode`, each a concept and an entity page. The test adds a
+ * third, built pair: `swarm`, a general idea and a product of that name,
+ * which are two topics. A second run then shows a distinct verdict is not
+ * asked again.
+ *
+ * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy.
+ * Never point it at a live vault. Writes its measurements to DEDUP_REPORT
+ * when set.
  */
 import { describe, expect, it, vi } from "vitest"
 import { spawn } from "node:child_process"
@@ -29,8 +36,9 @@ const LIVE_CLI = path.resolve(__dirname, "../../scripts/estate/live-cli.sh")
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
 const measured = vi.hoisted(() => ({
-  scanned: [] as DuplicateGroup[],
+  scans: [] as DuplicateGroup[][],
   merges: [] as { slugs: string[]; canonical: string; outcome: string }[],
+  judgeCalls: [] as { pages: string[]; reply: string }[],
 }))
 
 vi.mock("@/commands/fs", () => realFs)
@@ -48,15 +56,15 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   }),
 }))
 
-// The real scan and merge, watched so the test can read what the tick saw
-// and sent to the merge.
+// The real scan and merge, watched so the test can read what each run
+// saw and sent to the merge.
 vi.mock("@/lib/dedup-runner", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./dedup-runner")>()
   return {
     ...actual,
     runDuplicateDetection: async (...args: Parameters<typeof actual.runDuplicateDetection>) => {
       const scan = await actual.runDuplicateDetection(...args)
-      measured.scanned = scan.groups
+      measured.scans.push(scan.groups)
       return scan
     },
     executeMerge: async (...args: Parameters<typeof actual.executeMerge>) => {
@@ -101,11 +109,12 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
 })
 
 /** As `build_claude_stdin` does for a system and a user message: one user
- *  turn, the system text first. */
+ *  turn, the system text first. A judge call is noted with its pages and
+ *  the CLI's reply text. */
 async function runCli(args: { streamId: string; messages: { role: string; content: string }[] }) {
   const system = args.messages.find((m) => m.role === "system")?.content ?? ""
   const user = args.messages.find((m) => m.role === "user")?.content ?? ""
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmw114-cli-"))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "llmw135-cli-"))
   const stdinFile = path.join(dir, "stdin.jsonl")
   const outFile = path.join(dir, "out.jsonl")
   const turn = { type: "user", message: { role: "user", content: [{ type: "text", text: `${system}\n\n${user}` }] } }
@@ -117,6 +126,13 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
     child.on("close", (exitCode) => resolve({ code: exitCode, stderr: err }))
   })
   const lines = (await fs.readFile(outFile, "utf8").catch(() => "")).split("\n").filter(Boolean)
+  if (system.includes("share a file name")) {
+    const result = lines.map((l) => JSON.parse(l)).find((e) => e.type === "result")
+    measured.judgeCalls.push({
+      pages: [...user.matchAll(/^## Page: (.+)$/gm)].map((m) => m[1]),
+      reply: String(result?.result ?? ""),
+    })
+  }
   for (const line of lines) listeners.get(`claude-cli:${args.streamId}`)?.({ payload: line })
   listeners.get(`claude-cli:${args.streamId}:done`)?.({ payload: { code, stderr } })
   await fs.rm(dir, { recursive: true, force: true })
@@ -132,18 +148,48 @@ const LLM_CONFIG: LlmConfig = {
   maxContextSize: 200_000,
 }
 
-const PROJECT_ID = "llmw-114-copy"
+const PROJECT_ID = "llmw-135-copy"
+const PAIRS = ["agent-skills", "openclaw-code-mode", "swarm"]
 
-describe.skipIf(!ENABLED)("a high-confidence group naming a shared slug, on pages from a real vault (#114)", () => {
-  it("is saved for the Maintenance screen and never reaches the merge; every other high group merges", async () => {
+const SWARM_CONCEPT = `---
+type: concept
+title: Swarm
+tags: [collective-behaviour, decentralised-control]
+related: []
+sources: ["swarm-intelligence-notes.md"]
+created: 2026-10-07
+updated: 2026-10-07
+---
+# Swarm
+
+Swarm intelligence is the collective behaviour of many simple agents following local rules with no central controller, as in ant colonies, bird flocks and fish schools. Order emerges from interaction: no single agent holds the plan. Algorithms such as ant colony optimisation and particle swarm optimisation borrow the idea to search large solution spaces.
+`
+
+const SWARM_ENTITY = `---
+type: entity
+title: Swarm
+tags: [openai, python, library, multi-agent]
+related: []
+sources: ["openai-swarm-readme.md"]
+created: 2026-10-07
+updated: 2026-10-07
+---
+# Swarm
+
+Swarm is an experimental, educational Python library OpenAI published in October 2024 for orchestrating multiple agents. Its two primitives are agents, each with instructions and tools, and handoffs, where one agent passes the conversation to another. It runs client-side, keeps no state between calls, and was later succeeded by the OpenAI Agents SDK.
+`
+
+describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, judged with no one asked (#135)", () => {
+  it("merges the pairs judged one topic, records the pair judged distinct, and asks nothing again", async () => {
     const vault = process.env.DEDUP_VAULT_COPY ?? ""
     const { saveScheduledMaintenanceConfig } = await import("@/lib/project-store")
     const { restoreQueue, getQueue } = await import("./dedup-queue")
-    const { loadPendingDuplicateGroups } = await import("./dedup-storage")
-    const { listDirectory } = await import("@/commands/fs")
+    const { listWikiPages, loadPendingDuplicateGroups, readNotDuplicates } = await import("./dedup-storage")
     const { pagesNamed } = await import("./dedup")
     const { runMaintenanceTick } = await import("./scheduled-maintenance")
 
+    await fs.writeFile(`${vault}/wiki/concepts/swarm.md`, SWARM_CONCEPT)
+    await fs.writeFile(`${vault}/wiki/entities/swarm.md`, SWARM_ENTITY)
     const project = { id: PROJECT_ID, name: "copy", path: vault }
     storage.set("projectRegistry", { [PROJECT_ID]: { id: PROJECT_ID, path: vault, name: "copy", lastOpened: Date.now() } })
     await saveScheduledMaintenanceConfig(vault, { enabled: true, intervalHours: 24, lastRun: null })
@@ -153,37 +199,68 @@ describe.skipIf(!ENABLED)("a high-confidence group naming a shared slug, on page
       embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
     })
     await restoreQueue(PROJECT_ID, vault)
+    const before = await listWikiPages(vault)
+    for (const slug of PAIRS) expect(pagesNamed(before, slug), slug).toHaveLength(2)
 
-    // The copy's pages, as the merge reads them.
-    const walk = (nodes: Awaited<ReturnType<typeof listDirectory>>): string[] =>
-      nodes.flatMap((n) => (n.is_dir ? walk(n.children ?? []) : [n.path.slice(vault.length + 1)]))
-    const pages = walk(await listDirectory(`${vault}/wiki`)).map((p) => ({ path: p }))
-    const namesTwo = (g: DuplicateGroup) => g.slugs.some((s) => pagesNamed(pages, s).length > 1)
+    const first = await runMaintenanceTick(project, { now: () => Date.now() })
+    const firstJudgeCalls = measured.judgeCalls.length
+    const afterFirst = await listWikiPages(vault)
+    const notDuplicates = await readNotDuplicates(vault)
 
-    const record = await runMaintenanceTick(project, { now: () => Date.now() })
-
-    const highShared = measured.scanned.filter((g) => g.confidence === "high" && namesTwo(g))
-    const highClear = measured.scanned.filter((g) => g.confidence === "high" && !namesTwo(g))
+    // Due again a day later, as the next scheduled run.
+    const second = await runMaintenanceTick(project, { now: () => Date.now() + 25 * 60 * 60 * 1000 })
+    const afterSecond = await listWikiPages(vault)
     const pending = await loadPendingDuplicateGroups(vault)
+
+    const outcome = (slug: string) => {
+      const ids = [`concepts/${slug}`, `entities/${slug}`]
+      const merge = measured.merges.find((m) => [...m.slugs].sort().join() === ids.join())
+      return {
+        judged: measured.judgeCalls.filter((c) => c.pages.some((p) => p.endsWith(`/${slug}`))),
+        merge,
+        recordedDistinct: notDuplicates.some((e) => [...e].sort().join() === ids.join()),
+        pagesAfterFirstRun: pagesNamed(afterFirst, slug).map((p) => p.path),
+      }
+    }
     const report = {
-      scanned: measured.scanned,
-      highShared,
+      outcomes: Object.fromEntries(PAIRS.map((slug) => [slug, outcome(slug)])),
+      scans: measured.scans,
       merges: measured.merges,
-      record,
+      firstRun: first,
+      secondRun: second,
+      judgeCallsFirstRun: firstJudgeCalls,
+      judgeCallsSecondRun: measured.judgeCalls.length - firstJudgeCalls,
+      notDuplicates,
       pending,
       queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
     }
     if (process.env.DEDUP_REPORT) await fs.writeFile(process.env.DEDUP_REPORT, JSON.stringify(report, null, 2))
 
-    // The model named a shared slug bare in a high group, so the run proves
-    // the case; a run where it did not proves nothing and fails here.
-    expect(highShared.length).toBeGreaterThan(0)
-    for (const g of highShared) {
-      expect(pending).toContainEqual(g)
-      expect(measured.merges.map((m) => m.slugs)).not.toContainEqual(g.slugs)
+    // Each pair was judged once, and ended merged or recorded distinct.
+    for (const slug of PAIRS) {
+      const o = outcome(slug)
+      expect(o.judged, slug).toHaveLength(1)
+      if (o.merge) {
+        expect(o.merge.outcome, slug).toBe("merged")
+        expect(o.pagesAfterFirstRun, slug).toHaveLength(1)
+        expect(o.recordedDistinct, slug).toBe(false)
+      } else {
+        expect(o.recordedDistinct, slug).toBe(true)
+        expect(o.pagesAfterFirstRun, slug).toHaveLength(2)
+      }
     }
-    expect(measured.merges.map((m) => m.slugs)).toEqual(highClear.map((g) => g.slugs))
-    expect(record?.mergesEnqueued).toBe(highClear.length)
+    // The built pair is two topics, so it is not merged.
+    expect(outcome("swarm").merge).toBeUndefined()
+    expect(pagesNamed(afterSecond, "swarm")).toHaveLength(2)
+    // Nothing of this kind is left for anyone, and the second run asks no
+    // judge again.
+    for (const scan of measured.scans) {
+      for (const g of scan) expect(g.slugs.some((s) => pagesNamed(afterFirst, s).length > 1), g.slugs.join()).toBe(false)
+    }
+    expect(pending.filter((g) => g.slugs.some((s) => PAIRS.some((slug) => s.endsWith(slug))))).toEqual([])
+    expect(report.judgeCallsSecondRun).toBe(0)
+    expect(first?.mergesFailed ?? 0).toBe(0)
+    expect(first?.failedDetectorBatches).toBeUndefined()
     expect(getQueue().filter((t) => t.status === "failed")).toEqual([])
-  }, 30 * 60 * 1000)
+  }, 60 * 60 * 1000)
 })
