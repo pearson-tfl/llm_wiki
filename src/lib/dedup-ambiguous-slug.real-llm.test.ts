@@ -569,11 +569,24 @@ describe.skipIf(!ENABLED)("a merge leaves no path-style link dangling, on pages 
       for (const rel of await fs.readdir(`${vault}/wiki`, { recursive: true })) {
         if (!rel.endsWith(".md")) continue
         const content = await fs.readFile(`${vault}/wiki/${rel}`, "utf8")
-        if (rel !== "index.md" && !mentions.test(content)) continue
+        if (rel !== "index.md" && !PATH_LINKED.includes(rel.replace(/\.md$/, "")) && !mentions.test(content)) continue
         await fs.mkdir(path.dirname(`${fresh.path}/wiki/${rel}`), { recursive: true })
         await fs.writeFile(`${fresh.path}/wiki/${rel}`, content)
         copied.push(rel)
       }
+      // The run keeps the page with the most sources, which on the vault is
+      // the page it links to by path, so every page of both groups gets
+      // path-style links in the vault's forms (plain, aliased, and the
+      // index's), from two of the vault's own linking pages.
+      const builtLinks = {
+        "entities/1password.md": PATH_LINKED.slice(0, 2),
+        "concepts/privacy-heavy-node-command-opt-in.md": PATH_LINKED.slice(2),
+      }
+      for (const [rel, ids] of Object.entries(builtLinks)) {
+        const links = ids.map((id) => `[[${id}]] and [[${id}|${id.split("/")[1]} by path]]`).join(", ")
+        await fs.appendFile(`${fresh.path}/wiki/${rel}`, `\nSee also ${links}.\n`)
+      }
+      await fs.appendFile(`${fresh.path}/wiki/index.md`, PATH_LINKED.map((id) => `- [[${id}]] — ${id.split("/")[1]}\n`).join(""))
 
       const projectId = "llmw-141-path-links"
       const project = { id: projectId, name: "path-links", path: fresh.path }
@@ -637,8 +650,13 @@ describe.skipIf(!ENABLED)("a merge leaves no path-style link dangling, on pages 
       }
       if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.path-links.json`, JSON.stringify(report, null, 2))
 
-      // The 1Password pair, linked by path from five pages, was merged.
-      expect(removed.filter((id) => PATH_LINKED.slice(0, 2).includes(id))).toHaveLength(1)
+      // The 1Password pair was merged, and the built links to the page
+      // removed now name the page kept, by path, alias and all.
+      const pair = PATH_LINKED.slice(0, 2)
+      expect(removed.filter((id) => pair.includes(id))).toHaveLength(1)
+      const kept = pair.find((id) => !removed.includes(id)) ?? ""
+      expect(await fs.readFile(`${fresh.path}/wiki/entities/1password.md`, "utf8"))
+        .toContain(`[[${kept}]] and [[${kept}|${pair.find((id) => removed.includes(id))?.split("/")[1]} by path]]`)
       expect(pathLinksToRemoved.length).toBeGreaterThan(0)
       // No path-style link to a removed page is left in a page the run kept.
       for (const link of pathLinksToRemoved) expect(link.after, `${link.page}: ${link.before}`).toEqual([])
