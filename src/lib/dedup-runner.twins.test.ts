@@ -114,6 +114,16 @@ describe("executeMerge – pages sharing a slug (#109)", () => {
     expect(await readFileRaw(at("wiki/index.md"))).toBe(INDEX)
   })
 
+  it("drops the index line that names a merged-away page by its path (#141)", async () => {
+    // The vault's index form: `- [[entities/openclaw-dreaming]] — OpenClaw Dreaming (...)`.
+    await writeFileRaw(at("wiki/index.md"), `${INDEX}- [[entities/echo-loop]] — Echo loop\n`)
+    const group = { slugs: ["echo-loop", "claude-code"], reason: "model's group", confidence: "high" as const }
+
+    await executeMerge(tmp.path, group, "claude-code", llmConfig)
+
+    expect(await readFileRaw(at("wiki/index.md"))).toBe(INDEX)
+  })
+
   it("refuses a group that names one page twice, before any model call or write", async () => {
     const twice = { slugs: ["echo-loop", "echo-loop"], reason: "same page twice", confidence: "high" as const }
 
