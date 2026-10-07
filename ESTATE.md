@@ -342,10 +342,13 @@ Keep this list current. Merge conflicts can only come from these files.
   with the embedding server down lost every group the model had found for
   a decision by hand. It now adds its groups to the saved ones, a saved
   group with the same pages giving way to the fresh copy; a scan that is
-  done still replaces the list.
+  done still replaces the list. The run's addition and the Maintenance
+  screen's drop of a group it acted on run one at a time, so neither undoes
+  the other's write.
   Upstream edits to how the scheduled run saves its groups need
   re-checking against this.
-  Tests in `src/lib/scheduled-maintenance.test.ts`; a live run of a vault
+  Tests in `src/lib/scheduled-maintenance.test.ts` and
+  `src/lib/dedup-storage.test.ts`; a live run of a vault
   copy with the embedding server unreachable in
   `src/lib/dedup-scan-not-done.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
