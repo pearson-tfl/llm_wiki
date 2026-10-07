@@ -16,6 +16,14 @@
  * provider. Each is an entity page of the vault, copied with the vault's
  * index to a fresh project, so the copy itself is never written.
  *
+ * #111's trial ran the detector over the whole vault, and it rated each of
+ * these five groups high. On these ten pages alone the detector rates
+ * group 46, 43 and 44 low, so a run would never ask the judge of them. The
+ * scan's result therefore carries #111's rating: a group holding one of
+ * these pairs is raised to high, and a pair the scan left out is added at
+ * high. The detector's own groups are kept as it returned them, for the
+ * report; the judge, the merge and the run after the scan are all real.
+ *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of a copy
  * holding those pages. Writes its measurements to DEDUP_REPORT when set.
  */
@@ -35,7 +43,10 @@ const LIVE_CLI = path.resolve(__dirname, "../../scripts/estate/live-cli.sh")
 
 const storage = vi.hoisted(() => new Map<string, unknown>())
 const measured = vi.hoisted(() => ({
+  /** The detector's groups, before #111's rating is applied. */
   scans: [] as DuplicateGroup[][],
+  /** #111's pairs, each rated high as #111's trial rated it. */
+  rated: [] as string[][],
   merges: [] as { slugs: string[]; canonical: string; outcome: string }[],
   judgeCalls: [] as { pages: string[]; reply: string }[],
 }))
@@ -64,7 +75,17 @@ vi.mock("@/lib/dedup-runner", async (importOriginal) => {
     runDuplicateDetection: async (...args: Parameters<typeof actual.runDuplicateDetection>) => {
       const scan = await actual.runDuplicateDetection(...args)
       measured.scans.push(scan.groups)
-      return scan
+      const pairKey = (slugs: string[]) => [...slugs].sort().join()
+      const rated = new Set(measured.rated.map(pairKey))
+      const found = new Set(scan.groups.map((g) => pairKey(g.slugs)))
+      return {
+        ...scan,
+        groups: [
+          ...scan.groups.map((g) => rated.has(pairKey(g.slugs)) ? { ...g, confidence: "high" as const } : g),
+          ...measured.rated.filter((pair) => !found.has(pairKey(pair)))
+            .map((slugs) => ({ slugs, reason: "Rated high by #111's trial", confidence: "high" as const })),
+        ],
+      }
     },
     executeMerge: async (...args: Parameters<typeof actual.executeMerge>) => {
       const entry = { slugs: args[1].slugs, canonical: args[2], outcome: "" }
@@ -183,6 +204,7 @@ describe.skipIf(!ENABLED)("the judge before a high-confidence merge, on #111's p
         embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
       })
       await restoreQueue(PROJECT_ID, fresh.path)
+      measured.rated = [...TWINS, GROUP_46, ...GROUPS_43_44]
 
       const record = await runMaintenanceTick(project, { now: () => Date.now() })
       const after = await listWikiPages(fresh.path)
@@ -193,7 +215,7 @@ describe.skipIf(!ENABLED)("the judge before a high-confidence merge, on #111's p
       const outcome = (pair: string[]) => {
         const ids = pair.map((s) => `entities/${s}`)
         return {
-          raisedAs: measured.scans.flat().filter((g) => holds(g.slugs, pair)).map((g) => g.confidence),
+          detectorRated: measured.scans.flat().filter((g) => holds(g.slugs, pair)).map((g) => g.confidence),
           judged: measured.judgeCalls.filter((c) => holds(c.pages, ids)),
           merge: measured.merges.find((m) => holds(m.slugs, pair)),
           recordedDistinct: notDuplicates.some((e) => holds(e, pair)),
@@ -221,11 +243,10 @@ describe.skipIf(!ENABLED)("the judge before a high-confidence merge, on #111's p
         expect(twin.merge?.outcome, twin.pair.join()).toBe("merged")
         expect(twin.pagesAfter, twin.pair.join()).toHaveLength(1)
       }
-      // Group 46 was raised high, judged, and not merged: both pages stay,
-      // the pair is recorded as not duplicates, and the group is kept at
-      // medium for the Maintenance screen.
+      // Group 46 was judged, and not merged: both pages stay, the pair is
+      // recorded as not duplicates, and the group is kept at medium for the
+      // Maintenance screen.
       const g46 = report.group46
-      expect(g46.raisedAs).toContain("high")
       expect(g46.judged).toHaveLength(1)
       expect(g46.merge).toBeUndefined()
       expect(g46.pagesAfter).toHaveLength(2)
