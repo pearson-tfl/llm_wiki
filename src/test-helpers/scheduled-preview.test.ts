@@ -3,6 +3,8 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { tempVaultCopy } from "./scheduled-preview"
+import { appFs } from "./fs-temp"
+import type { FileNode } from "@/types/wiki"
 
 const made: string[] = []
 afterEach(async () => {
@@ -33,5 +35,20 @@ describe("tempVaultCopy", () => {
 
   it("refuses a path that cannot be read", async () => {
     await expect(tempVaultCopy(path.join(await tempDir(), "missing"))).rejects.toThrow()
+  })
+})
+
+describe("appFs.listDirectory", () => {
+  it("hides dot-prefixed entries, as the app does, unless asked for them", async () => {
+    const dir = await tempDir()
+    await fs.mkdir(path.join(dir, ".llm-wiki/page-history"), { recursive: true })
+    await fs.mkdir(path.join(dir, "wiki"), { recursive: true })
+    await fs.writeFile(path.join(dir, ".llm-wiki/page-history/old.md"), "x")
+    await fs.writeFile(path.join(dir, "wiki/page.md"), "x")
+    const names = (nodes: FileNode[]): string[] =>
+      nodes.flatMap((n) => [n.name, ...names(n.children ?? [])])
+
+    expect(names(await appFs.listDirectory(dir))).toEqual(["wiki", "page.md"])
+    expect(names(await appFs.listDirectory(dir, { includeHidden: true }))).toContain("old.md")
   })
 })

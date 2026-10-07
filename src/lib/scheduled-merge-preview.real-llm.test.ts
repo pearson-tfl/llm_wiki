@@ -6,7 +6,8 @@
  * scan. Broken links are counted with the app's structural lint before and
  * after.
  *
- * Replaced: files through node:fs; the settings store in memory, seeded
+ * Replaced: files through node:fs, listed as the app lists them (dot-prefixed
+ * entries hidden, so page history is not taken for wiki pages); the settings store in memory, seeded
  * from app-state, so nothing is written back; the vector store with the
  * fake one, and the vector backfill skipped, since vectors are not what is
  * measured. A hub-rebuild request in the copy would run as it does live.
@@ -19,7 +20,7 @@
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { realFs } from "@/test-helpers/fs-temp"
+import { appFs } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { minutesSince, seedStoreFromAppState, tempVaultCopy } from "@/test-helpers/scheduled-preview"
 import type { DuplicateGroup } from "@/lib/dedup"
@@ -36,7 +37,7 @@ const copy = vi.hoisted(() => ({ path: "" }))
 const scan = vi.hoisted(() => ({ groups: [] as DuplicateGroup[], failedBatches: [] as unknown[], notDone: undefined as unknown }))
 const vectors = createFakeVectorStore()
 
-vi.mock("@/commands/fs", () => realFs)
+vi.mock("@/commands/fs", () => appFs)
 
 vi.mock("@tauri-apps/plugin-store", () => ({
   load: async () => ({

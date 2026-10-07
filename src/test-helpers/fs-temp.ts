@@ -96,6 +96,29 @@ export const realFs = {
   clipServerStatus: async (): Promise<string> => "ok",
 }
 
+function withoutDotEntries(nodes: FileNode[]): FileNode[] {
+  return nodes
+    .filter((node) => !node.name.startsWith("."))
+    .map((node) => (node.children ? { ...node, children: withoutDotEntries(node.children) } : node))
+}
+
+/**
+ * realFs listing as the app lists: dot-prefixed entries (`.llm-wiki`, …)
+ * hidden unless asked for, as `entry_is_visible` in fs.rs does. For a test
+ * on a copy of a real vault, whose `.llm-wiki` holds page history (#111).
+ */
+export const appFs = {
+  ...realFs,
+  listDirectory: async (
+    p: string,
+    options: boolean | { includeHidden?: boolean } = false,
+  ): Promise<FileNode[]> => {
+    const includeHidden = typeof options === "boolean" ? options : options.includeHidden === true
+    const nodes = await buildTree(p)
+    return includeHidden ? nodes : withoutDotEntries(nodes)
+  },
+}
+
 /**
  * Create a fresh unique temp directory for a single test. Returns the
  * absolute path (with forward slashes) and a cleanup function.

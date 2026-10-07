@@ -20,7 +20,7 @@
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { realFs } from "@/test-helpers/fs-temp"
+import { appFs } from "@/test-helpers/fs-temp"
 import { minutesSince, seedStoreFromAppState, tempVaultCopy, type SavedAppState } from "@/test-helpers/scheduled-preview"
 import type { EmbeddingConfig } from "@/stores/wiki-store"
 
@@ -37,7 +37,7 @@ const measured = {
 
 let embeddingConfig: EmbeddingConfig | null = null
 
-vi.mock("@/commands/fs", () => realFs)
+vi.mock("@/commands/fs", () => appFs)
 
 vi.mock("@/lib/project-store", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/project-store")>()),
