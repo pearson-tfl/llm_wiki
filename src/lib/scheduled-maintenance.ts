@@ -268,7 +268,7 @@ function appendRunRecord(
 /**
  * The page a group merges into: most sources, then earliest created date,
  * then first in the group. Slugs resolve to pages by basename anywhere
- * under wiki/, as executeMerge resolves them.
+ * under wiki/.
  */
 async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string> {
   const paths = new Map<string, string>()

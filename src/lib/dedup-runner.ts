@@ -232,8 +232,9 @@ export async function runDuplicateDetection(
   const summaries = await loadAllEntitySummaries(projectPath)
   if (summaries.length < 2) return noGroups()
   const notDup = await loadNotDuplicates(projectPath)
+  const sameSlug = sameSlugGroups(summaries, notDup)
   const detected = await detectWithModel(summaries, notDup, llmConfig, options)
-  return { ...detected, groups: [...sameSlugGroups(summaries, notDup), ...detected.groups] }
+  return { ...detected, groups: [...sameSlug, ...detected.groups] }
 }
 
 /** The model's part of the scan: the embedding prefilter, then the detector. */

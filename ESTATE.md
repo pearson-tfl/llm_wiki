@@ -294,14 +294,16 @@ Keep this list current. Merge conflicts can only come from these files.
   Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
   `src/lib/scheduled-maintenance.test.ts`; a live scan of a vault copy
   through the Claude Code CLI in `src/lib/dedup-scan.real-llm.test.ts`.
-- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts` – the duplicate scan and
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts` – the duplicate scan and
   merge handle pages that share a slug, such as a concept and an entity
   page of one name (pearson-tfl/llm_wiki#109). Upstream's detector names
   pages by slug, so it could not tell such pages apart, and its merge
   looked pages up by slug, taking whichever was read last. The scan now
   reports every slug held by more than one entity or concept page, from
   the file names alone with no model call, as one group naming each page
-  by its page id (`concepts/agent-skills`, `entities/agent-skills`); the
+  by its page id (`concepts/agent-skills`, `entities/agent-skills`), at
+  medium confidence, so scheduled maintenance never merges one unasked; the
   Maintenance screen offers those ids as the page to keep. A merge finds
   each page by its page id, or by a slug that names exactly one entity or
   concept page, and refuses a slug that names more. A slug the detector

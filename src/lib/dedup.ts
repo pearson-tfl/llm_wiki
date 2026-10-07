@@ -184,7 +184,9 @@ export function sameSlugGroups(
     groups.push({
       slugs: pageIds,
       reason: `Pages share the slug "${slug}": ${pageIds.join(", ")}`,
-      confidence: "high",
+      // Not "high": a shared name is not proof of one topic, and scheduled
+      // maintenance merges high groups with no click.
+      confidence: "medium",
     })
   }
   return groups

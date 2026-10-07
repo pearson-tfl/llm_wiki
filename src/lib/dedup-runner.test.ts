@@ -460,7 +460,7 @@ describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
   const TWIN_GROUP = {
     slugs: ["concepts/agent-skills", "entities/agent-skills"],
     reason: 'Pages share the slug "agent-skills": concepts/agent-skills, entities/agent-skills',
-    confidence: "high",
+    confidence: "medium",
   }
 
   /** The vault's pairs: one concept and one entity page per slug, beside `extra` other entity pages. */
