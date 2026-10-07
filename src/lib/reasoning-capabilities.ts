@@ -101,9 +101,12 @@ export function resolveReasoningCapabilities(config: LlmConfig): ReasoningCapabi
       return capabilities(TOGGLE_LEVELS)
     }
     // Anthropic-compatible custom endpoints are not necessarily Anthropic
-    // itself (MiniMax, Kimi and enterprise proxies differ), so omission is the
-    // only portable default. Users can select a first-party preset when they
-    // need vendor-specific controls.
+    // itself (MiniMax, Kimi and enterprise proxies differ), so budgets and
+    // effort levels stay unoffered. Off is offered: GLM on z.ai thinks unless
+    // the body says `thinking.type=disabled`, and its thinking spends the
+    // reply's max_tokens (pearson-tfl/llm_wiki#134). An endpoint that rejects
+    // the field can be set back to Auto.
+    if (config.apiMode === "anthropic_messages") return capabilities(TOGGLE_LEVELS)
     return capabilities(AUTO_ONLY)
   }
   return capabilities(AUTO_ONLY)
