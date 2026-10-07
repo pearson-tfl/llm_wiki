@@ -489,6 +489,14 @@ Keep this list current. Merge conflicts can only come from these files.
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
   script and its tests (pearson-tfl/llm_wiki#88); see Build below.
+- `eslint.config.js`, `eslint-suppressions.json`, `package.json`,
+  `package-lock.json` – the lint (pearson-tfl/llm_wiki#90): `npm run lint`
+  runs typescript-eslint's `no-floating-promises` and `no-misused-promises`
+  over `src/`; see Build, Check, below. `package.json` gains the `lint`
+  script and three dev dependencies, `eslint`, `typescript-eslint` and
+  `eslint-plugin-react-hooks`, so an upstream release that changes its
+  dependencies conflicts in both npm files: keep both sides and re-run
+  `npm install`. Upstream has no ESLint configuration.
 - `.github/workflows/estate-check.yml` – runs `check.sh` on each push to
   `estate` (pearson-tfl/llm_wiki#88). A file of its own, not an edit to
   upstream's `ci.yml`, which runs only for `main`; it conflicts only if
@@ -544,12 +552,22 @@ scripts/estate/check.sh
 
 It checks the checkout it lives in, with the same PATH set-up and missing
 tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
-then `npm run typecheck`, `npm run test:mocks`, `npm run mcp:build` and
-`cargo test` in `src-tauri`; it stops at the first failure with a non-zero
+then `npm run typecheck`, `npm run lint`, `npm run test:mocks`,
+`npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first failure with a non-zero
 exit, and on success prints the commit it checked. In a fresh worktree on
 this Mac the first run takes about 4 minutes, 3 of them `cargo test`
 compiling the app; later runs are faster. Tests:
 `scripts/estate/check.test.sh`.
+
+The lint runs only the two promise rules, type-aware, over `src/`. The 141
+violations already in `src/` when it was added (#90), most in upstream's
+code, are listed per file and rule in `eslint-suppressions.json`, so they
+pass and a new one fails: one more violation of a rule in a file than the
+list counts fails the lint and prints every violation of that rule in that
+file. A lane fixes its own new violation rather than listing it. When a
+listed one is fixed, the lint fails until the list is trimmed with
+`npx eslint src --prune-suppressions`. After an upstream release is merged,
+its new violations are listed with `npx eslint src --suppress-all`.
 
 The Estate check workflow (`.github/workflows/estate-check.yml`) runs the
 same script on GitHub on each push to `estate`, so a broken trunk shows on
