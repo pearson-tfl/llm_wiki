@@ -351,6 +351,22 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup-storage.test.ts`; a live run of a vault
   copy with the embedding server unreachable in
   `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts` – a high-confidence group whose slug
+  names both a concept and an entity page is saved for the Maintenance
+  screen, not queued for a scheduled merge (pearson-tfl/llm_wiki#114).
+  The merge refuses such a slug (#109), so the queued merge failed every
+  retry and the group never reached the screen. The scheduled run's choice
+  of the page to keep now finds pages as a merge does, by page id or by a
+  slug among the entity and concept pages only, through one shared
+  function (`pagesNamed`); before, it matched a file of that name anywhere
+  under `wiki/` and kept whichever it read last. A slug that names more
+  than one page leaves its group unqueued; a name with no page still ranks
+  last.
+  Upstream edits to the merge's page lookup or the scheduled run's choice
+  of the page to keep need re-checking against this.
+  Tests in `src/lib/scheduled-maintenance.test.ts`; a live scheduled run
+  of pages from a vault in `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
