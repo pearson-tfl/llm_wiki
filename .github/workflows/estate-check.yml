@@ -36,5 +36,9 @@ jobs:
         with:
           node-version: 22
 
+      # The checkout's own target, which the Rust cache saves, not the
+      # shared folder check.sh uses on John's Mac.
       - name: Check
         run: scripts/estate/check.sh
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
