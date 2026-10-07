@@ -19,6 +19,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { enqueueMerge, getQueue, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
+  addPendingDuplicateGroups,
   holdsNotDuplicate,
   readNotDuplicates,
   savePendingDuplicateGroups,
@@ -164,8 +165,12 @@ export async function runMaintenanceTick(
 
     if (record.groupsFound) {
       // Every group not queued for a merge, withheld ones included, is kept
-      // for the Maintenance screen.
-      await savePendingDuplicateGroups(pp, groups.filter((g) => !enqueued.includes(g)))
+      // for the Maintenance screen. A scan the model did not do found no
+      // group it would find, so the groups an earlier run saved stay (#117).
+      const pending = groups.filter((g) => !enqueued.includes(g))
+      await (record.duplicateScanNotDone
+        ? addPendingDuplicateGroups(pp, pending)
+        : savePendingDuplicateGroups(pp, pending))
       record.mergesEnqueued = outcomes.length
       const settled = await Promise.all(outcomes)
       record.mergesDone = settled.filter((o) => o === "done").length

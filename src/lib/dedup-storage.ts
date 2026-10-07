@@ -102,15 +102,47 @@ export async function savePendingDuplicateGroups(
   )
 }
 
+/**
+ * Add groups to the saved ones, for a scan that did not check every page
+ * (#117). A saved group with the same pages as an added one is replaced by
+ * it.
+ */
+export async function addPendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  const added = new Set(groups.map((g) => canonicalKey(g.slugs)))
+  await editPendingGroups(async () => {
+    const saved = await loadPendingDuplicateGroups(projectPath)
+    await savePendingDuplicateGroups(projectPath, [
+      ...saved.filter((g) => !added.has(canonicalKey(g.slugs))),
+      ...groups,
+    ])
+  })
+}
+
 /** Drop a group once the Maintenance screen has acted on it. */
 export async function removePendingDuplicateGroup(
   projectPath: string,
   slugs: string[],
 ): Promise<void> {
-  const groups = await loadPendingDuplicateGroups(projectPath)
   const key = canonicalKey(slugs)
-  const kept = groups.filter((g) => canonicalKey(g.slugs) !== key)
-  if (kept.length !== groups.length) await savePendingDuplicateGroups(projectPath, kept)
+  await editPendingGroups(async () => {
+    const groups = await loadPendingDuplicateGroups(projectPath)
+    const kept = groups.filter((g) => canonicalKey(g.slugs) !== key)
+    if (kept.length !== groups.length) await savePendingDuplicateGroups(projectPath, kept)
+  })
+}
+
+/** Read-modify-writes of the saved groups, one at a time, so the scheduled
+ *  run adding groups and the Maintenance screen dropping one cannot undo
+ *  each other's write (#117). */
+let pendingEdits: Promise<unknown> = Promise.resolve()
+
+function editPendingGroups(edit: () => Promise<void>): Promise<void> {
+  const run = pendingEdits.then(edit)
+  pendingEdits = run.catch(() => undefined)
+  return run
 }
 
 function canonicalKey(slugs: string[]): string {
