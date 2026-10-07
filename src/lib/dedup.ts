@@ -169,7 +169,7 @@ export function extractEntitySummary(
  */
 export function sameSlugGroups(
   summaries: EntitySummary[],
-  notDuplicates: string[][] = [],
+  notDuplicates: string[][],
 ): DuplicateGroup[] {
   const pageIdsBySlug = new Map<string, string[]>()
   for (const s of summaries) {

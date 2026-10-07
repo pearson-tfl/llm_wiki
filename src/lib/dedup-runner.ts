@@ -519,9 +519,13 @@ export async function executeMerge(
   const pp = normalizePath(projectPath)
 
   // 1. Resolve each group page to its on-disk path + content. A page named
-  //    twice is one page (#109).
+  //    twice, by one name or by its slug and its page id, is one page (#109).
   const allPages = await loadAllWikiPages(pp)
-  const groupPages = [...new Set(group.slugs)].map((slug) => ({ slug, ...findGroupPage(allPages, slug) }))
+  const groupPages: { slug: string; path: string; content: string }[] = []
+  for (const slug of group.slugs) {
+    const page = findGroupPage(allPages, slug)
+    if (!groupPages.some((p) => p.path === page.path)) groupPages.push({ slug, ...page })
+  }
 
   const groupPaths = new Set(groupPages.map((p) => p.path))
   const otherPages = allPages.filter((p) => !groupPaths.has(p.path))

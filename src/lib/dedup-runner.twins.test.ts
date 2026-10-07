@@ -106,6 +106,15 @@ describe("executeMerge – pages sharing a slug (#109)", () => {
     expect(written.paths).toEqual([])
   })
 
+  it("refuses a group that names one page by its page id and by its slug, before any model call or write", async () => {
+    const twice = { slugs: ["entities/echo-loop", "echo-loop"], reason: "same page twice", confidence: "high" as const }
+
+    await expect(executeMerge(tmp.path, twice, "echo-loop", llmConfig)).rejects.toThrow()
+    expect(model.prompts).toEqual([])
+    expect(written.paths).toEqual([])
+    expect(await fileExists(at("wiki/entities/echo-loop.md"))).toBe(true)
+  })
+
   it("refuses a bare slug that names two pages, rather than merging whichever was read last", async () => {
     const ambiguous = { slugs: ["agent-skills", "echo-loop"], reason: "model's group", confidence: "low" as const }
 
