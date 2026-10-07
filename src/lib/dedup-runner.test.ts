@@ -709,7 +709,7 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
    *  (the chat route) answers what `judge` makes of the pages it is given. */
   function mockDetectorAndJudge(
     detectorGroups: string[][],
-    judge: (userMessage: string) => { pages: string[]; reason: string }[] | Error,
+    judge: (userMessage: string) => unknown[] | Error,
   ) {
     mockStreamChat.mockImplementation(async (config: LlmConfig, messages: { content: string }[], cb) => {
       if (config.model !== "chat-route") {
@@ -870,6 +870,23 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
 
     expect(result.groups).toEqual([TWIN_GROUP])
     expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a page it was not given") }])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["pages given as one string", { pages: "concepts/agent-skills, entities/agent-skills", reason: "Same." }],
+    ["its pages under another key", { paths: TWIN_IDS, reason: "Same." }],
+    ["a bare string for a group", "concepts/agent-skills, entities/agent-skills"],
+  ])("reads a judge reply with %s as unreadable, recording nothing", async (_form, group) => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [group])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a group with no pages list") }])
     expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 

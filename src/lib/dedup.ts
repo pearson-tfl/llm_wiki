@@ -479,9 +479,10 @@ export interface JudgedTopic {
  * Ask the model which of the candidate pages, which include pages sharing a
  * slug, are one topic (#135). Each page is given by its page id, title and
  * content. A page already in an earlier group is not counted again. A reply
- * that cannot be read, or that names a page it was not given, rejects with
- * DetectorReplyUnreadableError: every page it leaves out is recorded as
- * distinct, so a page named in another form must not count as left out.
+ * that cannot be read, that holds a group with no pages list, or that names
+ * a page it was not given rejects with DetectorReplyUnreadableError: every
+ * page it leaves out is recorded as distinct, so a group it could not read,
+ * or a page named in another form, must not count as left out.
  */
 export async function judgeSharedSlugPages(
   candidates: { pageId: string; content: string }[],
@@ -511,7 +512,10 @@ export async function judgeSharedSlugPages(
   const topics: JudgedTopic[] = []
   for (const g of groupsRaw) {
     const obj = (g && typeof g === "object" ? g : {}) as Record<string, unknown>
-    const named = Array.isArray(obj.pages) ? obj.pages : []
+    if (!Array.isArray(obj.pages)) {
+      throw new DetectorReplyUnreadableError(`judge: a group with no pages list: ${JSON.stringify(g)}`)
+    }
+    const named: unknown[] = obj.pages
     const unknown = named.find((p) => typeof p !== "string" || !given.has(p))
     if (unknown !== undefined) {
       throw new DetectorReplyUnreadableError(`judge: names a page it was not given: ${JSON.stringify(unknown)}`)
