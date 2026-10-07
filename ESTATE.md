@@ -555,10 +555,10 @@ scripts/estate/check.sh
 It checks the checkout it lives in, with the same PATH set-up and missing
 tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
 then `npm run typecheck`, `npm run test:mocks`, `npm run test:llm`,
-`npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first failure with a non-zero
-exit, and on success prints the commit it checked. In a fresh worktree on
-this Mac the first run takes about 4 minutes, 3 of them `cargo test`
-compiling the app; later runs are faster. Tests:
+`npm run mcp:build` and `cargo test` in `src-tauri`; it stops at the first
+failure with a non-zero exit, and on success prints the commit it checked.
+In a fresh worktree on this Mac the first run takes about 4 minutes, 3 of
+them `cargo test` compiling the app; later runs are faster. Tests:
 `scripts/estate/check.test.sh`.
 
 The Estate check workflow (`.github/workflows/estate-check.yml`) runs the
