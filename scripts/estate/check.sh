@@ -43,6 +43,7 @@ npm run mcp:build
 # the test programs run, so another check could relink them between this
 # check's library tests and its later ones (#106). This lock, in the target
 # folder, holds until this check's tests end; a second check waits for it.
+# lockf makes the file but not the folder, which may not exist yet.
 (cd src-tauri && mkdir -p "$CARGO_TARGET_DIR" &&
   lockf -k "$CARGO_TARGET_DIR/.estate-check.lock" cargo test)
 

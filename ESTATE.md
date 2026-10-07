@@ -618,8 +618,9 @@ tests, and the first check would then report the other tree's results. A
 live run on 7 Oct 2026 did just that (#106). So `check.sh` runs `cargo test`
 under a lock of its own, `.estate-check.lock` in the target folder, held
 until the tests end: a second check on the same folder waits for it, with
-no message, for as long as the first check's `cargo test` takes. A plain
-`cargo` run takes no part in this lock.
+no message, for as long as the first check's `cargo test` takes, so a hung
+`cargo test` holds every later check until it is stopped. A plain `cargo`
+run takes no part in this lock.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
