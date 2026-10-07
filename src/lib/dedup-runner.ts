@@ -55,16 +55,17 @@ const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
  */
 const DEDUP_MERGE_MAX_TOKENS = 16_384
 import {
+  ambiguousSlugRefusal,
   detectDuplicateGroups,
   DetectorCallFailedError,
   DetectorReplyUnreadableError,
   extractEntitySummary,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
-  pageIdFromPath,
   pagesNamed,
   rewriteIndexMd,
   sameSlugGroups,
+  toWikiRelative,
   type DedupLlmCall,
   type DuplicateGroup,
   type EntitySummary,
@@ -164,15 +165,6 @@ function* walkMd(nodes: FileNode[], prefix: string): Generator<FileNode> {
       yield node
     }
   }
-}
-
-/** Convert an absolute filesystem path to a wiki-relative one
- *  (`<project>/wiki/entities/foo.md` → `wiki/entities/foo.md`). */
-function toWikiRelative(projectPath: string, absPath: string): string {
-  const pp = normalizePath(projectPath)
-  const norm = normalizePath(absPath)
-  if (norm.startsWith(`${pp}/`)) return norm.slice(pp.length + 1)
-  return norm
 }
 
 /**
@@ -650,10 +642,8 @@ function findGroupPage(
       `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
     )
   }
-  if (found.length > 1) {
-    const pageIds = found.map((p) => pageIdFromPath(p.path)).join(", ")
-    throw new Error(`Slug "${slug}" names ${found.length} pages: ${pageIds}`)
-  }
+  const refusal = ambiguousSlugRefusal(allPages, slug)
+  if (refusal) throw new Error(refusal)
   return found[0]
 }
 

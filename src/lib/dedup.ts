@@ -31,6 +31,7 @@
  */
 
 import { parseFrontmatter } from "./frontmatter"
+import { normalizePath } from "./path-utils"
 import {
   parseFrontmatterArray,
   mergeArrayFieldsIntoContent,
@@ -203,6 +204,15 @@ export function sameSlugGroups(
   return groups
 }
 
+/** Convert an absolute filesystem path to a wiki-relative one
+ *  (`<project>/wiki/entities/foo.md` → `wiki/entities/foo.md`). */
+export function toWikiRelative(projectPath: string, absPath: string): string {
+  const pp = normalizePath(projectPath)
+  const norm = normalizePath(absPath)
+  if (norm.startsWith(`${pp}/`)) return norm.slice(pp.length + 1)
+  return norm
+}
+
 /** A page's id, its path under `wiki/` without `.md`: `wiki/concepts/foo.md` → `concepts/foo`. */
 export function pageIdFromPath(path: string): string {
   return path.replace(/^wiki\//, "").replace(/\.md$/, "")
@@ -220,6 +230,17 @@ export function pagesNamed<T extends { path: string }>(pages: T[], name: string)
     : pages.filter((p) =>
       (p.path.startsWith("wiki/entities/") || p.path.startsWith("wiki/concepts/"))
       && p.path.endsWith(`/${name}.md`))
+}
+
+/**
+ * Why a merge refuses a slug that names more than one page, rather than
+ * merging one of them (#109); null when it names at most one. The merge
+ * and the Maintenance screen's card both refuse with it (#126).
+ */
+export function ambiguousSlugRefusal<T extends { path: string }>(pages: T[], slug: string): string | null {
+  const found = pagesNamed(pages, slug)
+  if (found.length < 2) return null
+  return `Slug "${slug}" names ${found.length} pages: ${found.map((p) => pageIdFromPath(p.path)).join(", ")}`
 }
 
 function slugFromPath(path: string): string {

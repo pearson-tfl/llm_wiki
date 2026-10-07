@@ -12,11 +12,13 @@ vi.mock("@/commands/fs", () => ({ ...realFs, readFile: vi.fn(realFs.readFile) })
 import { readFile } from "@/commands/fs"
 import {
   addPendingDuplicateGroups,
+  listWikiPages,
   loadPendingDuplicateGroups,
   removePendingDuplicateGroup,
   replacePendingDuplicateGroups,
   savePendingDuplicateGroups,
 } from "./dedup-storage"
+import { loadAllWikiPages } from "./dedup-runner"
 import type { DuplicateGroup } from "./dedup"
 
 let tmp: { path: string; cleanup: () => Promise<void> }
@@ -100,5 +102,16 @@ describe("saved duplicate groups", () => {
     await addPendingDuplicateGroups(tmp.path, [added])
 
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live, ambiguous, byPageId, added])
+  })
+})
+
+describe("listWikiPages", () => {
+  it("names pages as the merge's page read does, for a project path ending in a slash (#126)", async () => {
+    await writePages("wiki/concepts/seat.md", "wiki/entities/lane.md")
+    const pp = `${tmp.path}/`
+
+    const listed = (await listWikiPages(pp)).map((p) => p.path).sort()
+
+    expect(listed).toEqual((await loadAllWikiPages(pp)).map((p) => p.path).sort())
   })
 })

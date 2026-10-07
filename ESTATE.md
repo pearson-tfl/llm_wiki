@@ -449,6 +449,26 @@ Keep this list current. Merge conflicts can only come from these files.
   of the page to keep need re-checking against this.
   Tests in `src/lib/scheduled-maintenance.test.ts`; a live scheduled run
   of pages from a vault in `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-queue.ts`,
+  `src/lib/dedup-storage.ts`, `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/maintenance-section.tsx` – a
+  Maintenance-screen merge whose slug names more than one page is refused
+  on the card before any task is queued (pearson-tfl/llm_wiki#126).
+  Before, the merge was queued, refused the slug at every retry and failed.
+  The card now says which pages the slug names, in the merge's own words,
+  from one shared check (`ambiguousSlugRefusal`), and the group stays
+  saved. The scheduled run's page list now uses the merge's own path
+  conversion (`toWikiRelative`, moved to `dedup.ts`). For a project path
+  ending in a slash both give absolute paths, so such a project still
+  cannot merge, as before. A run whose save of the kept groups fails
+  still records the merges it queued.
+  Upstream edits to the card's Merge button or the merge's page lookup
+  need re-checking against this.
+  Tests in `src/lib/dedup-queue.card-merge.test.ts`,
+  `src/components/settings/sections/maintenance-section.test.tsx`,
+  `src/lib/dedup-storage.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live card merge and page list
+  on a vault copy in `src/lib/dedup-ambiguous-card.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

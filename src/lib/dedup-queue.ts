@@ -29,7 +29,13 @@ import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { executeMerge, reembedMergedPages } from "@/lib/dedup-runner"
-import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "@/lib/dedup"
+import {
+  ambiguousSlugRefusal,
+  MergeReplyRejectedError,
+  type DuplicateGroup,
+  type MergeResult,
+} from "@/lib/dedup"
+import { listWikiPages, removePendingDuplicateGroup } from "@/lib/dedup-storage"
 import { withProjectLock } from "@/lib/project-mutex"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { reviewIdFor, useReviewStore } from "@/stores/review-store"
@@ -299,6 +305,27 @@ export async function enqueueMerge(
   await saveQueue(currentProjectPath)
   processNext(currentProjectId)
   return task.id
+}
+
+/**
+ * A merge asked for on a Maintenance-screen card. A slug that names more
+ * than one page would fail every retry of the merge, so it is refused here,
+ * before any task is queued, in the merge's words, and the saved group
+ * stays (#126). Otherwise the merge is queued and the saved group dropped.
+ * Returns the refusal, or null once queued.
+ */
+export async function enqueueCardMerge(
+  projectId: string,
+  projectPath: string,
+  group: DuplicateGroup,
+  canonicalSlug: string,
+): Promise<string | null> {
+  const pages = await listWikiPages(projectPath)
+  const refusal = group.slugs.map((slug) => ambiguousSlugRefusal(pages, slug)).find((r) => r !== null)
+  if (refusal) return refusal
+  await enqueueMerge(projectId, group, canonicalSlug)
+  await removePendingDuplicateGroup(projectPath, group.slugs)
+  return null
 }
 
 /**

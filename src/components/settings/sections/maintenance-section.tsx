@@ -27,7 +27,7 @@ import {
   removePendingDuplicateGroup,
 } from "@/lib/dedup-storage"
 import {
-  enqueueMerge,
+  enqueueCardMerge,
   cancelTask,
   retryTask,
   getQueue,
@@ -60,6 +60,9 @@ interface GroupUiEntry {
   /** Becomes true when the user marks the group as "not duplicates"
    *  in this session — the card transitions to skipped state. */
   skipped: boolean
+  /** Why the last Merge click queued nothing: a slug names more than one
+   *  page (#126). */
+  refusal?: string | null
 }
 
 /** Match a card to its task in the queue (if any) by slug-set. */
@@ -329,8 +332,9 @@ export function MaintenanceSection() {
     async (entry: GroupUiEntry) => {
       if (!project) return
       try {
-        await enqueueMerge(project.id, entry.group, entry.canonicalSlug)
-        await removePendingDuplicateGroup(project.path, entry.group.slugs)
+        const refusal = await enqueueCardMerge(project.id, project.path, entry.group, entry.canonicalSlug)
+        setGroups((prev) => prev.map((g) => (g.group === entry.group ? { ...g, refusal } : g)))
+        if (refusal) return
         // Refresh immediately so the card flips to "queued" without
         // waiting for the next 1s poll tick.
         setTasks([...getQueue()])
@@ -894,7 +898,7 @@ interface CardProps {
   onNotDuplicate: () => void
 }
 
-function DuplicateGroupCard({
+export function DuplicateGroupCard({
   entry,
   task,
   merged,
@@ -1024,6 +1028,13 @@ function DuplicateGroupCard({
             )}
           </div>
         </>
+      )}
+
+      {entry.refusal && !finished && (
+        <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/5 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div>{entry.refusal}</div>
+        </div>
       )}
 
       {failed && task?.error && (

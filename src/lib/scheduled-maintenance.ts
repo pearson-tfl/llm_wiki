@@ -175,9 +175,15 @@ export async function runMaintenanceTick(
       // so the groups an earlier run saved stay, less any naming a page no
       // longer on disk (#120).
       const pending = groups.filter((g) => !enqueued.includes(g))
-      await (record.duplicateScanNotDone || record.failedDetectorBatches
-        ? addPendingDuplicateGroups(pp, pending)
-        : replacePendingDuplicateGroups(pp, pending))
+      try {
+        await (record.duplicateScanNotDone || record.failedDetectorBatches
+          ? addPendingDuplicateGroups(pp, pending)
+          : replacePendingDuplicateGroups(pp, pending))
+      } catch (err) {
+        // The merges queued above still run, so they are still recorded (#126).
+        const message = err instanceof Error ? err.message : String(err)
+        record.error = record.error ? `${record.error}; ${message}` : message
+      }
       record.mergesEnqueued = outcomes.length
       const settled = await Promise.all(outcomes)
       record.mergesDone = settled.filter((o) => o === "done").length

@@ -13,7 +13,7 @@
  */
 import { readFile, writeFile, fileExists, listDirectory } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
-import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
+import { pagesNamed, toWikiRelative, type DuplicateGroup } from "@/lib/dedup"
 import type { FileNode } from "@/types/wiki"
 
 const FILE_NAME = ".llm-wiki/dedup-not-duplicates.json"
@@ -93,6 +93,10 @@ export async function loadPendingDuplicateGroups(projectPath: string): Promise<D
   }
 }
 
+/** Write the saved groups as given, off the one-at-a-time chain below.
+ *  Outside this file only tests call it; the app writes through
+ *  `replacePendingDuplicateGroups` or `addPendingDuplicateGroups`, which
+ *  go through the chain (#120). */
 export async function savePendingDuplicateGroups(
   projectPath: string,
   groups: DuplicateGroup[],
@@ -165,7 +169,7 @@ export async function listWikiPages(
 ): Promise<{ file: string; path: string }[]> {
   const pp = normalizePath(projectPath)
   return [...walkFiles(await listDirectory(`${pp}/wiki`))]
-    .map((node) => ({ file: node.path, path: normalizePath(node.path).slice(pp.length + 1) }))
+    .map((node) => ({ file: node.path, path: toWikiRelative(pp, node.path) }))
 }
 
 function* walkFiles(nodes: FileNode[]): Generator<FileNode> {
