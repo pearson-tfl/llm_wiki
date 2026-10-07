@@ -537,6 +537,31 @@ Keep this list current. Merge conflicts can only come from these files.
   scan and scheduled run of the vault's `agent-skills` and
   `openclaw-code-mode` pairs and a built distinct pair in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts` – two follow-ups to #135
+  (pearson-tfl/llm_wiki#139). A merge of pages named by page id that
+  carry different slugs, as the judge can find one topic across a shared
+  slug and another, now also sends bare `[[slug]]` links and `related`
+  entries naming a merged-away page's slug to the kept page, and drops
+  that slug's index entries, wherever no page left after the merge carries
+  the slug; before, only links by page id were rewritten, and bare links
+  to the merged-away slug pointed at nothing. A slug the kept page or
+  another page still carries is left alone, so the same-slug merge (#109)
+  is unchanged. The index rewrite's bare `slug.md` match no longer takes
+  the line of a page whose slug only ends in that slug, as `swarm` would
+  have taken `openai-swarm.md`. The judge also stops calling after two
+  judge calls in a row fail, as the detector does (#124): each group left
+  stays as it was and is reported as a failed batch with the reason "Not
+  checked: the shared-slug judge stopped after 2 calls in a row failed",
+  and the log names its pages; an answer, or a reply it cannot read,
+  resets the count. Upstream edits to the merge's
+  cross-reference rewrite or index rewrite need re-checking against this.
+  Tests in `src/lib/dedup.test.ts`, `src/lib/dedup-runner.test.ts` and
+  `src/lib/dedup-runner.twins.test.ts`; a live scheduled run on a
+  vault-copy project, where the built `swarm` entity page and a built page
+  of another slug on the same library, `openai-swarm`, are judged one
+  topic and merged, with the app's structural lint before and after, and
+  a live scan of three same-slug pairs whose judge calls all fail, in
+  `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

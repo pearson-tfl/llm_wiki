@@ -340,6 +340,22 @@ describe("rewriteIndexMd", () => {
     expect(out).toContain("[DPAO](entities/dpao.md)")
   })
 
+  it("keeps the line of a page whose slug only ends in a merged-away bare slug (#139)", () => {
+    // Line forms from the vault's index, where a line reads
+    // `- [[entities/openclaw-boot-md-hook]] — OpenClaw boot-md Bundled Hook (BOOT.md)`,
+    // and the markdown links of the #109 fixture (dedup-runner.twins.test.ts).
+    const input = [
+      "- [OpenAI Swarm](entities/openai-swarm.md)",
+      "- [[entities/openai-swarm]] — OpenAI Swarm (openai-swarm.md)",
+      "- [Swarm](entities/swarm.md)",
+      "- [[swarm]] — Swarm",
+    ].join("\n")
+    expect(rewriteIndexMd(input, new Set(["swarm"]))).toBe([
+      "- [OpenAI Swarm](entities/openai-swarm.md)",
+      "- [[entities/openai-swarm]] — OpenAI Swarm (openai-swarm.md)",
+    ].join("\n"))
+  })
+
   it("removes lines with wikilinks to merged-away slugs", () => {
     const input = [
       "## Concepts",
@@ -510,6 +526,62 @@ describe("mergeDuplicateGroup", () => {
     expect(rewritten).not.toMatch(/\[\[b(\|[^\]]*)?\]\]/)
     // related field rewritten + deduped
     expect(parseFrontmatterArray(rewritten, "related")).toEqual(["a", "kept"])
+  })
+
+  it("rewrites bare links to a page named by page id when no page left carries its slug (#139)", async () => {
+    const referencingPage = PAGE(
+      "type: concept\ntitle: Other\nrelated: [foo, kept]",
+      "See [[foo]], [[foo|the foo tool]], [[entities/foo]] and [[agent-skills]].",
+    )
+    const llm = vi.fn().mockResolvedValue(PAGE("type: concept\ntitle: Agent Skills\n", "merged body"))
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "concepts/agent-skills", path: "wiki/concepts/agent-skills.md", content: PAGE("type: concept", "a") },
+          { slug: "entities/foo", path: "wiki/entities/foo.md", content: PAGE("type: entity", "f") },
+        ],
+        canonicalSlug: "concepts/agent-skills",
+        otherWikiPages: [
+          { path: "wiki/entities/agent-skills.md", content: PAGE("type: entity", "the other agent-skills") },
+          { path: "wiki/concepts/other.md", content: referencingPage },
+        ],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.rewrites).toHaveLength(1)
+    const rewritten = result.rewrites[0].newContent
+    expect(rewritten).toContain(
+      "See [[concepts/agent-skills]], [[concepts/agent-skills|the foo tool]], [[concepts/agent-skills]] and [[agent-skills]].",
+    )
+    expect(parseFrontmatterArray(rewritten, "related")).toEqual(["concepts/agent-skills", "kept"])
+  })
+
+  it("leaves bare links to a merged-away page's slug that a page left after the merge still carries (#139)", async () => {
+    const referencingPage = PAGE("type: concept\ntitle: Other", "See [[agent-skills]] and [[concepts/agent-skills]].")
+    const llm = vi.fn().mockResolvedValue(PAGE("type: entity\ntitle: Foo\n", "merged body"))
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "concepts/agent-skills", path: "wiki/concepts/agent-skills.md", content: PAGE("type: concept", "a") },
+          { slug: "entities/foo", path: "wiki/entities/foo.md", content: PAGE("type: entity", "f") },
+        ],
+        canonicalSlug: "entities/foo",
+        otherWikiPages: [
+          { path: "wiki/entities/agent-skills.md", content: PAGE("type: entity", "the other agent-skills") },
+          { path: "wiki/concepts/other.md", content: referencingPage },
+        ],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.rewrites.map((r) => r.newContent)).toEqual([
+      PAGE("type: concept\ntitle: Other", "See [[agent-skills]] and [[entities/foo]]."),
+    ])
   })
 
   it("doesn't include unchanged pages in rewrites", async () => {
