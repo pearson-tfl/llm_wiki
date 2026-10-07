@@ -12,7 +12,8 @@
  *
  *   1. extractEntitySummaries: walk wiki/entities and wiki/concepts,
  *      pull (slug, title, description, tags) per page. Pure-data;
- *      no LLM.
+ *      no LLM. sameSlugGroups groups the pages that share a slug
+ *      from their paths alone.
  *   2. detectDuplicateGroups: hand the summary list to an LLM, ask
  *      it to identify groups of slugs likely to refer to the same
  *      thing. Returns parsed JSON groups with reason + confidence.
