@@ -20,7 +20,6 @@ export interface Page {
 export interface CandidateOptions {
   topK?: number
   threshold?: number
-  maxPages?: number
   signal?: AbortSignal
   /**
    * If too many embeddings fail, callers should fall back to the old full scan
@@ -114,50 +113,43 @@ export async function candidatePairs(
 ): Promise<CandidatePair[]> {
   const topK = opts.topK ?? 8
   const threshold = opts.threshold ?? 0.82
-  const maxPages = opts.maxPages ?? 5000
   const minSuccessRatio = opts.minSuccessRatio ?? 0.8
 
   if (pages.length === 0) return []
-  const subset = pages.slice(0, maxPages)
-  if (pages.length > subset.length) {
-    console.warn(
-      `[dedup] embedding prefilter limited scan to ${subset.length}/${pages.length} pages`,
-    )
-  }
 
-  const embeddings = await embedPages(subset, cfg, {
+  const embeddings = await embedPages(pages, cfg, {
     signal: opts.signal,
     textBudgetChars: opts.textBudgetChars,
   })
 
   const embeddedCount = [...embeddings.values()].filter((v) => v && v.length > 0).length
-  if (subset.length >= 2 && embeddedCount < 2) {
+  if (pages.length >= 2 && embeddedCount < 2) {
     throw new Error("Duplicate prefilter could not embed enough pages")
   }
-  if (subset.length > 0 && embeddedCount / subset.length < minSuccessRatio) {
+  if (pages.length > 0 && embeddedCount / pages.length < minSuccessRatio) {
     throw new Error(
-      `Duplicate prefilter embedded only ${embeddedCount}/${subset.length} pages`,
+      `Duplicate prefilter embedded only ${embeddedCount}/${pages.length} pages`,
     )
   }
 
   const pairSet = new Set<string>()
   const pairs: CandidatePair[] = []
 
-  for (let i = 0; i < subset.length; i++) {
-    const vi = embeddings.get(subset[i].id)
+  for (let i = 0; i < pages.length; i++) {
+    const vi = embeddings.get(pages[i].id)
     if (!vi) continue
     const scored: Array<{ j: number; sim: number }> = []
-    for (let j = 0; j < subset.length; j++) {
+    for (let j = 0; j < pages.length; j++) {
       if (i === j) continue
-      const vj = embeddings.get(subset[j].id)
+      const vj = embeddings.get(pages[j].id)
       const sim = cosineSimilarity(vi, vj)
       if (sim >= threshold) scored.push({ j, sim })
     }
     scored.sort((a, b) => b.sim - a.sim)
 
     for (let k = 0; k < Math.min(topK, scored.length); k++) {
-      const a = subset[i].id
-      const b = subset[scored[k].j].id
+      const a = pages[i].id
+      const b = pages[scored[k].j].id
       const key = a < b ? `${a}\t${b}` : `${b}\t${a}`
       if (!pairSet.has(key)) {
         pairSet.add(key)
