@@ -288,8 +288,9 @@ Keep this list current. Merge conflicts can only come from these files.
   page count and reason, the scheduled run records it in
   `failedDetectorBatches`, and the Maintenance screen says how many pages
   went unchecked instead of calling the wiki clean. A concept and an
-  entity page sharing a slug still go unfound: they share a call, but the
-  detector names pages by slug and is told not to group across types.
+  entity page sharing a slug are found only some of the time: they share a
+  call, but the detector names pages by slug and is told not to group
+  across types.
   Upstream edits to the detector's batching or reply parsing need
   re-checking against this.
   Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and
