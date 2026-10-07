@@ -556,7 +556,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup-runner.twins.test.ts`; a live scheduled run on a
   vault-copy project, where the built `swarm` entity page and a built page
   of another slug on the same library, `openai-swarm`, are judged one
-  topic and merged, with the app's structural lint before and after, in
+  topic and merged, with the app's structural lint before and after, and
+  a live scan of three same-slug pairs whose judge calls all fail, in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`

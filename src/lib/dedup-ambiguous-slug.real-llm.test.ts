@@ -25,6 +25,12 @@
  * after; a link to a page of the copy left out of the project is not
  * counted as broken.
  *
+ * A scan of the three pairs, copied to a fourth fresh project, shows the
+ * judge stops after two calls in a row fail (#139): the scan's route is a
+ * local server on the app's HTTP client (`custom`, Anthropic messages),
+ * which answers the detector with no groups and drops the connection of
+ * every judge call.
+ *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy.
  * Never point it at a live vault. Writes its measurements to DEDUP_REPORT
  * when set.
@@ -32,6 +38,8 @@
 import { describe, expect, it, vi } from "vitest"
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
+import http from "node:http"
+import type { AddressInfo } from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
@@ -433,4 +441,87 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       await fresh.cleanup()
     }
   }, 60 * 60 * 1000)
+
+  it("stops calling the judge after two calls in a row fail, keeping each group left (#139)", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { runDuplicateDetection } = await import("./dedup-runner")
+    const calls: { judge: boolean; outcome: string }[] = []
+    const server = http.createServer((request, response) => {
+      let body = ""
+      request.on("data", (chunk) => { body += chunk })
+      request.on("end", () => {
+        const judge = JSON.stringify(JSON.parse(body).system ?? "").includes(JUDGE_PROMPT_MARKER)
+        if (judge) {
+          calls.push({ judge, outcome: "connection-dropped" })
+          request.socket.destroy()
+          return
+        }
+        calls.push({ judge, outcome: "answered" })
+        const text = JSON.stringify({ groups: [] })
+        response.writeHead(200, { "Content-Type": "text/event-stream" })
+        for (const event of [
+          { type: "message_start", message: { id: "m", type: "message", role: "assistant", content: [] } },
+          { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+          { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+          { type: "content_block_stop", index: 0 },
+          { type: "message_delta", delta: { stop_reason: "end_turn" } },
+          { type: "message_stop" },
+        ]) response.write(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+        response.end()
+      })
+    })
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    const port = (server.address() as AddressInfo).port
+    const fresh = await createTempProject("llmw139-stop")
+    const warn = vi.spyOn(console, "warn")
+    try {
+      for (const slug of PAIRS.slice(0, 2)) {
+        for (const folder of ["concepts", "entities"]) {
+          await fs.mkdir(`${fresh.path}/wiki/${folder}`, { recursive: true })
+          await fs.copyFile(`${vault}/wiki/${folder}/${slug}.md`, `${fresh.path}/wiki/${folder}/${slug}.md`)
+        }
+      }
+      await fs.writeFile(`${fresh.path}/wiki/concepts/swarm.md`, SWARM_CONCEPT)
+      await fs.writeFile(`${fresh.path}/wiki/entities/swarm.md`, SWARM_ENTITY)
+      const scripted: LlmConfig = {
+        provider: "custom",
+        apiKey: "none",
+        model: "llmw139-scripted",
+        ollamaUrl: "",
+        customEndpoint: `http://127.0.0.1:${port}`,
+        apiMode: "anthropic_messages",
+        maxContextSize: 200_000,
+      }
+      useWikiStore.setState({
+        project: { id: "llmw-139-stop", name: "stop", path: fresh.path },
+        llmConfig: scripted,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+
+      const scan = await runDuplicateDetection(fresh.path, scripted)
+      const report = {
+        server: { port, pid: process.pid },
+        calls,
+        groups: scan.groups,
+        failedBatches: scan.failedBatches,
+        stopLogged: warn.mock.calls.filter((args) => /shared-slug judge stopped after 2 calls/.test(String(args[0]))).length,
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.stop.json`, JSON.stringify(report, null, 2))
+
+      expect(calls.filter((c) => c.judge)).toHaveLength(2)
+      expect(scan.groups.map((g) => [...g.slugs].sort())).toEqual(
+        PAIRS.map((slug) => [`concepts/${slug}`, `entities/${slug}`]),
+      )
+      expect(scan.failedBatches).toHaveLength(3)
+      expect(scan.failedBatches[2]).toEqual({
+        pages: 2,
+        reason: "Not checked: the shared-slug judge stopped after 2 calls in a row failed",
+      })
+      expect(report.stopLogged).toBe(1)
+    } finally {
+      warn.mockRestore()
+      await fresh.cleanup()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  }, 10 * 60 * 1000)
 })
