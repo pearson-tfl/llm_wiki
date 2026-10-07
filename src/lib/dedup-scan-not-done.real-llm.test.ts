@@ -11,11 +11,15 @@
  * - No candidate pairs: 260 of the copy's pages, chosen with the real
  *   embeddings so no two of them reach the prefilter's threshold, copied to
  *   a fresh project.
+ * - The embedding server down (#117): the copy's scheduled run, with an
+ *   endpoint that never resolves, keeps the pending groups an earlier run
+ *   saved in the copy.
  *
  * Gated behind RUN_LLM_TESTS=1, EMBEDDING_ENDPOINT, EMBEDDING_MODEL and
  * DEDUP_VAULT_COPY, the path of the copy, which the scheduled run writes its
- * record and pending groups into. Never point it at a live vault. Writes
- * each case's measurements beside DEDUP_REPORT when set.
+ * record and pending groups into; the #117 case needs only RUN_LLM_TESTS=1
+ * and DEDUP_VAULT_COPY. Never point it at a live vault. Writes each case's
+ * measurements beside DEDUP_REPORT when set.
  */
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
@@ -224,3 +228,32 @@ describe.skipIf(!ENABLED)("a duplicate scan the model does not do, on a copy of 
     }
   }, 30 * 60 * 1000)
 })
+
+describe.skipIf(!(process.env.RUN_LLM_TESTS === "1" && process.env.DEDUP_VAULT_COPY))(
+  "a scheduled run whose duplicate scan is not done, on a copy of a real vault (#117)",
+  () => {
+    it("keeps the groups an earlier run saved, with the embedding server down, and adds its same-slug groups", async () => {
+      const vault = process.env.DEDUP_VAULT_COPY ?? ""
+      measured.modelCalls = 0
+      const pendingPath = path.join(vault, ".llm-wiki/dedup-pending-groups.json")
+      const earlier = JSON.parse(await fs.readFile(pendingPath, "utf8"))
+
+      // A host that never resolves: every embed fails, as with the server down overnight.
+      const { scan, record } = await scanAndRun(vault, {
+        ...embeddingConfig("qwen3-embedding:0.6b"),
+        endpoint: "http://embedding-server-down.invalid/v1/embeddings",
+      })
+      const saved = JSON.parse(await fs.readFile(pendingPath, "utf8"))
+
+      await writeReport("keeps-pending", { earlier, scanGroups: scan.groups, saved, modelCalls: measured.modelCalls, record })
+
+      expect(earlier.length).toBeGreaterThan(0)
+      expect(record.duplicateScanNotDone?.reason).toBe("embedding-coverage-low")
+      expect(scan.groups.length).toBeGreaterThan(0)
+      expect(saved).toEqual(expect.arrayContaining(earlier))
+      expect(saved).toEqual(expect.arrayContaining(scan.groups))
+      expect(saved).toHaveLength(earlier.length + scan.groups.length)
+      expect(measured.modelCalls).toBe(0)
+    }, 30 * 60 * 1000)
+  },
+)
