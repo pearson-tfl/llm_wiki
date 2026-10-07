@@ -67,7 +67,8 @@ export function isOpenRouterEndpoint(endpoint: string): boolean {
  * Resolve only capabilities that are part of the selected wire contract.
  * Generic custom gateways deliberately stay Auto-only: a vendor-looking
  * model name does not prove that an aggregator accepts that vendor's private
- * request fields.
+ * request fields. A custom route in Anthropic-messages mode also offers Off,
+ * the Messages API's own `thinking.type=disabled`.
  */
 export function resolveReasoningCapabilities(config: LlmConfig): ReasoningCapabilities {
   if (config.provider === "claude-code" || config.provider === "codex-cli") {
@@ -101,9 +102,12 @@ export function resolveReasoningCapabilities(config: LlmConfig): ReasoningCapabi
       return capabilities(TOGGLE_LEVELS)
     }
     // Anthropic-compatible custom endpoints are not necessarily Anthropic
-    // itself (MiniMax, Kimi and enterprise proxies differ), so omission is the
-    // only portable default. Users can select a first-party preset when they
-    // need vendor-specific controls.
+    // itself (MiniMax, Kimi and enterprise proxies differ), so budgets and
+    // effort levels stay unoffered. Off is offered: GLM on z.ai thinks unless
+    // the body says `thinking.type=disabled`, and its thinking spends the
+    // reply's max_tokens (pearson-tfl/llm_wiki#134). An endpoint that rejects
+    // the field can be set back to Auto.
+    if (config.apiMode === "anthropic_messages") return capabilities(TOGGLE_LEVELS)
     return capabilities(AUTO_ONLY)
   }
   return capabilities(AUTO_ONLY)

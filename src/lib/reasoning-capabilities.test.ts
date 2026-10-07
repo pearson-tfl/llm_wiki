@@ -20,6 +20,20 @@ describe("reasoning capabilities", () => {
     expect(normalizeReasoningForProvider(cfg, { mode: "off" })).toEqual({ mode: "auto" })
   })
 
+  it("offers auto and off on a custom Anthropic-messages route, and only those (#134)", () => {
+    const cfg: LlmConfig = {
+      ...config("custom", "glm-5.3-flash"),
+      customEndpoint: "https://api.z.ai/api/anthropic",
+      apiMode: "anthropic_messages",
+    }
+
+    expect(resolveReasoningCapabilities(cfg).modes).toEqual(["auto", "off"])
+    expect(normalizeReasoningForProvider(cfg, { mode: "off" })).toEqual({ mode: "off" })
+    expect(normalizeReasoningForProvider(cfg, { mode: "high" })).toEqual({ mode: "auto" })
+    expect(resolveReasoningCapabilities({ ...cfg, apiMode: "chat_completions" }).modes)
+      .toEqual(["auto"])
+  })
+
   it("offers OpenRouter's documented reasoning controls only on its endpoint", () => {
     const cfg = {
       ...config("custom", "vendor/reasoning-model"),

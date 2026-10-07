@@ -303,8 +303,11 @@ Keep this list current. Merge conflicts can only come from these files.
   reports every slug held by more than one entity or concept page, from
   the file names alone with no model call, as one group naming each page
   by its page id (`concepts/agent-skills`, `entities/agent-skills`), at
-  medium confidence, so scheduled maintenance never merges one unasked; the
-  Maintenance screen offers those ids as the page to keep. A merge finds
+  medium confidence. Since #135 the scan's judge settles each such group
+  before scheduled maintenance or the Maintenance screen sees it; only a
+  group whose judge call failed reaches them as found, and then scheduled
+  maintenance never merges it unasked and the Maintenance screen offers
+  those ids as the page to keep. A merge finds
   each page by its page id, or by a slug that names exactly one entity or
   concept page, and refuses a slug that names more. A slug the detector
   names twice in one group counts once, and a group left with one page is
@@ -335,6 +338,205 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts` and
   `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
   scan of a vault copy in `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/dedup-scan-notices.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – a detector call that fails no longer
+  restarts the duplicate scan unprefiltered (pearson-tfl/llm_wiki#118).
+  Upstream caught a network or HTTP error from any detector call, a 429, a
+  5xx or a dropped connection, as if the embedding prefilter had failed:
+  it logged an embedding failure, dropped every group the prefiltered
+  batches had found, and scanned every page again in file order: about 80
+  calls on John's vault, which seldom put real twins in one call. The call
+  now fails with `DetectorCallFailedError`, named "Duplicate detector call
+  failed".
+  The scan reports its batch as a failed batch with that reason, as an
+  unreadable reply has been since #108. The other batches' groups stand,
+  and the scheduled run records the batch in `failedDetectorBatches`. A
+  cancelled call still cancels the scan. This holds on every detection
+  path, the unprefiltered scan of a small wiki included, so a scan whose
+  every call fails, as with a wrong key, ends as failed batches rather than
+  as an error in the run record or a toast. A scheduled run whose scan has
+  failed batches did not check every page, so, as a not-done scan does
+  (#117), it adds its groups to the ones saved for the Maintenance screen
+  rather than replacing them: an outage during the run keeps every saved
+  group. Only the prefilter's own failure reaches the full-scan fallback
+  and its log line. The Maintenance
+  screen's failed-batch notice says the batches failed, not that they
+  could not be read, in each locale; the reason after it says which.
+  Upstream edits to the detector's model call or the prefilter's fallback
+  need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts`,
+  `src/lib/scheduled-maintenance.test.ts` and
+  `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
+  scan and scheduled run of a vault copy, with real embeddings and an
+  endpoint that fails two calls, in
+  `src/lib/dedup-scan-model-error.real-llm.test.ts`.
+- `src/lib/dedup-runner.ts` – the duplicate scan stops calling the model
+  after two detector calls in a row fail (pearson-tfl/llm_wiki#124). Since
+  #118 a failed call is its batch's failure and the scan carries on, so a
+  hung endpoint waited out the client's 30-minute timeout on every batch
+  left, and a rate-limited one (429) was fired at again at once. The
+  batches left are now reported as failed batches without a call, with
+  the reason "Not checked: the scan stopped after 2 detector calls in a
+  row failed", and the log says how many were left. A reply that arrives
+  but cannot be read (#108) is not a call failure and resets the count,
+  as an answered call does. A cancelled scan still cancels. The scheduled
+  run records the batches in `failedDetectorBatches` and keeps the saved
+  groups, as for any failed batch (#118).
+  Upstream edits to the detector's batch loop need re-checking against
+  this.
+  Tests in `src/lib/dedup-runner.test.ts`; a live scan and scheduled run
+  of a vault copy, with real embeddings and an endpoint that answers 429
+  from the second call on, in
+  `src/lib/dedup-scan-model-error.real-llm.test.ts`.
+- `src/lib/reasoning-capabilities.ts`, `src/lib/llm-providers.ts` – reasoning
+  "off" turns thinking off on a custom route in Anthropic-messages mode
+  (pearson-tfl/llm_wiki#134), the scheduled run's z.ai GLM route. Upstream
+  offers such a route Auto only, so ingest's "off" became "auto" and the
+  body carried no `thinking` field; GLM then thought by default, its
+  thinking spent the reply's `max_tokens`, and a quarter of a duplicate
+  scan's detector calls were cut off (#111). The route now offers Auto and
+  Off, and Off sends `thinking: {type: "disabled"}`. Auto, and every other
+  level, which still falls back to Auto, send no field, as before. Every
+  custom Anthropic-messages endpoint gets the field on ingest's structured
+  calls, ingest's default being Off; one that rejects it can be set back to
+  Auto in Settings. The `anthropic` and `minimax` providers are unchanged.
+  Upstream edits to custom-route reasoning need re-checking against this.
+  Tests in `src/lib/reasoning-capabilities.test.ts` and
+  `src/lib/llm-providers.test.ts`; a live call on the route, read from
+  app-state or a route file, with Off and with Auto as the control, in
+  `src/lib/glm-thinking-off.real-llm.test.ts`.
+- `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – a
+  scheduled run whose duplicate scan is not done keeps the groups an
+  earlier run saved for the Maintenance screen (pearson-tfl/llm_wiki#117).
+  Before, it replaced them with the same-slug groups it found, so a night
+  with the embedding server down lost every group the model had found for
+  a decision by hand. It now adds its groups to the saved ones, a saved
+  group with the same pages giving way to the fresh copy; a scan that is
+  done, with no failed batch (#118), still replaces the list. The run's
+  save, an addition or since #120 a replacement, and the Maintenance
+  screen's drop of a group it acted on run one at a time, so neither undoes
+  the other's write.
+  Upstream edits to how the scheduled run saves its groups need
+  re-checking against this.
+  Tests in `src/lib/scheduled-maintenance.test.ts` and
+  `src/lib/dedup-storage.test.ts`; a live run of a vault
+  copy with the embedding server unreachable in
+  `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – the
+  groups saved for the Maintenance screen stay current
+  (pearson-tfl/llm_wiki#120). A scan that checked every page replaced the
+  saved list with a plain write outside the one-at-a-time edits of #117,
+  so a Maintenance-screen drop that had read the old list could write it
+  back over the fresh one; the replacement now waits its turn like the
+  other edits. A run that adds to the list, its scan not done or with a
+  failed batch, drops each saved group naming a page no longer on disk,
+  found as a merge finds pages; before, such a group stayed on the screen
+  until a scan was done, and its merge was refused. A slug naming two
+  pages (#114) is on disk and stays. The scheduled run's choice of the page
+  to keep lists the wiki's pages through the same function.
+  Upstream edits to how the scheduled run saves its groups need
+  re-checking against this.
+  Tests in `src/lib/dedup-storage.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live run of a vault copy with
+  a saved group's page deleted and the embedding server unreachable in
+  `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup_embedding.ts`, `src/lib/dedup-runner.ts` – the duplicate
+  scan's embedding prefilter takes every page
+  (pearson-tfl/llm_wiki#116). Upstream cut it to the first 5,000 entity
+  and concept pages, with only a console warning, so a larger wiki's later
+  pages were never checked and the scan could still call it clean. The
+  `maxPages` option and the runner's cap are gone. The pairwise compare
+  grows with the square of the page count: for 5,000 pages it took about
+  42 seconds on the Dell before #122. Upstream edits that bound the
+  prefilter again need re-checking against this.
+  Test in `src/lib/__tests__/dedup_embedding.test.ts`; a live scan of a
+  vault copy in `src/lib/dedup-prefilter-coverage.real-llm.test.ts`.
+- `src/lib/dedup_embedding.ts`, `src/lib/dedup-runner.ts`,
+  `src/components/settings/sections/maintenance-section.tsx` – the
+  duplicate scan's pairwise compare keeps the app responsive and can be
+  cancelled (pearson-tfl/llm_wiki#122). It ran in one go on the app's
+  main thread, so the app froze for the whole compare, and nothing could
+  stop it. It now hands the thread back every 25 ms and checks for a
+  cancel each time. Each page's vector length is worked out once and each
+  pair scored once, where every pair was scored from both sides; the pairs
+  found are the same, in the same order. On a copy of John's vault (2,406
+  pages) on the Dell the compare took 5.1 seconds, the app never waiting
+  more than 34 ms, where before it froze the app for 12.8 seconds.
+  The Maintenance screen's scan has a Cancel button: a cancelled scan
+  shows no result and no error. The scheduled run's scan still cannot be
+  cancelled. Upstream edits to the compare or the scan button need
+  re-checking against this.
+  Tests in `src/lib/__tests__/dedup_embedding.test.ts` and
+  `src/lib/dedup-runner.test.ts`, with the compare before #122 kept in
+  `src/test-helpers/dedup-pairs-before-122.ts`; a live scan of a vault
+  copy in `src/lib/dedup-compare-responsive.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts` – a high-confidence group whose slug
+  names both a concept and an entity page, which since #135 is only one
+  whose judge call failed, is saved for the Maintenance screen, not queued
+  for a scheduled merge (pearson-tfl/llm_wiki#114).
+  The merge refuses such a slug (#109), so the queued merge failed every
+  retry and the group never reached the screen. The scheduled run's choice
+  of the page to keep now finds pages as a merge does, by page id or by a
+  slug among the entity and concept pages only, through one shared
+  function (`pagesNamed`); before, it matched a file of that name anywhere
+  under `wiki/` and kept whichever it read last. A slug that names more
+  than one page leaves its group unqueued; a name with no page still ranks
+  last.
+  Upstream edits to the merge's page lookup or the scheduled run's choice
+  of the page to keep need re-checking against this.
+  Tests in `src/lib/scheduled-maintenance.test.ts`; its live run in
+  `src/lib/dedup-ambiguous-slug.real-llm.test.ts` was replaced by #135's.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-queue.ts`,
+  `src/lib/dedup-storage.ts`, `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/maintenance-section.tsx` – a
+  Maintenance-screen merge whose slug names more than one page is refused
+  on the card before any task is queued (pearson-tfl/llm_wiki#126).
+  Before, the merge was queued, refused the slug at every retry and failed.
+  The card now says which pages the slug names, in the merge's own words,
+  from one shared check (`ambiguousSlugRefusal`), and the group stays
+  saved. The scheduled run's page list now uses the merge's own path
+  conversion (`toWikiRelative`, moved to `dedup.ts`). For a project path
+  ending in a slash both give absolute paths, so such a project still
+  cannot merge, as before. A run whose save of the kept groups fails
+  still records the merges it queued.
+  Upstream edits to the card's Merge button or the merge's page lookup
+  need re-checking against this.
+  Tests in `src/lib/dedup-queue.card-merge.test.ts`,
+  `src/components/settings/sections/maintenance-section.test.tsx`,
+  `src/lib/dedup-storage.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live card merge and page list
+  on a vault copy in `src/lib/dedup-ambiguous-card.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-storage.ts`,
+  `src/lib/scheduled-maintenance.ts` (a comment only) – a duplicate group
+  whose pages include two that share a slug is
+  settled by a model judgement at the end of the scan, never left pending
+  for John (pearson-tfl/llm_wiki#135). That is a same-slug group (#109) or
+  a detector group naming such a slug bare. The judge runs on the chat
+  route (`getTaskLlmConfig("chat")`), which on John's install is the
+  Claude Code CLI on `claude-opus-5-5`; the scan and the merge keep their
+  own routes. It is given every page the group's names name, by its path
+  under `wiki/`, with its title and content (each cut at 12,000
+  characters), and answers which pages are one topic. Those come back as
+  one high-confidence group naming its pages by path, which the scheduled
+  run merges. Each other pair is recorded in the not-duplicates list by
+  path, so no later scan raises it or asks again; a group all of whose
+  pairs are recorded is dropped with no call. A judge call that fails, or a
+  reply it cannot read, holding a group with no list of pages, naming a
+  page it was not given or placing a page in two groups, is a failed batch,
+  records nothing and leaves the group as it was.
+  The not-duplicates list's writers now run one at a time, and the judge's
+  writer refuses a list it cannot read rather than writing over it. A
+  partial run's saved groups now drop a group whose slug names two pages,
+  which the next scan that finds it settles. Upstream edits to the scan's
+  result or the not-duplicates list need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup-storage.test.ts`
+  and `src/lib/scheduled-maintenance.test.ts`; a live Maintenance-screen
+  scan and scheduled run of the vault's `agent-skills` and
+  `openclaw-code-mode` pairs and a built distinct pair in
+  `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

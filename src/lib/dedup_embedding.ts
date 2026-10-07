@@ -20,7 +20,6 @@ export interface Page {
 export interface CandidateOptions {
   topK?: number
   threshold?: number
-  maxPages?: number
   signal?: AbortSignal
   /**
    * If too many embeddings fail, callers should fall back to the old full scan
@@ -50,17 +49,51 @@ function throwIfAborted(signal?: AbortSignal) {
  * zero, vectors differ in length, or either is null/undefined (embedding failed).
  */
 export function cosineSimilarity(a: number[] | null | undefined, b: number[] | null | undefined): number {
-  if (!a || !b || a.length !== b.length) return 0
-  let dot = 0
-  let na = 0
-  let nb = 0
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i]
-    na += a[i] * a[i]
-    nb += b[i] * b[i]
+  if (!a || !b) return 0
+  return similarityOfLengths(a, vectorLength(a), b, vectorLength(b))
+}
+
+function vectorLength(v: number[]): number {
+  let sum = 0
+  for (let i = 0; i < v.length; i++) {
+    const x = v[i]
+    sum += x * x
   }
-  const denom = Math.sqrt(na) * Math.sqrt(nb)
+  return Math.sqrt(sum)
+}
+
+/** Cosine similarity of two vectors whose lengths are already known. */
+function similarityOfLengths(a: number[], lengthA: number, b: number[], lengthB: number): number {
+  if (a.length !== b.length) return 0
+  let dot = 0
+  for (let i = 0; i < a.length; i++) dot += a[i] * b[i]
+  const denom = lengthA * lengthB
   return denom === 0 ? 0 : dot / denom
+}
+
+/**
+ * How long the compare runs before handing the main thread back (#122). A
+ * zero-delay timer can be held to 4 ms once timers nest, so a slice of 25 ms
+ * costs at most about a seventh of the compare's time.
+ */
+const COMPARE_SLICE_MS = 25
+
+function nextTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0))
+}
+
+interface Neighbour {
+  j: number
+  sim: number
+}
+
+/** Keeps `best` as the top `topK` by score, an earlier page first on a tie. */
+function keepBest(best: Neighbour[], j: number, sim: number, topK: number) {
+  let at = best.length
+  while (at > 0 && best[at - 1].sim < sim) at--
+  if (at >= topK) return
+  best.splice(at, 0, { j, sim })
+  if (best.length > topK) best.pop()
 }
 
 /**
@@ -114,50 +147,57 @@ export async function candidatePairs(
 ): Promise<CandidatePair[]> {
   const topK = opts.topK ?? 8
   const threshold = opts.threshold ?? 0.82
-  const maxPages = opts.maxPages ?? 5000
   const minSuccessRatio = opts.minSuccessRatio ?? 0.8
 
   if (pages.length === 0) return []
-  const subset = pages.slice(0, maxPages)
-  if (pages.length > subset.length) {
-    console.warn(
-      `[dedup] embedding prefilter limited scan to ${subset.length}/${pages.length} pages`,
-    )
-  }
 
-  const embeddings = await embedPages(subset, cfg, {
+  const embeddings = await embedPages(pages, cfg, {
     signal: opts.signal,
     textBudgetChars: opts.textBudgetChars,
   })
 
   const embeddedCount = [...embeddings.values()].filter((v) => v && v.length > 0).length
-  if (subset.length >= 2 && embeddedCount < 2) {
+  if (pages.length >= 2 && embeddedCount < 2) {
     throw new Error("Duplicate prefilter could not embed enough pages")
   }
-  if (subset.length > 0 && embeddedCount / subset.length < minSuccessRatio) {
+  if (pages.length > 0 && embeddedCount / pages.length < minSuccessRatio) {
     throw new Error(
-      `Duplicate prefilter embedded only ${embeddedCount}/${subset.length} pages`,
+      `Duplicate prefilter embedded only ${embeddedCount}/${pages.length} pages`,
     )
+  }
+
+  // Each vector's length once, and each pair scored once for both its pages.
+  // Neighbours reach a page in page order, so on a tie the earlier stays
+  // ahead, as when each page's scores were sorted.
+  const vectors = pages.map((p) => embeddings.get(p.id))
+  const lengths = vectors.map((v) => (v ? vectorLength(v) : 0))
+  const best: Neighbour[][] = pages.map(() => [])
+  let sliceStart = performance.now()
+  for (let i = 0; i < pages.length; i++) {
+    const vi = vectors[i]
+    for (let j = i + 1; j < pages.length; j++) {
+      const vj = vectors[j]
+      // A page whose embedding failed is no page's source, but it scores 0
+      // as a target, so a threshold of 0 keeps it.
+      if (!vi && !vj) continue
+      const sim = vi && vj ? similarityOfLengths(vi, lengths[i], vj, lengths[j]) : 0
+      if (!(sim >= threshold)) continue
+      if (vi) keepBest(best[i], j, sim, topK)
+      if (vj) keepBest(best[j], i, sim, topK)
+    }
+    if (performance.now() - sliceStart >= COMPARE_SLICE_MS) {
+      await nextTask()
+      throwIfAborted(opts.signal)
+      sliceStart = performance.now()
+    }
   }
 
   const pairSet = new Set<string>()
   const pairs: CandidatePair[] = []
-
-  for (let i = 0; i < subset.length; i++) {
-    const vi = embeddings.get(subset[i].id)
-    if (!vi) continue
-    const scored: Array<{ j: number; sim: number }> = []
-    for (let j = 0; j < subset.length; j++) {
-      if (i === j) continue
-      const vj = embeddings.get(subset[j].id)
-      const sim = cosineSimilarity(vi, vj)
-      if (sim >= threshold) scored.push({ j, sim })
-    }
-    scored.sort((a, b) => b.sim - a.sim)
-
-    for (let k = 0; k < Math.min(topK, scored.length); k++) {
-      const a = subset[i].id
-      const b = subset[scored[k].j].id
+  for (let i = 0; i < pages.length; i++) {
+    for (const { j } of best[i]) {
+      const a = pages[i].id
+      const b = pages[j].id
       const key = a < b ? `${a}\t${b}` : `${b}\t${a}`
       if (!pairSet.has(key)) {
         pairSet.add(key)

@@ -945,7 +945,7 @@
           "scheduleNever": "never",
           "scanning": "Scanning…",
           "noneFound": "No duplicate groups found. The wiki is clean.",
-          "batchesFailed": "{{count}} detector batches ({{pages}} pages) could not be read, so those pages were not checked: {{reason}}",
+          "batchesFailed": "{{count}} detector batches ({{pages}} pages) failed, so those pages were not checked: {{reason}}",
           "notDoneCoverageLow": "The duplicate scan was not done: too few of its {{pages}} pages could be embedded for the prefilter, and a wiki this large is not scanned without it. Check the embedding settings and scan again.",
           "notDoneNoPairs": "The duplicate scan was not done: the embedding prefilter found no candidate pairs among its {{pages}} pages, and a wiki this large is not scanned without them, so duplicates may remain.",
           "candidates": "{{n}} candidates",

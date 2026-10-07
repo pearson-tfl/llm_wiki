@@ -16,7 +16,7 @@ import {
 import { reembedWikiPages, removeWikiPageEmbeddings } from "@/lib/embedding-freshness"
 import { loadEmbeddingConfig } from "@/lib/project-store"
 import { normalizePath } from "@/lib/path-utils"
-import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 
 /**
@@ -37,10 +37,13 @@ const DEDUP_DETECTION_MAX_TOKENS = 8_192
 // aliases, where cosine scores can be weaker on non-multilingual embedders.
 const DEDUP_PREFILTER_TOP_K = 8
 const DEDUP_PREFILTER_THRESHOLD = 0.68
-const DEDUP_PREFILTER_MAX_PAGES = 5_000
 const DEDUP_DETECTOR_BATCH_SUMMARIES = 80
 const DEDUP_FALLBACK_BATCH_OVERLAP = 8
 const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
+// A hung endpoint waits out the client's 30-min timeout on every call, and a
+// rate-limited one is fired at again at once, so the scan stops calling after
+// this many detector calls in a row fail (#124).
+const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
 
 /**
  * Merge rewrites a COMPLETE page that gets written to disk, so it needs
@@ -51,22 +54,32 @@ const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
  * drag in the heavy ingest dependency graph.
  */
 const DEDUP_MERGE_MAX_TOKENS = 16_384
+/** The judge answers with a short JSON list of page groups (#135). */
+const DEDUP_JUDGE_MAX_TOKENS = 2_048
 import {
+  allPairs,
+  ambiguousSlugRefusal,
   detectDuplicateGroups,
+  DetectorCallFailedError,
   DetectorReplyUnreadableError,
+  distinctPairs,
   extractEntitySummary,
+  judgeSharedSlugPages,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
-  pageIdFromPath,
+  pagesNamed,
   rewriteIndexMd,
   sameSlugGroups,
+  sharedSlugCandidates,
+  toWikiRelative,
   type DedupLlmCall,
   type DuplicateGroup,
   type EntitySummary,
   type MergeResult,
 } from "./dedup"
-import { loadNotDuplicates } from "./dedup-storage"
+import { loadNotDuplicates, recordNotDuplicates } from "./dedup-storage"
 import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
+import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 
 /**
  * Wrap streamChat into the (system, user, signal) → string shape
@@ -83,7 +96,9 @@ import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
  * (#29): a reply cut off at the cap is rejected, and a reply whose
  * signal fired throws, since the client ends a cancelled request as
  * done with whatever text had arrived. Detection refuses a cut-off reply
- * too, as unreadable (#108): its groups may be missing.
+ * too, as unreadable (#108): its groups may be missing. A detection call
+ * that fails throws DetectorCallFailedError, so the scan reports its batch
+ * as failed (#118); a cancelled one throws the client's error.
  */
 export function buildDedupLlmCall(
   llmConfig: LlmConfig,
@@ -93,7 +108,9 @@ export function buildDedupLlmCall(
   return async (systemPrompt, userMessage, signal) => {
     let result = ""
     let cutOff = false
-    let streamError: Error | null = null
+    // Asserted, not annotated: the callbacks assign it, which TypeScript
+    // does not see, so an annotated null would narrow it to never.
+    let streamError = null as Error | null
     await new Promise<void>((resolve) => {
       streamChat(
         llmConfig,
@@ -127,7 +144,12 @@ export function buildDedupLlmCall(
     if (options.completeReplyOnly && signal?.aborted) {
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
-    if (streamError) throw streamError
+    if (streamError) {
+      // A detection call that fails is its batch's failure, not the scan's
+      // (#118); a cancelled one still cancels the scan.
+      if (options.completeReplyOnly || signal?.aborted) throw streamError
+      throw new DetectorCallFailedError(streamError.message)
+    }
     if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
       const reason = "the model's reply was cut off at its output limit"
@@ -150,15 +172,6 @@ function* walkMd(nodes: FileNode[], prefix: string): Generator<FileNode> {
       yield node
     }
   }
-}
-
-/** Convert an absolute filesystem path to a wiki-relative one
- *  (`<project>/wiki/entities/foo.md` → `wiki/entities/foo.md`). */
-function toWikiRelative(projectPath: string, absPath: string): string {
-  const pp = normalizePath(projectPath)
-  const norm = normalizePath(absPath)
-  if (norm.startsWith(`${pp}/`)) return norm.slice(pp.length + 1)
-  return norm
 }
 
 /**
@@ -206,7 +219,8 @@ export async function loadAllWikiPages(
   return out
 }
 
-/** A detector call whose reply could not be read: its pages went unchecked. */
+/** A detector batch that failed: its reply could not be read (#108) or its
+ *  call failed (#118). Its pages went unchecked. */
 export interface FailedDetectorBatch {
   pages: number
   reason: string
@@ -248,7 +262,94 @@ export async function runDuplicateDetection(
   const notDup = await loadNotDuplicates(projectPath)
   const sameSlug = sameSlugGroups(summaries, notDup)
   const detected = await detectWithModel(summaries, notDup, llmConfig, options)
-  return { ...detected, groups: [...sameSlug, ...detected.groups] }
+  const settled = await settleSharedSlugGroups(projectPath, summaries, [...sameSlug, ...detected.groups], notDup, options)
+  return {
+    ...detected,
+    groups: uniqueDuplicateGroups(settled.groups),
+    failedBatches: [...detected.failedBatches, ...settled.failedBatches],
+  }
+}
+
+/**
+ * Settle every group whose pages include two that share a slug, so none is
+ * left for a decision by hand (#135). The judge, on the chat route, is given
+ * the pages by path with their content: pages it finds one topic come back
+ * as a high group of page ids, which the scheduled run merges; each other
+ * pair is recorded as not duplicates, so no later scan asks again. A group
+ * all of whose pairs are recorded is dropped with no call. A judge call that
+ * fails, or a reply it cannot read, is a failed batch, and the group stays.
+ */
+async function settleSharedSlugGroups(
+  projectPath: string,
+  summaries: EntitySummary[],
+  groups: DuplicateGroup[],
+  notDup: string[][],
+  options: { signal?: AbortSignal },
+): Promise<Pick<DuplicateScanResult, "groups" | "failedBatches">> {
+  const pp = normalizePath(projectPath)
+  const judge = buildDedupLlmCall(getTaskLlmConfig("chat"), DEDUP_JUDGE_MAX_TOKENS)
+  // Verdicts recorded during this scan count for the groups after them.
+  const recorded = new Set(notDup.map(normalizeSlugGroupKey))
+  const out: DuplicateGroup[] = []
+  const failedBatches: FailedDetectorBatch[] = []
+  for (const group of groups) {
+    const candidates = sharedSlugCandidates(summaries, group)
+    if (!candidates) {
+      out.push(group)
+      continue
+    }
+    const unrecorded = (pairs: string[][]) => pairs.filter((pair) => !recorded.has(normalizeSlugGroupKey(pair)))
+    if (unrecorded(allPairs(candidates)).length === 0) continue
+    let topics
+    try {
+      const pages = await Promise.all(candidates.map(async (pageId) =>
+        ({ pageId, content: await readFile(`${pp}/wiki/${pageId}.md`) })))
+      topics = await judgeSharedSlugPages(pages, judge, options.signal)
+    } catch (err) {
+      if (options.signal?.aborted) throw err
+      failedBatches.push({ pages: candidates.length, reason: `Shared-slug judge: ${errorMessage(err)}` })
+      out.push(group)
+      continue
+    }
+    for (const topic of topics) {
+      const reason = topic.reason.trim() ? `Judged one topic: ${topic.reason}` : "Judged one topic"
+      out.push({ slugs: topic.pages, reason, confidence: "high" })
+    }
+    const distinct = unrecorded(distinctPairs(candidates, topics))
+    if (distinct.length === 0) continue
+    try {
+      await recordNotDuplicates(pp, distinct)
+      for (const pair of distinct) recorded.add(normalizeSlugGroupKey(pair))
+    } catch (err) {
+      failedBatches.push({
+        pages: candidates.length,
+        reason: `Shared-slug judge: the pages judged distinct could not be recorded: ${errorMessage(err)}`,
+      })
+    }
+  }
+  return { groups: out, failedBatches }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** A scan the Maintenance screen runs, with its Cancel. */
+export interface DuplicateScan {
+  /** The scan's result, or null once it is cancelled. */
+  done: Promise<DuplicateScanResult | null>
+  cancel: () => void
+}
+
+/** Starts a scan that `cancel` stops, the prefilter's compare included (#122). */
+export function startDuplicateScan(projectPath: string, llmConfig: LlmConfig): DuplicateScan {
+  const controller = new AbortController()
+  const done = runDuplicateDetection(projectPath, llmConfig, { signal: controller.signal })
+    .catch((err: unknown) => {
+      if (controller.signal.aborted) return null
+      throw err
+    })
+  return { done, cancel: () => controller.abort() }
 }
 
 /** The model's part of the scan: the embedding prefilter, then the detector. */
@@ -264,16 +365,15 @@ async function detectWithModel(
   const embeddingEndpoint =
     typeof embeddingConfig?.endpoint === "string" ? embeddingConfig.endpoint.trim() : ""
   if (embeddingConfig?.enabled && embeddingEndpoint) {
+    // Only the prefilter's own failure falls back to the full scan: a
+    // detector call that fails is its batch's failure (#118).
+    let pairs: CandidatePair[] | undefined
     try {
-      return await detectDuplicateGroupsWithEmbeddingPrefilter(
-        summaries,
-        embeddingConfig,
-        llm,
-        {
-          signal: options.signal,
-          notDuplicates: notDup,
-        },
-      )
+      pairs = await candidatePairs(summaries.map(summaryToEmbeddingPage), embeddingConfig, {
+        topK: DEDUP_PREFILTER_TOP_K,
+        threshold: DEDUP_PREFILTER_THRESHOLD,
+        signal: options.signal,
+      })
     } catch (err) {
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
@@ -281,6 +381,12 @@ async function detectWithModel(
         return notDoneResult("embedding-coverage-low", summaries.length)
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
+    }
+    if (pairs) {
+      return detectAmongCandidatePairs(summaries, pairs, llm, {
+        signal: options.signal,
+        notDuplicates: notDup,
+      })
     }
   }
 
@@ -314,8 +420,11 @@ async function detectDuplicateGroupsInBoundedBatches(
   return detectInBatches(batches, llm, options)
 }
 
-/** One detector call per batch. A reply that cannot be read is reported as
- *  a failed batch, not counted as no duplicates (#108). */
+/** One detector call per batch. A reply that cannot be read (#108), or a
+ *  call that fails (#118), is reported as a failed batch, not counted as no
+ *  duplicates, and the other batches' groups stand. After
+ *  DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP calls in a row fail, the batches
+ *  left are reported as failed without a call (#124). */
 async function detectInBatches(
   batches: EntitySummary[][],
   llm: DedupLlmCall,
@@ -323,31 +432,39 @@ async function detectInBatches(
 ): Promise<DuplicateScanResult> {
   const groups: DuplicateGroup[] = []
   const failedBatches: FailedDetectorBatch[] = []
-  for (const batch of batches) {
+  let callFailuresInARow = 0
+  for (const [index, batch] of batches.entries()) {
     if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
+    if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
+      const reason = `Not checked: the scan stopped after ${callFailuresInARow} detector calls in a row failed`
+      console.warn(`[dedup] ${reason}; ${batches.length - index} batches left unchecked`)
+      for (const left of batches.slice(index)) failedBatches.push({ pages: left.length, reason })
+      break
+    }
     try {
       groups.push(...await detectDuplicateGroups(batch, llm, options))
+      callFailuresInARow = 0
     } catch (err) {
-      if (!(err instanceof DetectorReplyUnreadableError)) throw err
+      if (err instanceof DetectorCallFailedError) {
+        console.warn("[dedup] detector call failed; its batch is reported as failed:", err)
+        callFailuresInARow += 1
+      } else if (err instanceof DetectorReplyUnreadableError) {
+        callFailuresInARow = 0
+      } else {
+        throw err
+      }
       failedBatches.push({ pages: batch.length, reason: err.message })
     }
   }
   return { groups: uniqueDuplicateGroups(groups), failedBatches }
 }
 
-async function detectDuplicateGroupsWithEmbeddingPrefilter(
+async function detectAmongCandidatePairs(
   summaries: EntitySummary[],
-  embeddingConfig: EmbeddingConfig,
+  pairs: CandidatePair[],
   llm: DedupLlmCall,
   options: { signal?: AbortSignal; notDuplicates?: string[][] },
 ): Promise<DuplicateScanResult> {
-  const pages = summaries.map(summaryToEmbeddingPage)
-  const pairs = await candidatePairs(pages, embeddingConfig, {
-    topK: DEDUP_PREFILTER_TOP_K,
-    threshold: DEDUP_PREFILTER_THRESHOLD,
-    maxPages: DEDUP_PREFILTER_MAX_PAGES,
-    signal: options.signal,
-  })
   if (pairs.length === 0) {
     // Preserve recall for small/medium wikis: a weak or non-multilingual
     // embedder can miss exactly the cross-language aliases the LLM detector
@@ -606,29 +723,21 @@ export async function executeMerge(
 }
 
 /**
- * The page a group names: by its page id (`concepts/foo`) where pages share
- * a slug, else by its slug among the scanned entity and concept pages. A
- * slug that names more than one page is refused, not resolved to one of
- * them (#109).
+ * The page a group names, found by `pagesNamed`. A slug that names more
+ * than one page is refused, not resolved to one of them (#109).
  */
 function findGroupPage(
   allPages: { path: string; content: string }[],
   slug: string,
 ): { path: string; content: string } {
-  const found = slug.includes("/")
-    ? allPages.filter((p) => p.path === `wiki/${slug}.md`)
-    : allPages.filter((p) =>
-      (p.path.startsWith("wiki/entities/") || p.path.startsWith("wiki/concepts/"))
-      && p.path.endsWith(`/${slug}.md`))
+  const found = pagesNamed(allPages, slug)
   if (found.length === 0) {
     throw new Error(
       `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
     )
   }
-  if (found.length > 1) {
-    const pageIds = found.map((p) => pageIdFromPath(p.path)).join(", ")
-    throw new Error(`Slug "${slug}" names ${found.length} pages: ${pageIds}`)
-  }
+  const refusal = ambiguousSlugRefusal(allPages, slug)
+  if (refusal) throw new Error(refusal)
   return found[0]
 }
 

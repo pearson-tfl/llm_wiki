@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import { invoke } from "@tauri-apps/api/core"
@@ -19,7 +19,12 @@ import { Button } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
 import { useWikiStore } from "@/stores/wiki-store"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
-import { runDuplicateDetection, type FailedDetectorBatch, type ScanNotDone } from "@/lib/dedup-runner"
+import {
+  startDuplicateScan,
+  type DuplicateScan,
+  type FailedDetectorBatch,
+  type ScanNotDone,
+} from "@/lib/dedup-runner"
 import { DuplicateScanNotices } from "./dedup-scan-notices"
 import {
   addNotDuplicate,
@@ -27,7 +32,7 @@ import {
   removePendingDuplicateGroup,
 } from "@/lib/dedup-storage"
 import {
-  enqueueMerge,
+  enqueueCardMerge,
   cancelTask,
   retryTask,
   getQueue,
@@ -60,6 +65,9 @@ interface GroupUiEntry {
   /** Becomes true when the user marks the group as "not duplicates"
    *  in this session — the card transitions to skipped state. */
   skipped: boolean
+  /** Why the last Merge click queued nothing: a slug names more than one
+   *  page (#126). */
+  refusal?: string | null
 }
 
 /** Match a card to its task in the queue (if any) by slug-set. */
@@ -78,6 +86,7 @@ export function MaintenanceSection() {
   const project = useWikiStore((s) => s.project)
 
   const [scanning, setScanning] = useState(false)
+  const scanRef = useRef<DuplicateScan | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
   const [groups, setGroups] = useState<GroupUiEntry[]>([])
   const [scanCompleted, setScanCompleted] = useState(false)
@@ -297,8 +306,12 @@ export function MaintenanceSection() {
     setScanCompleted(false)
     setFailedBatches([])
     setScanNotDone(undefined)
+    const scan = startDuplicateScan(project.path, llmConfig)
+    scanRef.current = scan
     try {
-      const detected = await runDuplicateDetection(project.path, llmConfig)
+      const detected = await scan.done
+      // A cancelled scan shows nothing: no result and no error.
+      if (!detected) return
       setFailedBatches(detected.failedBatches)
       setScanNotDone(detected.notDone)
       setGroups(
@@ -312,6 +325,7 @@ export function MaintenanceSection() {
     } catch (err) {
       setScanError(err instanceof Error ? err.message : String(err))
     } finally {
+      scanRef.current = null
       setScanning(false)
     }
   }, [project, llmConfig])
@@ -329,8 +343,9 @@ export function MaintenanceSection() {
     async (entry: GroupUiEntry) => {
       if (!project) return
       try {
-        await enqueueMerge(project.id, entry.group, entry.canonicalSlug)
-        await removePendingDuplicateGroup(project.path, entry.group.slugs)
+        const refusal = await enqueueCardMerge(project.id, project.path, entry.group, entry.canonicalSlug)
+        setGroups((prev) => prev.map((g) => (g.group === entry.group ? { ...g, refusal } : g)))
+        if (refusal) return
         // Refresh immediately so the card flips to "queued" without
         // waiting for the next 1s poll tick.
         setTasks([...getQueue()])
@@ -638,23 +653,30 @@ export function MaintenanceSection() {
           </div>
         )}
 
-        <Button
-          onClick={() => void handleScan()}
-          disabled={scanning || !projectReady || !llmReady}
-        >
-          {scanning ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              {t("settings.sections.maintenance.dedup.scanning", {
-                defaultValue: "Scanning…",
-              })}
-            </>
-          ) : (
-            t("settings.sections.maintenance.dedup.scanButton", {
-              defaultValue: "Scan for duplicates",
-            })
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={() => void handleScan()}
+            disabled={scanning || !projectReady || !llmReady}
+          >
+            {scanning ? (
+              <>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                {t("settings.sections.maintenance.dedup.scanning", {
+                  defaultValue: "Scanning…",
+                })}
+              </>
+            ) : (
+              t("settings.sections.maintenance.dedup.scanButton", {
+                defaultValue: "Scan for duplicates",
+              })
+            )}
+          </Button>
+          {scanning && (
+            <Button variant="ghost" onClick={() => scanRef.current?.cancel()}>
+              {t("settings.sections.maintenance.dedup.cancel", { defaultValue: "Cancel" })}
+            </Button>
           )}
-        </Button>
+        </div>
 
         {scanError && (
           <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/5 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-400">
@@ -894,7 +916,7 @@ interface CardProps {
   onNotDuplicate: () => void
 }
 
-function DuplicateGroupCard({
+export function DuplicateGroupCard({
   entry,
   task,
   merged,
@@ -1024,6 +1046,13 @@ function DuplicateGroupCard({
             )}
           </div>
         </>
+      )}
+
+      {entry.refusal && !finished && (
+        <div className="flex items-start gap-1.5 rounded border border-rose-500/40 bg-rose-500/5 px-2 py-1.5 text-xs text-rose-700 dark:text-rose-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div>{entry.refusal}</div>
+        </div>
       )}
 
       {failed && task?.error && (

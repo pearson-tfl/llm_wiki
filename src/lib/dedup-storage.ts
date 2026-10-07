@@ -11,9 +11,10 @@
  * lexical-graph.json (when added) — same `.llm-wiki/` directory,
  * same JSON-on-disk pattern.
  */
-import { readFile, writeFile, fileExists } from "@/commands/fs"
+import { readFile, writeFile, fileExists, listDirectory } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
-import type { DuplicateGroup } from "@/lib/dedup"
+import { pagesNamed, toWikiRelative, type DuplicateGroup } from "@/lib/dedup"
+import type { FileNode } from "@/types/wiki"
 
 const FILE_NAME = ".llm-wiki/dedup-not-duplicates.json"
 /** Groups the scheduled scan found but did not merge, kept for the
@@ -68,13 +69,44 @@ export async function addNotDuplicate(
   slugs: string[],
 ): Promise<void> {
   if (slugs.length < 2) return
-  const list = await loadNotDuplicates(projectPath)
-  const normNew = canonicalKey(slugs)
-  for (const existing of list) {
-    if (canonicalKey(existing) === normNew) return // already there
-  }
-  list.push([...slugs].sort())
-  await saveNotDuplicates(projectPath, list)
+  await editNotDuplicates(async () => {
+    const list = await loadNotDuplicates(projectPath)
+    const normNew = canonicalKey(slugs)
+    for (const existing of list) {
+      if (canonicalKey(existing) === normNew) return // already there
+    }
+    list.push([...slugs].sort())
+    await saveNotDuplicates(projectPath, list)
+  })
+}
+
+/**
+ * Record the pairs the scan's judge found distinct (#135), each sorted,
+ * leaving out one already there. With no click behind it, a list that
+ * exists and cannot be read is refused, not written over.
+ */
+export async function recordNotDuplicates(
+  projectPath: string,
+  pairs: string[][],
+): Promise<void> {
+  await editNotDuplicates(async () => {
+    const list = await readNotDuplicates(projectPath)
+    const keys = new Set(list.map(canonicalKey))
+    const added = pairs.filter((pair) => !keys.has(canonicalKey(pair)))
+    if (added.length === 0) return
+    await saveNotDuplicates(projectPath, [...list, ...added.map((pair) => [...pair].sort())])
+  })
+}
+
+/** Read-modify-writes of the not-duplicates list, one at a time, so the
+ *  scan's judge and the Maintenance screen cannot undo each other's write
+ *  (#135). */
+let notDuplicateEdits: Promise<unknown> = Promise.resolve()
+
+function editNotDuplicates(edit: () => Promise<void>): Promise<void> {
+  const run = notDuplicateEdits.then(edit)
+  notDuplicateEdits = run.catch(() => undefined)
+  return run
 }
 
 /** True when every slug of some not-duplicates entry is in `slugs`. */
@@ -92,6 +124,10 @@ export async function loadPendingDuplicateGroups(projectPath: string): Promise<D
   }
 }
 
+/** Write the saved groups as given, off the one-at-a-time chain below.
+ *  Outside this file only tests call it; the app writes through
+ *  `replacePendingDuplicateGroups` or `addPendingDuplicateGroups`, which
+ *  go through the chain (#120). */
 export async function savePendingDuplicateGroups(
   projectPath: string,
   groups: DuplicateGroup[],
@@ -102,15 +138,77 @@ export async function savePendingDuplicateGroups(
   )
 }
 
+/** Replace the saved groups, for a scan that checked every page (#120). */
+export async function replacePendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  await editPendingGroups(() => savePendingDuplicateGroups(projectPath, groups))
+}
+
+/**
+ * Add groups to the saved ones, for a scan that did not check every page
+ * (#117). A saved group with the same pages as an added one is replaced by
+ * it, and one naming a page no longer on disk (#120), or a slug naming two
+ * pages (#135), is dropped: a merge of it would be refused. The scan that
+ * finds such a group again settles it by judgement.
+ */
+export async function addPendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  const added = new Set(groups.map((g) => canonicalKey(g.slugs)))
+  await editPendingGroups(async () => {
+    const saved = await loadPendingDuplicateGroups(projectPath)
+    const pages = await listWikiPages(projectPath)
+    await savePendingDuplicateGroups(projectPath, [
+      ...saved.filter((g) =>
+        !added.has(canonicalKey(g.slugs))
+        && g.slugs.every((slug) => pagesNamed(pages, slug).length === 1)),
+      ...groups,
+    ])
+  })
+}
+
 /** Drop a group once the Maintenance screen has acted on it. */
 export async function removePendingDuplicateGroup(
   projectPath: string,
   slugs: string[],
 ): Promise<void> {
-  const groups = await loadPendingDuplicateGroups(projectPath)
   const key = canonicalKey(slugs)
-  const kept = groups.filter((g) => canonicalKey(g.slugs) !== key)
-  if (kept.length !== groups.length) await savePendingDuplicateGroups(projectPath, kept)
+  await editPendingGroups(async () => {
+    const groups = await loadPendingDuplicateGroups(projectPath)
+    const kept = groups.filter((g) => canonicalKey(g.slugs) !== key)
+    if (kept.length !== groups.length) await savePendingDuplicateGroups(projectPath, kept)
+  })
+}
+
+/** Read-modify-writes of the saved groups, one at a time, so the scheduled
+ *  run adding groups and the Maintenance screen dropping one cannot undo
+ *  each other's write (#117). */
+let pendingEdits: Promise<unknown> = Promise.resolve()
+
+function editPendingGroups(edit: () => Promise<void>): Promise<void> {
+  const run = pendingEdits.then(edit)
+  pendingEdits = run.catch(() => undefined)
+  return run
+}
+
+/** The wiki's pages on disk: `file` as listed, `path` from the project
+ *  root, as `pagesNamed` finds them. */
+export async function listWikiPages(
+  projectPath: string,
+): Promise<{ file: string; path: string }[]> {
+  const pp = normalizePath(projectPath)
+  return [...walkFiles(await listDirectory(`${pp}/wiki`))]
+    .map((node) => ({ file: node.path, path: toWikiRelative(pp, node.path) }))
+}
+
+function* walkFiles(nodes: FileNode[]): Generator<FileNode> {
+  for (const node of nodes) {
+    if (node.is_dir) yield* walkFiles(node.children ?? [])
+    else yield node
+  }
 }
 
 function canonicalKey(slugs: string[]): string {

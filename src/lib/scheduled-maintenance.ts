@@ -4,7 +4,7 @@
  * duplicate scan, then any hub-rebuild request, with no click. Started and stopped the same way as
  * scheduled import, for the open project only.
  */
-import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
+import { fileExists, readFile, writeFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import {
   loadScheduledMaintenanceConfig,
@@ -19,17 +19,19 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { enqueueMerge, getQueue, waitForTask, type DedupTaskOutcome } from "@/lib/dedup-queue"
 import {
+  addPendingDuplicateGroups,
   holdsNotDuplicate,
+  listWikiPages,
   readNotDuplicates,
-  savePendingDuplicateGroups,
+  replacePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { runHubRebuildRequest } from "@/lib/hub-rebuild"
 import { runEmbeddingBackfill, type VectorCoverage } from "@/lib/embedding-freshness"
 import { parseSources } from "@/lib/sources-merge"
-import type { DuplicateGroup } from "@/lib/dedup"
+import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
-import type { FileNode, WikiProject } from "@/types/wiki"
+import type { WikiProject } from "@/types/wiki"
 
 const RUN_RECORD_PATH = ".llm-wiki/maintenance-runs.jsonl"
 
@@ -66,8 +68,9 @@ export interface MaintenanceRunRecord {
    *  page changed (#24). */
   mergesRejected?: number
   rejectedMerges?: { slugs: string[]; reason: string }[]
-  /** Detector calls whose reply could not be read, so their pages went
-   *  unchecked (#108); absent when every call was read. */
+  /** Detector batches that failed, their reply unreadable (#108) or their
+   *  call failed (#118), so their pages went unchecked; absent when every
+   *  batch was checked. */
   failedDetectorBatches?: FailedDetectorBatch[]
   /** Why the model checked none of a large wiki's pages (#112); absent
    *  when it ran. */
@@ -152,6 +155,10 @@ export async function runMaintenanceTick(
           break
         }
         const canonical = await chooseCanonicalSlug(pp, group)
+        // A slug naming two pages fails every retry of the merge, so the
+        // group is kept (#114). The scan's judge settles such groups (#135):
+        // one still here had its judge call fail, and the next run asks again.
+        if (canonical === null) continue
         const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
         enqueued.push(group)
         taskIds.push(taskId)
@@ -164,8 +171,20 @@ export async function runMaintenanceTick(
 
     if (record.groupsFound) {
       // Every group not queued for a merge, withheld ones included, is kept
-      // for the Maintenance screen.
-      await savePendingDuplicateGroups(pp, groups.filter((g) => !enqueued.includes(g)))
+      // for the Maintenance screen. A scan the model did not do (#117), or
+      // whose batches did not all answer (#118), did not check every page,
+      // so the groups an earlier run saved stay, less any naming a page no
+      // longer on disk (#120).
+      const pending = groups.filter((g) => !enqueued.includes(g))
+      try {
+        await (record.duplicateScanNotDone || record.failedDetectorBatches
+          ? addPendingDuplicateGroups(pp, pending)
+          : replacePendingDuplicateGroups(pp, pending))
+      } catch (err) {
+        // The merges queued above still run, so they are still recorded (#126).
+        const message = err instanceof Error ? err.message : String(err)
+        record.error = record.error ? `${record.error}; ${message}` : message
+      }
       record.mergesEnqueued = outcomes.length
       const settled = await Promise.all(outcomes)
       record.mergesDone = settled.filter((o) => o === "done").length
@@ -271,17 +290,17 @@ function appendRunRecord(
 
 /**
  * The page a group merges into: most sources, then earliest created date,
- * then first in the group. Slugs resolve to pages by basename anywhere
- * under wiki/.
+ * then first in the group. Names find their pages as a merge finds them
+ * (`pagesNamed`); a name with no page ranks last. Null when a name names
+ * more than one page, which the merge would refuse (#114).
  */
-async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string> {
-  const paths = new Map<string, string>()
-  for (const file of walkFiles(await listDirectory(`${pp}/wiki`))) {
-    if (file.name.endsWith(".md")) paths.set(file.name.slice(0, -3), file.path)
-  }
+async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string | null> {
+  const pages = await listWikiPages(pp)
+  const found = group.slugs.map((slug) => pagesNamed(pages, slug))
+  if (found.some((named) => named.length > 1)) return null
   const ranked = await Promise.all(
     group.slugs.map(async (slug, position) => {
-      const path = paths.get(slug)
+      const path = found[position][0]?.file
       const content = path ? await readFile(path).catch(() => "") : ""
       const created = Date.parse(String(parseFrontmatter(content).frontmatter?.created ?? ""))
       return {
@@ -296,11 +315,4 @@ async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<s
     b.sources - a.sources || a.created - b.created || a.position - b.position,
   )
   return ranked[0].slug
-}
-
-function* walkFiles(nodes: FileNode[]): Generator<FileNode> {
-  for (const node of nodes) {
-    if (node.is_dir) yield* walkFiles(node.children ?? [])
-    else yield node
-  }
 }

@@ -85,6 +85,7 @@ import {
   addNotDuplicate,
   loadPendingDuplicateGroups,
   removePendingDuplicateGroup,
+  savePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import {
   loadScheduledMaintenanceConfig,
@@ -141,6 +142,13 @@ function page(title: string, created: string, sources: string[]): string {
 
 function group(slugs: string[], confidence: DuplicateGroup["confidence"]): DuplicateGroup {
   return { slugs, confidence, reason: "same topic" }
+}
+
+/** Pages by page id, as `concepts/seat`, with front matter. */
+async function writePages(...pageIds: string[]) {
+  for (const id of pageIds) {
+    await writeFileRaw(`${tmp.path}/wiki/${id}.md`, page(id, "2026-09-01", ["a.md"]))
+  }
 }
 
 async function runRecords(): Promise<Record<string, unknown>[]> {
@@ -387,6 +395,43 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["codex-bridge"])
   })
+
+  it("finds pages as a merge does: by page id, and by slug among entity and concept pages only (#114)", async () => {
+    await setConfig(null)
+    // A page id names its page, which has the most sources.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md", "b.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skill.md`, page("Agent Skill", "2026-09-01", ["c.md"]))
+    // A page of the same name outside entities and concepts, read after
+    // them, is not the page the merge keeps.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook.md`, page("Hook", "2026-09-01", ["d.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hooks.md`, page("Hooks", "2026-10-01", ["e.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/sources/hooks.md`, page("Hooks source", "2026-01-01", ["f.md", "g.md", "h.md"]))
+    mockDetect.mockResolvedValue({ groups: [
+      group(["agent-skill", "concepts/agent-skills"], "high"),
+      group(["hooks", "hook"], "high"),
+    ], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["concepts/agent-skills", "hook"])
+  })
+  it("merges a group the judge found one topic, naming its pages by path (#135)", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/entities/agent-skills.md`, page("Agent Skills", "2026-09-30", ["b.md", "c.md"]))
+    const judged = group(["concepts/agent-skills", "entities/agent-skills"], "high")
+    mockDetect.mockResolvedValue({ groups: [judged], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => [c[1].slugs, c[2]])).toEqual([
+      [["concepts/agent-skills", "entities/agent-skills"], "entities/agent-skills"],
+    ])
+    expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1 })
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([])
+  })
 })
 
 describe("scheduled maintenance tick – groups it does not merge", () => {
@@ -405,6 +450,30 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
       mergesEnqueued: 0,
     })
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([medium, low])
+  })
+
+  it("saves a high-confidence group whose slug names a concept and an entity page, and queues no merge of it (#114)", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/entities/agent-skills.md`, page("Agent Skills", "2026-10-02", ["b.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/skills.md`, page("Skills", "2026-10-01", ["c.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["d.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["e.md"]))
+    // As the scan returns them when its judge's call failed (#135): the
+    // same-slug group, the detector's high group naming the shared slug
+    // bare, and a group that merges.
+    const sameSlug = group(["concepts/agent-skills", "entities/agent-skills"], "medium")
+    const ambiguous = group(["agent-skills", "skills"], "high")
+    const clear = group(["agent-loop", "agent-loops"], "high")
+    mockDetect.mockResolvedValue({ groups: [sameSlug, ambiguous, clear], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["agent-loop", "agent-loops"]])
+    expect(record).toMatchObject({ groupsFound: { high: 2, medium: 1, low: 0 }, mergesEnqueued: 1, mergesFailed: 0 })
+    expect(getQueue()).toHaveLength(0)
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([sameSlug, ambiguous])
   })
 
   it("records the scan's failed detector batches in the run record (#108)", async () => {
@@ -434,6 +503,104 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
       groupsFound: { high: 0, medium: 0, low: 0 },
       duplicateScanNotDone: notDone,
     })
+  })
+
+  it.each([
+    ["embedding-coverage-low"],
+    ["no-candidate-pairs"],
+  ] as const)("keeps the groups an earlier run saved when the scan is not done, %s, adding its same-slug groups (#117)", async (reason) => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack", "concepts/seat", "entities/seat")
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    const sameSlug = group(["concepts/seat", "entities/seat"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound, sameSlug])
+    // Found again, so its fresh copy replaces the saved one rather than
+    // standing beside it.
+    const sameSlugAgain = { ...sameSlug, slugs: ["entities/seat", "concepts/seat"], reason: "fresh" }
+    const newSameSlug = group(["concepts/lane", "entities/lane"], "medium")
+    mockDetect.mockResolvedValue({
+      groups: [sameSlugAgain, newSameSlug],
+      failedBatches: [],
+      notDone: { reason, pages: 251 },
+    })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, sameSlugAgain, newSameSlug])
+  })
+
+  it("keeps the groups an earlier run saved when every detector call fails (#118)", async () => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound])
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }
+    mockDetect.mockResolvedValue({ groups: [], failedBatches: [failed, failed] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.failedDetectorBatches).toEqual([failed, failed])
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound])
+  })
+
+  it("adds the groups a scan with failed batches found to the saved ones (#118)", async () => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
+    const modelFound = group(["pstack", "p-stack"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [modelFound])
+    const found = group(["seat", "lane"], "low")
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 503: Service Unavailable" }
+    mockDetect.mockResolvedValue({ groups: [found], failedBatches: [failed] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, found])
+  })
+
+  it.each<[string, Partial<DuplicateScanResult>]>([
+    ["that is not done", { notDone: { reason: "embedding-coverage-low", pages: 251 } }],
+    ["with a failed batch", { failedBatches: [{ pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }] }],
+  ])("drops a saved group naming a page no longer on disk after a scan %s (#120)", async (_, scan) => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack", "concepts/seat")
+    const live = group(["pstack", "p-stack"], "medium")
+    // `lane` was merged into `seat` since the run that saved it.
+    const dead = group(["seat", "lane"], "low")
+    await savePendingDuplicateGroups(tmp.path, [live, dead])
+    mockDetect.mockResolvedValue({ groups: [], failedBatches: [], ...scan })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live])
+  })
+
+  it("records the merges it queued when saving the groups it kept fails (#126)", async () => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
+    // A folder where the saved-groups file goes, so its write fails.
+    await writeFileRaw(`${tmp.path}/.llm-wiki/dedup-pending-groups.json/stray`, "")
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }
+    mockDetect.mockResolvedValue({
+      groups: [group(["pstack", "p-stack"], "high"), group(["seat", "lane"], "low")],
+      failedBatches: [failed],
+    })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.error).toMatch(/dedup-pending-groups\.json/)
+    expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1, mergesFailed: 0 })
+  })
+
+  it("replaces the groups an earlier run saved when the scan is done", async () => {
+    await setConfig(null)
+    await savePendingDuplicateGroups(tmp.path, [group(["pstack", "p-stack"], "medium")])
+    const found = group(["seat", "lane"], "low")
+    mockDetect.mockResolvedValue({ groups: [found], failedBatches: [] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([found])
   })
 
   it("never enqueues a high-confidence group holding a pair marked not duplicates", async () => {

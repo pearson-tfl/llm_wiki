@@ -17,6 +17,7 @@ const {
   mockLoadEmbeddingConfig,
   mockLoadNotDuplicates,
   mockReadFile,
+  mockRecordNotDuplicates,
   mockStreamChat,
 } = vi.hoisted(() => ({
   mockCandidatePairs: vi.fn(),
@@ -25,6 +26,7 @@ const {
   mockLoadEmbeddingConfig: vi.fn(),
   mockLoadNotDuplicates: vi.fn(),
   mockReadFile: vi.fn(),
+  mockRecordNotDuplicates: vi.fn(),
   mockStreamChat: vi.fn(),
 }))
 vi.mock("./llm-client", async () => {
@@ -42,6 +44,11 @@ vi.mock("@/lib/project-store", () => ({
 }))
 vi.mock("./dedup-storage", () => ({
   loadNotDuplicates: mockLoadNotDuplicates,
+  recordNotDuplicates: mockRecordNotDuplicates,
+}))
+// The judge's route (#135): the chat route, a model apart from the scan's.
+vi.mock("@/lib/llm-task-routing", () => ({
+  getTaskLlmConfig: (task: string) => ({ provider: "claude-code", model: `${task}-route` }),
 }))
 vi.mock("@/lib/dedup_embedding", () => ({
   candidatePairs: mockCandidatePairs,
@@ -51,8 +58,9 @@ vi.mock("@/lib/dedup_embedding", () => ({
   },
 }))
 
-import { buildDedupLlmCall, runDuplicateDetection } from "./dedup-runner"
-import { DetectorReplyUnreadableError } from "./dedup"
+import { buildDedupLlmCall, runDuplicateDetection, startDuplicateScan } from "./dedup-runner"
+import { DuplicatePrefilterCancelledError } from "@/lib/dedup_embedding"
+import { DetectorCallFailedError, DetectorReplyUnreadableError } from "./dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 
 const cfg: LlmConfig = {
@@ -78,6 +86,7 @@ beforeEach(() => {
   mockLoadEmbeddingConfig.mockReset()
   mockLoadNotDuplicates.mockReset()
   mockReadFile.mockReset()
+  mockRecordNotDuplicates.mockReset()
   mockStreamChat.mockReset()
 })
 
@@ -203,6 +212,24 @@ describe("buildDedupLlmCall", () => {
     )
   })
 
+  it("names a detection call that fails as a model-call failure (#118)", async () => {
+    mockStreamChat.mockRejectedValue(new Error("connect ECONNREFUSED"))
+
+    await expect(buildDedupLlmCall(cfg, 8192)("s", "u", undefined)).rejects.toThrow(
+      new DetectorCallFailedError("connect ECONNREFUSED"),
+    )
+  })
+
+  it("leaves a merge call's failure as the client reported it (#118)", async () => {
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 503: overloaded"))
+    })
+
+    const call = buildDedupLlmCall(cfg, 16384, { completeReplyOnly: true })("s", "u", undefined)
+    await expect(call).rejects.toThrow("HTTP 503: overloaded")
+    await expect(call).rejects.not.toThrow(DetectorCallFailedError)
+  })
+
   it("refuses a detection reply the client reports cut off at the cap (#108)", async () => {
     mockStreamChat.mockImplementation(async (_c, _m, cb) => {
       cb.onToken('{"groups": []}')
@@ -244,6 +271,17 @@ function detectorCallSlugs(): string[][] {
   return mockStreamChat.mock.calls.map((call) =>
     [...(call[1][1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1]),
   )
+}
+
+/** `count` prefilter clusters of 80 pages each, one detector batch apiece. */
+function setupPrefilteredClusters(count: number) {
+  setupLargeProject(count * 80)
+  mockLoadNotDuplicates.mockResolvedValue([])
+  setupEmbeddingConfig()
+  const rel = (i: number) => `wiki/entities/p${i}.md`
+  const starts = Array.from({ length: count }, (_, i) => i * 80)
+  mockCandidatePairs.mockResolvedValue(starts.map((from) => [rel(from), rel(from + 1)]))
+  mockClusterByPairs.mockReturnValue(starts.map((from) => Array.from({ length: 80 }, (_, i) => rel(from + i))))
 }
 
 describe("runDuplicateDetection embedding prefilter", () => {
@@ -331,6 +369,162 @@ describe("runDuplicateDetection embedding prefilter", () => {
       { pages: calls[1].length, reason: expect.stringMatching(/could not be read/) },
       { pages: calls[2].length, reason: expect.stringMatching(/cut off/) },
     ])
+  })
+
+  it("reports a detector call that errors as a failed batch, never restarting unprefiltered (#118)", async () => {
+    setupLargeProject(300)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    const rel = (i: number) => `wiki/entities/p${i}.md`
+    const cluster = (from: number) => Array.from({ length: 80 }, (_, i) => rel(from + i))
+    mockCandidatePairs.mockResolvedValue([[rel(0), rel(1)], [rel(80), rel(81)], [rel(160), rel(161)]])
+    mockClusterByPairs.mockReturnValue([cluster(0), cluster(80), cluster(160)])
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, messages, cb) => {
+      call += 1
+      if (call === 2) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      const slugs = [...(messages[1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1])
+      cb.onToken(JSON.stringify({
+        groups: [{ slugs: slugs.slice(0, 2), reason: "same topic", confidence: "high" }],
+      }))
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let logged: string[] = []
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => {
+      logged = warn.mock.calls.map((args) => String(args[0]))
+      warn.mockRestore()
+    })
+
+    expect(detectorCallSlugs()).toHaveLength(3)
+    expect(result.groups.map((g) => g.slugs)).toEqual([["p0", "p1"], ["p160", "p161"]])
+    expect(result.failedBatches).toEqual([
+      { pages: 80, reason: "Duplicate detector call failed: HTTP 429: rate limited" },
+    ])
+    expect(result.notDone).toBeUndefined()
+    expect(logged.some((line) => /embedding prefilter/.test(line))).toBe(false)
+    expect(logged.some((line) => /detector call failed/.test(line))).toBe(true)
+  })
+
+  it("stops calling after two detector calls in a row fail, recording the rest as failed (#124)", async () => {
+    setupPrefilteredClusters(5)
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, messages, cb) => {
+      call += 1
+      if (call >= 2) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      const slugs = [...(messages[1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1])
+      cb.onToken(JSON.stringify({
+        groups: [{ slugs: slugs.slice(0, 2), reason: "same topic", confidence: "high" }],
+      }))
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    let logged: string[] = []
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => {
+      logged = warn.mock.calls.map((args) => String(args[0]))
+      warn.mockRestore()
+    })
+
+    expect(detectorCallSlugs()).toHaveLength(3)
+    expect(result.groups.map((g) => g.slugs)).toEqual([["p0", "p1"]])
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: rate limited" }
+    const notChecked = {
+      pages: 80,
+      reason: "Not checked: the scan stopped after 2 detector calls in a row failed",
+    }
+    expect(result.failedBatches).toEqual([failed, failed, notChecked, notChecked])
+    expect(logged.some((line) => /stopped after 2 detector calls in a row failed/.test(line))).toBe(true)
+  })
+
+  it("counts only consecutive call failures: an answered call in between resets the count (#124)", async () => {
+    setupPrefilteredClusters(6)
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      call += 1
+      if (call === 1 || call === 3 || call === 5) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      // Calls 2 and 6 answer; call 4's reply cannot be read, which is not a call failure.
+      cb.onToken(call === 4 ? "no JSON here" : '{"groups": []}')
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => warn.mockRestore())
+
+    expect(detectorCallSlugs()).toHaveLength(6)
+    expect(result.failedBatches.map((b) => b.reason)).toEqual([
+      expect.stringMatching(/^Duplicate detector call failed/),
+      expect.stringMatching(/^Duplicate detector call failed/),
+      expect.stringMatching(/could not be read/),
+      expect.stringMatching(/^Duplicate detector call failed/),
+    ])
+  })
+
+  it("stops the unprefiltered scan too after two detector calls in a row fail (#124)", async () => {
+    setupLargeProject(400)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 429: rate limited"))
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => warn.mockRestore())
+
+    expect(mockStreamChat).toHaveBeenCalledTimes(2)
+    expect(result.failedBatches.slice(0, 2).map((b) => b.reason)).toEqual([
+      "Duplicate detector call failed: HTTP 429: rate limited",
+      "Duplicate detector call failed: HTTP 429: rate limited",
+    ])
+    const notChecked = result.failedBatches.slice(2)
+    expect(notChecked.length).toBeGreaterThan(0)
+    for (const batch of notChecked) {
+      expect(batch.reason).toBe("Not checked: the scan stopped after 2 detector calls in a row failed")
+    }
+  })
+
+  it("still cancels when the signal aborts after the second call in a row fails (#124)", async () => {
+    setupPrefilteredClusters(5)
+    const controller = new AbortController()
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 429: rate limited"))
+    })
+    // The user cancels once the second failure is recorded, before the next batch.
+    let failuresLogged = 0
+    const warn = vi.spyOn(console, "warn").mockImplementation((line) => {
+      if (/detector call failed/.test(String(line)) && ++failuresLogged === 2) controller.abort()
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }).finally(() => warn.mockRestore()))
+      .rejects.toThrow("Duplicate scan cancelled")
+    expect(mockStreamChat).toHaveBeenCalledTimes(2)
+  })
+
+  it("propagates cancellation from a detector call instead of recording a failed batch (#118)", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
+    const controller = new AbortController()
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      controller.abort()
+      cb.onError(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
+      .rejects.toThrow(/aborted/)
+    expect(mockStreamChat).toHaveBeenCalledOnce()
   })
 
   it("falls back to the full LLM scan when the embedding prefilter fails", async () => {
@@ -476,9 +670,10 @@ describe("runDuplicateDetection embedding prefilter", () => {
   })
 })
 
-describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
+describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", () => {
+  const TWIN_IDS = ["concepts/agent-skills", "entities/agent-skills"]
   const TWIN_GROUP = {
-    slugs: ["concepts/agent-skills", "entities/agent-skills"],
+    slugs: TWIN_IDS,
     reason: 'Pages share the slug "agent-skills": concepts/agent-skills, entities/agent-skills',
     confidence: "medium",
   }
@@ -506,43 +701,320 @@ describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
     mockReadFile.mockImplementation(async (path: string) => {
       const type = path.includes("/concepts/") ? "concept" : "entity"
       const slug = path.split("/").pop()?.replace(/\.md$/, "") ?? "unknown"
-      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} body`
+      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} ${type} body`
     })
   }
 
-  it("reports them as one group of their page ids when the model groups nothing", async () => {
+  /** The detector (the scan's route) answers `detectorGroups`; the judge
+   *  (the chat route) answers what `judge` makes of the pages it is given. */
+  function mockDetectorAndJudge(
+    detectorGroups: string[][],
+    judge: (userMessage: string) => unknown[] | Error,
+  ) {
+    mockStreamChat.mockImplementation(async (config: LlmConfig, messages: { content: string }[], cb) => {
+      if (config.model !== "chat-route") {
+        cb.onToken(JSON.stringify({
+          groups: detectorGroups.map((slugs) => ({ slugs, reason: "same topic", confidence: "medium" })),
+        }))
+        cb.onDone()
+        return
+      }
+      const verdict = judge(messages[1].content)
+      if (verdict instanceof Error) {
+        cb.onError(verdict)
+        return
+      }
+      cb.onToken(JSON.stringify({ groups: verdict }))
+      cb.onDone()
+    })
+  }
+
+  const judgeCalls = () => mockStreamChat.mock.calls.filter(([config]) => config.model === "chat-route")
+
+  it("returns a pair judged one topic as a high group naming its pages by path", async () => {
     setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig(false)
-    mockDetectorGroup([])
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Both describe the Agent Skills standard." }])
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual({ groups: [TWIN_GROUP], failedBatches: [] })
+    expect(result).toEqual({
+      groups: [{
+        slugs: TWIN_IDS,
+        reason: "Judged one topic: Both describe the Agent Skills standard.",
+        confidence: "high",
+      }],
+      failedBatches: [],
+    })
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
-  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls no model", async () => {
-    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+  it("leaves no empty reason after a judge verdict that gives none", async () => {
+    setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([])
-    setupEmbeddingConfig()
-    mockCandidatePairs.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: " " }])
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(result.groups).toEqual([{ slugs: TWIN_IDS, reason: "Judged one topic", confidence: "high" }])
+  })
+
+  it("gives the judge, on the chat route, each page's path and content", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+
+    await runDuplicateDetection("/project", cfg)
+
+    expect(judgeCalls()).toHaveLength(1)
+    const userMessage = judgeCalls()[0][1][1].content as string
+    expect(userMessage).toContain("concepts/agent-skills")
+    expect(userMessage).toContain("agent-skills concept body")
+    expect(userMessage).toContain("entities/agent-skills")
+    expect(userMessage).toContain("agent-skills entity body")
+    expect(userMessage).not.toContain("entities/foo")
+  })
+
+  it("records a pair judged distinct by path and returns no group for it", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [TWIN_IDS])
+  })
+
+  it("judges a detector group naming a shared slug bare among every page the slug names", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], (userMessage) =>
+      userMessage.includes("entities/foo")
+        ? [{ pages: ["entities/agent-skills", "entities/foo"], reason: "One tool." }]
+        : [])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([
+      { slugs: ["entities/agent-skills", "entities/foo"], reason: "Judged one topic: One tool.", confidence: "high" },
+    ])
+    expect(judgeCalls()).toHaveLength(2)
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [TWIN_IDS])
+    expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [["concepts/agent-skills", "entities/foo"]])
+  })
+
+  it("reads a judge reply placing one page in two groups as unreadable, recording nothing", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], (userMessage) =>
+      userMessage.includes("entities/foo")
+        ? [
+          { pages: TWIN_IDS, reason: "One standard." },
+          { pages: ["entities/agent-skills", "entities/foo"], reason: "One tool." },
+        ]
+        : [{ pages: TWIN_IDS, reason: "One standard." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.failedBatches).toEqual([{ pages: 3, reason: expect.stringContaining("places a page in two groups") }])
+    expect(result.groups).toContainEqual({ slugs: ["agent-skills", "foo"], reason: "same topic", confidence: "medium" })
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it("asks no model again about pages every pair of which is recorded distinct", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([
+      TWIN_IDS,
+      ["concepts/agent-skills", "entities/foo"],
+      ["entities/agent-skills", "entities/foo"],
+    ])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], () => {
+      throw new Error("the judge was asked")
+    })
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [], failedBatches: [] })
+    expect(judgeCalls()).toEqual([])
+  })
+
+  it("reports a failed judge call as a failed batch and keeps the group as it was", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => new Error("HTTP 529 overloaded"))
+
+    const result = await runDuplicateDetection("/project", cfg)
+
     expect(result.groups).toEqual([TWIN_GROUP])
-    // The model's check is still reported as not done beside them (#112).
-    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
+    expect(result.failedBatches).toEqual([
+      { pages: 2, reason: expect.stringContaining("HTTP 529 overloaded") },
+    ])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
-  it("leaves out a pair the user marked not duplicates", async () => {
+  it("reports a judge reply it cannot read as a failed batch and keeps the group as it was", async () => {
     setupTwinProject(["foo"])
-    mockLoadNotDuplicates.mockResolvedValue([["concepts/agent-skills", "entities/agent-skills"]])
+    mockLoadNotDuplicates.mockResolvedValue([])
     setupEmbeddingConfig(false)
-    mockDetectorGroup([])
+    mockStreamChat.mockImplementation(async (config: LlmConfig, _m, cb) => {
+      cb.onToken(config.model === "chat-route" ? "They look like the same thing." : JSON.stringify({ groups: [] }))
+      cb.onDone()
+    })
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("no complete JSON object") }])
+  })
+
+  it.each([
+    ["a bare slug", ["agent-skills", "agent-skills"]],
+    ["a path with its folder and extension", ["wiki/concepts/agent-skills.md", "wiki/entities/agent-skills.md"]],
+  ])("reads a judge reply naming %s it was not given as unreadable, recording nothing", async (_form, pages) => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages, reason: "Same." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a page it was not given") }])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["pages given as one string", { pages: "concepts/agent-skills, entities/agent-skills", reason: "Same." }],
+    ["its pages under another key", { paths: TWIN_IDS, reason: "Same." }],
+    ["a bare string for a group", "concepts/agent-skills, entities/agent-skills"],
+  ])("reads a judge reply with %s as unreadable, recording nothing", async (_form, group) => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [group])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([TWIN_GROUP])
+    expect(result.failedBatches).toEqual([{ pages: 2, reason: expect.stringContaining("a group with no pages list") }])
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
+  it("keeps a distinct verdict it could not record out of the groups, and reports it", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [])
+    mockRecordNotDuplicates.mockRejectedValue(new Error("not-duplicates list unreadable"))
 
     const result = await runDuplicateDetection("/project", cfg)
 
     expect(result.groups).toEqual([])
+    expect(result.failedBatches).toEqual([
+      { pages: 2, reason: expect.stringContaining("not-duplicates list unreadable") },
+    ])
+  })
+
+  it("propagates a cancel during the judge's call", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    const controller = new AbortController()
+    mockDetectorAndJudge([], () => {
+      controller.abort()
+      return new Error("Request cancelled")
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
+      .rejects.toThrow("Request cancelled")
+  })
+
+  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls only the judge", async () => {
+    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([])
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Same standard." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(mockStreamChat.mock.calls.map(([config]) => config.model)).toEqual(["chat-route"])
+    expect(result.groups).toEqual([
+      { slugs: TWIN_IDS, reason: "Judged one topic: Same standard.", confidence: "high" },
+    ])
+    // The model's check is still reported as not done beside them (#112).
+    expect(result.notDone).toEqual({ reason: "no-candidate-pairs", pages: 252 })
+  })
+
+  it("leaves out, unjudged, a pair marked not duplicates", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([TWIN_IDS])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: "Same." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([])
+    expect(judgeCalls()).toEqual([])
+  })
+})
+
+describe("startDuplicateScan, the Maintenance screen's scan (#122)", () => {
+  /** A prefilter still comparing until its signal is aborted, as the real one is. */
+  function prefilterUntilCancelled() {
+    let received: AbortSignal | undefined
+    mockCandidatePairs.mockImplementation((_pages, _cfg, opts?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        received = opts?.signal
+        received?.addEventListener("abort", () =>
+          reject(new DuplicatePrefilterCancelledError("Duplicate scan cancelled")))
+      }))
+    return { signal: () => received }
+  }
+
+  it("cancelled during the prefilter's compare, ends with no result and no error, and calls no model", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    const prefilter = prefilterUntilCancelled()
+
+    const scan = startDuplicateScan("/project", cfg)
+    await vi.waitFor(() => expect(prefilter.signal()).toBeDefined())
+    expect(prefilter.signal()!.aborted).toBe(false)
+    scan.cancel()
+
+    await expect(scan.done).resolves.toBeNull()
+    expect(prefilter.signal()!.aborted).toBe(true)
+    expect(mockStreamChat).not.toHaveBeenCalled()
+  })
+
+  it("not cancelled, ends with the scan's result", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
+    mockDetectorGroup()
+
+    const scan = startDuplicateScan("/project", cfg)
+
+    await expect(scan.done).resolves.toMatchObject({
+      groups: [{ slugs: ["foo", "bar"], reason: "same topic", confidence: "high" }],
+    })
+  })
+
+  it("failing, not cancelled, still ends in the error", async () => {
+    mockListDirectory.mockRejectedValue(new Error("wiki folder unreadable"))
+
+    await expect(startDuplicateScan("/project", cfg).done).rejects.toThrow("wiki folder unreadable")
   })
 })
