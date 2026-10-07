@@ -1,7 +1,7 @@
 /**
  * The judge before a high-confidence merge (#145), end to end on pages
  * copied from a real vault: the real scheduled runMaintenanceTick, the real
- * runDuplicateDetection, the real high-group judge on the chat route and the
+ * runDuplicateDetection, the real judge (#135's) on the chat route and the
  * real executeMerge, each with the real Claude Code CLI on Opus through
  * `scripts/estate/live-cli.sh`, and the real merge queue. Embeddings are
  * off, so the detector sees every page in one call. The Tauri layer is
@@ -13,23 +13,25 @@
  * `todowrite`, two tools of one name in different products; groups 43 and
  * 44, an OpenClaw provider plugin with its vendor's page, `xai` and `z-ai`;
  * and two pairs of twins, Claude 3.7 Sonnet and the OpenClaw compaction
- * provider. Each is an entity page of the vault, copied with the vault's
- * index to a fresh project, so the copy itself is never written.
+ * provider. Each is an entity page of #111's vault snapshot, copied with
+ * the snapshot's index to a fresh project, so the copy is never written.
  *
- * #111's trial ran the detector over the whole vault, and it rated each of
- * these five groups high. On these ten pages alone the detector rates
- * group 46, 43 and 44 low, so a run would never ask the judge of them. The
- * scan's result therefore carries #111's rating: a group holding one of
- * these pairs is raised to high, and a pair the scan left out is added at
- * high. The detector's own groups are kept as it returned them, for the
- * report; the judge, the merge and the run after the scan are all real.
+ * #111's trial ran its detector, GLM 5.3 Flash, over the whole vault and
+ * rated each of these five groups high. On these ten pages alone the
+ * detector here, Opus, rates groups 46, 43 and 44 low, so a run would never
+ * ask the judge of them. The scan's result therefore carries #111's rating:
+ * a group holding one of these pairs is raised to high, and a pair the scan
+ * left out is added at high. The detector's own groups are kept as it
+ * returned them, for the report; the judge, the merge and the run after the
+ * scan are all real.
  *
  * The Maintenance screen's own Merge is then run on group 46, copied to a
  * fresh project: the card's merge, the real enqueueCardMerge with the real
  * merge queue, merges the pair the judge kept apart, with no judge call.
  *
- * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of a copy
- * holding those pages. Writes its measurements to DEDUP_REPORT when set.
+ * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of a copy of
+ * #111's snapshot holding those pages. Writes its measurements to
+ * DEDUP_REPORT when set.
  */
 import { describe, expect, it, vi } from "vitest"
 import { spawn } from "node:child_process"
@@ -39,7 +41,7 @@ import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
-import { HIGH_GROUP_JUDGE_PROMPT_MARKER, type DuplicateGroup } from "./dedup"
+import { JUDGE_PROMPT_MARKER, type DuplicateGroup } from "./dedup"
 
 const ENABLED = process.env.RUN_LLM_TESTS === "1" && !!process.env.DEDUP_VAULT_COPY
 
@@ -133,7 +135,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
 })
 
 /** As `build_claude_stdin` does for a system and a user message: one user
- *  turn, the system text first. A high-group judge call is noted with its
+ *  turn, the system text first. A judge call is noted with its
  *  pages and the CLI's reply text. */
 async function runCli(args: { streamId: string; messages: { role: string; content: string }[] }) {
   const system = args.messages.find((m) => m.role === "system")?.content ?? ""
@@ -150,7 +152,7 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
     child.on("close", (exitCode) => resolve({ code: exitCode, stderr: err }))
   })
   const lines = (await fs.readFile(outFile, "utf8").catch(() => "")).split("\n").filter(Boolean)
-  if (system.includes(HIGH_GROUP_JUDGE_PROMPT_MARKER)) {
+  if (system.includes(JUDGE_PROMPT_MARKER)) {
     const result = lines.map((l) => JSON.parse(l)).find((e) => e.type === "result")
     measured.judgeCalls.push({
       pages: [...user.matchAll(/^## Page: (.+)$/gm)].map((m) => m[1]),

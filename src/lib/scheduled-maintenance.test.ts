@@ -42,14 +42,18 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   })),
 }))
 
-vi.mock("@/lib/dedup-runner", async (importOriginal) => ({
-  ...pick(await importOriginal<typeof import("./dedup-runner")>(),
-    "DEDUP_JUDGE_MAX_TOKENS", "DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP"),
-  runDuplicateDetection: vi.fn(),
-  executeMerge: vi.fn(),
-  reembedMergedPages: vi.fn(),
-  buildDedupLlmCall: vi.fn(),
-}))
+vi.mock("@/lib/dedup-runner", async (importOriginal) => {
+  const { DEDUP_JUDGE_MAX_TOKENS, DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP } =
+    await importOriginal<typeof import("./dedup-runner")>()
+  return {
+    DEDUP_JUDGE_MAX_TOKENS,
+    DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP,
+    runDuplicateDetection: vi.fn(),
+    executeMerge: vi.fn(),
+    reembedMergedPages: vi.fn(),
+    buildDedupLlmCall: vi.fn(),
+  }
+})
 
 // Each task's route named by its model, so a test can tell the judge's
 // call (the chat route) from the run's own (the ingest route).
@@ -115,7 +119,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import {
   DetectorCallFailedError,
-  HIGH_GROUP_JUDGE_PROMPT_MARKER,
+  JUDGE_PROMPT_MARKER,
   MergeReplyRejectedError,
   type DuplicateGroup,
 } from "./dedup"
@@ -142,10 +146,6 @@ function judgedPages(user: string): string[] {
 
 function oneTopic(user: string): string {
   return JSON.stringify({ groups: [{ pages: judgedPages(user), reason: "One topic." }] })
-}
-
-function pick<T extends object, K extends keyof T>(from: T, ...keys: K[]): Pick<T, K> {
-  return Object.fromEntries(keys.map((k) => [k, from[k]])) as Pick<T, K>
 }
 
 const HOUR = 60 * 60 * 1000
@@ -433,6 +433,9 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
     await runMaintenanceTick(project, { now: () => T0 })
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["codex-bridge"])
+    // A group naming a page no longer on disk is not judged (#145): the
+    // merge refuses it and says why.
+    expect(mockJudge).not.toHaveBeenCalled()
   })
 
   it("finds pages as a merge does: by page id, and by slug among entity and concept pages only (#114)", async () => {
@@ -501,7 +504,7 @@ describe("scheduled maintenance tick – the judge before a high-confidence merg
     })
   }
 
-  it("judges a high group on the chat route, given its pages by path with their content, and merges it when one topic", async () => {
+  it("asks the shared-slug judge on the chat route, given the group's pages by path with their content, and merges it when one topic", async () => {
     mockDetect.mockResolvedValue({ groups: [twins], failedBatches: [] })
 
     const record = await runMaintenanceTick(project, { now: () => T0 })
@@ -509,7 +512,7 @@ describe("scheduled maintenance tick – the judge before a high-confidence merg
     expect(mockBuildLlm).toHaveBeenCalledWith(expect.objectContaining({ model: "chat-route" }), 2_048)
     expect(mockJudge).toHaveBeenCalledOnce()
     const [system, user] = mockJudge.mock.calls[0]
-    expect(system).toContain(HIGH_GROUP_JUDGE_PROMPT_MARKER)
+    expect(system).toContain(JUDGE_PROMPT_MARKER)
     expect(judgedPages(user)).toEqual(["entities/claude-3-7-sonnet", "entities/claude-sonnet-3-7"])
     expect(user).toContain("entities/claude-sonnet-3-7 body.")
     expect(mockMerge.mock.calls.map((c) => c[1].slugs)).toEqual([twins.slugs])

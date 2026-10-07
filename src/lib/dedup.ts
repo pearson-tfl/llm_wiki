@@ -23,8 +23,8 @@
  *      share a slug, by path with their content, to an LLM, ask
  *      which are one topic. The rest are distinct (distinctPairs),
  *      so the caller records them and never merges them (#135).
- *      judgeDuplicateGroupPages asks the same of a high group's pages
- *      before the scheduled run merges it with no click (#145).
+ *      The scheduled run asks it of a high group's pages too, before
+ *      merging the group with no click (#145).
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
  *      canonical slug, merge bodies (LLM call, its reply checked as
  *      the page merge checks one), union frontmatter
@@ -449,13 +449,7 @@ function extractFirstJsonObject(text: string): string | null {
  *  a live test tells the judge's calls from the detector's by it. */
 export const JUDGE_PROMPT_MARKER = "Some wiki pages share a file name"
 
-/** The high-group judge's system prompt holds this phrase, and no other
- *  prompt does, as JUDGE_PROMPT_MARKER does for the shared-slug judge (#145). */
-export const HIGH_GROUP_JUDGE_PROMPT_MARKER = "were flagged as likely duplicates"
-
-/** One prompt for both judges: what the pages are, and when two are distinct. */
-function judgeSystemPrompt(situation: string, distinctRule: string): string {
-  return `You are a wiki maintenance assistant. ${situation} You will receive each candidate page with its path, title and full content. Decide which of them describe one and the same topic, so that they should be merged into one page.
+const JUDGE_SYSTEM_PROMPT = `You are a wiki maintenance assistant. ${JUDGE_PROMPT_MARKER}, for example a concept page and an entity page both named "agent-skills". You will receive each candidate page with its path, title and full content. Decide which of them describe one and the same topic, so that they should be merged into one page.
 
 Output ONLY valid JSON. No prose, no markdown fences, no explanation outside the JSON. The schema is:
 
@@ -471,21 +465,10 @@ Output ONLY valid JSON. No prose, no markdown fences, no explanation outside the
 Rules:
 - Each group lists two or more of the given paths that are one topic.
 - A page in no group is a topic distinct from every other page given.
-- ${distinctRule}
+- Pages that share a name but cover different things – for example a general idea and a specific product, person or tool of that name – are distinct: leave them out of any group.
 - A page appears in at most one group.
 - Never invent paths that aren't in the input.
 - If no pages are one topic, output {"groups": []}.`
-}
-
-const JUDGE_SYSTEM_PROMPT = judgeSystemPrompt(
-  `${JUDGE_PROMPT_MARKER}, for example a concept page and an entity page both named "agent-skills".`,
-  "Pages that share a name but cover different things – for example a general idea and a specific product, person or tool of that name – are distinct: leave them out of any group.",
-)
-
-const HIGH_GROUP_JUDGE_SYSTEM_PROMPT = judgeSystemPrompt(
-  `These wiki pages ${HIGH_GROUP_JUDGE_PROMPT_MARKER}, and are about to be merged into one page with no one checking.`,
-  "Pages that are related, or have similar names, but are not the same thing are distinct: leave them out of any group.",
-)
 
 /** Each page's content is cut to this many characters in the judge's prompt,
  *  so one very long page cannot crowd the others out of the model's context. */
@@ -511,34 +494,12 @@ export async function judgeSharedSlugPages(
   llmCall: DedupLlmCall,
   signal?: AbortSignal,
 ): Promise<JudgedTopic[]> {
-  return judgePages(JUDGE_SYSTEM_PROMPT, candidates, llmCall, signal)
-}
-
-/**
- * Ask the model which pages of a high-confidence group, which the scheduled
- * run is about to merge with no click, are one topic (#145). The pages are
- * given and the reply read as `judgeSharedSlugPages` gives and reads them.
- */
-export async function judgeDuplicateGroupPages(
-  candidates: { pageId: string; content: string }[],
-  llmCall: DedupLlmCall,
-  signal?: AbortSignal,
-): Promise<JudgedTopic[]> {
-  return judgePages(HIGH_GROUP_JUDGE_SYSTEM_PROMPT, candidates, llmCall, signal)
-}
-
-async function judgePages(
-  systemPrompt: string,
-  candidates: { pageId: string; content: string }[],
-  llmCall: DedupLlmCall,
-  signal?: AbortSignal,
-): Promise<JudgedTopic[]> {
   const sections = candidates.map((c) => {
     const title = stringField(parseFrontmatter(c.content).frontmatter?.title) ?? slugFromPath(c.pageId)
     return `## Page: ${c.pageId}\nTitle: ${JSON.stringify(title)}\n\n${truncate(c.content, JUDGE_PAGE_CHARS)}\n`
   })
   const userMessage = `## Candidate pages (${candidates.length})\n\n${sections.join("\n---\n\n")}\nReturn the groups as JSON only.`
-  const reply = await llmCall(systemPrompt, userMessage, signal)
+  const reply = await llmCall(JUDGE_SYSTEM_PROMPT, userMessage, signal)
 
   const jsonText = extractFirstJsonObject(reply)
   if (!jsonText) throw new DetectorReplyUnreadableError("judge: no complete JSON object")

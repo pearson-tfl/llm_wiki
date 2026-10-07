@@ -41,7 +41,7 @@ import {
   DetectorCallFailedError,
   DetectorReplyUnreadableError,
   distinctPairs,
-  judgeDuplicateGroupPages,
+  judgeSharedSlugPages,
   pageIdFromPath,
   pagesNamed,
   type DuplicateGroup,
@@ -179,7 +179,7 @@ export async function runMaintenanceTick(
             record.failedDetectorBatches = [...record.failedDetectorBatches ?? [], verdict.failedBatch]
           }
           if (verdict.demoted) groups[groups.indexOf(group)] = verdict.demoted
-          if (!verdict.oneTopic) continue
+          if (!verdict.merges) continue
           // The judge's call took a while too.
           if (await withholdMerges(pp, record)) break
         }
@@ -273,17 +273,18 @@ async function withholdMerges(pp: string, record: MaintenanceRunRecord): Promise
 
 /** A high group's judgement: whether it merges, and what the run reports. */
 interface HighGroupVerdict {
-  oneTopic: boolean
+  merges: boolean
   /** The group as saved for the Maintenance screen once judged not one topic. */
   demoted?: DuplicateGroup
   failedBatch?: FailedDetectorBatch
 }
 
 /**
- * The judge the scheduled run asks, on the chat route, before it merges a
- * high-confidence group with no click (#145). It is given the group's pages
- * by path with their content, as the shared-slug judge is (#135). Pages it
- * puts in one group are one topic, and the merge goes ahead. Otherwise
+ * The shared-slug judge (#135), asked on the chat route before the scheduled
+ * run merges a high-confidence group with no click (#145). It is given the
+ * group's pages by path with their content. Pages it puts in one group are
+ * one topic, and the merge goes ahead. A group naming a page no longer on
+ * disk is not judged: the merge refuses it and reports why. Otherwise
  * nothing is merged, the group is kept at medium for the Maintenance screen,
  * and each pair it did not put together is recorded as not duplicates,
  * named as the group names it, so no later scan raises it. A failed call or
@@ -296,25 +297,26 @@ function highGroupJudge(pp: string): (group: DuplicateGroup) => Promise<HighGrou
   let callFailuresInARow = 0
   return async (group) => {
     const failed = (reason: string): HighGroupVerdict =>
-      ({ oneTopic: false, failedBatch: { pages: group.slugs.length, reason } })
+      ({ merges: false, failedBatch: { pages: group.slugs.length, reason } })
     if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
       const reason = `Not checked: the high-group judge stopped after ${callFailuresInARow} calls in a row failed`
       console.warn(`[dedup] ${reason}: ${group.slugs.join(", ")}`)
       return failed(reason)
     }
     // Each name names at most one page here: chooseCanonicalSlug has refused
-    // the rest. A name with no page is left to the merge, which reports it.
+    // the rest.
     const pages = await listWikiPages(pp)
     const nameOf = new Map<string, string>()
     for (const name of group.slugs) {
       const [page] = pagesNamed(pages, name)
-      if (page) nameOf.set(pageIdFromPath(page.path), name)
+      if (!page) return { merges: true }
+      nameOf.set(pageIdFromPath(page.path), name)
     }
     let topics
     try {
       const candidates = await Promise.all([...nameOf.keys()].map(async (pageId) =>
         ({ pageId, content: await readFile(`${pp}/wiki/${pageId}.md`) })))
-      topics = await judgeDuplicateGroupPages(candidates, llm)
+      topics = await judgeSharedSlugPages(candidates, llm)
       callFailuresInARow = 0
     } catch (err) {
       if (err instanceof DetectorCallFailedError) callFailuresInARow += 1
@@ -322,7 +324,7 @@ function highGroupJudge(pp: string): (group: DuplicateGroup) => Promise<HighGrou
       return failed(`High-group judge: ${errorMessage(err)}`)
     }
     const pageIds = [...nameOf.keys()]
-    if (topics.some((t) => t.pages.length === pageIds.length)) return { oneTopic: true }
+    if (topics.some((t) => t.pages.length === pageIds.length)) return { merges: true }
     const demoted: DuplicateGroup = { ...group, confidence: "medium" }
     const distinct = distinctPairs(pageIds, topics).map((pair) => pair.map((id) => nameOf.get(id)!))
     try {
@@ -333,7 +335,7 @@ function highGroupJudge(pp: string): (group: DuplicateGroup) => Promise<HighGrou
         demoted,
       }
     }
-    return { oneTopic: false, demoted }
+    return { merges: false, demoted }
   }
 }
 

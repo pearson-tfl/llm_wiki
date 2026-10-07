@@ -3,9 +3,6 @@ import {
   extractEntitySummary,
   detectDuplicateGroups,
   DetectorReplyUnreadableError,
-  HIGH_GROUP_JUDGE_PROMPT_MARKER,
-  JUDGE_PROMPT_MARKER,
-  judgeDuplicateGroupPages,
   parseDetectorResponse,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
@@ -252,44 +249,6 @@ describe("detectDuplicateGroups", () => {
 // ──────────────────────────────────────────────────────────────────
 // Stage 3: rewriteCrossReferences
 // ──────────────────────────────────────────────────────────────────
-
-describe("judgeDuplicateGroupPages (#145)", () => {
-  // As the vault's group 46: two tools of one name in different products.
-  const pages = [
-    { pageId: "entities/todo-write", content: PAGE("type: entity\ntitle: todo_write", "The DeepSeek harness's checklist tool.") },
-    { pageId: "entities/todowrite", content: PAGE("type: entity\ntitle: TodoWrite", "Claude Code's task-list tool.") },
-  ]
-
-  it("gives the model each page by path, with its title and content, under the high-group prompt", async () => {
-    const llm = vi.fn().mockResolvedValue('{"groups": []}')
-
-    expect(await judgeDuplicateGroupPages(pages, llm)).toEqual([])
-
-    const [system, user] = llm.mock.calls[0]
-    expect(system).toContain(HIGH_GROUP_JUDGE_PROMPT_MARKER)
-    expect(system).not.toContain(JUDGE_PROMPT_MARKER)
-    expect(user).toContain("## Page: entities/todo-write\nTitle: \"todo_write\"")
-    expect(user).toContain("The DeepSeek harness's checklist tool.")
-    expect(user).toContain("## Page: entities/todowrite\nTitle: \"TodoWrite\"")
-    expect(user).toContain("Claude Code's task-list tool.")
-  })
-
-  it("returns the pages the model puts in one group", async () => {
-    const llm = vi.fn().mockResolvedValue(JSON.stringify({
-      groups: [{ pages: ["entities/todo-write", "entities/todowrite"], reason: "One tool." }],
-    }))
-
-    expect(await judgeDuplicateGroupPages(pages, llm)).toEqual([
-      { pages: ["entities/todo-write", "entities/todowrite"], reason: "One tool." },
-    ])
-  })
-
-  it("rejects a reply it cannot read, as the shared-slug judge does", async () => {
-    const llm = vi.fn().mockResolvedValue('{"groups": [{"pages": ["entities/todo-write", "entities/todo_write"]}]}')
-
-    await expect(judgeDuplicateGroupPages(pages, llm)).rejects.toThrow(DetectorReplyUnreadableError)
-  })
-})
 
 describe("rewriteCrossReferences", () => {
   it("rewrites bare wikilinks", () => {

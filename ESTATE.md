@@ -563,13 +563,14 @@ Keep this list current. Merge conflicts can only come from these files.
   topic and merged, with the app's structural lint before and after, and
   a live scan of three same-slug pairs whose judge calls all fail, in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
-- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+- `src/lib/dedup.ts` (a field and a comment), `src/lib/dedup-runner.ts`,
   `src/lib/scheduled-maintenance.ts` – the scheduled run asks a judge
   before it merges a high-confidence group with no click
-  (pearson-tfl/llm_wiki#145). The judge runs on the chat route, as #135's
-  does, and is given the group's pages by path under `wiki/` with their
-  title and content, under a prompt of its own. When it puts every page in
-  one group the merge goes ahead as before. Otherwise nothing is merged,
+  (pearson-tfl/llm_wiki#145). The judge is #135's, on the chat route, given
+  the group's pages by path under `wiki/` with their title and content;
+  a group naming a page no longer on disk is not judged, and the merge
+  refuses it as before. When the judge puts every page in one group the
+  merge goes ahead as before. Otherwise nothing is merged,
   the group is saved for the Maintenance screen at medium, and each pair
   it did not put together is recorded in the not-duplicates list under the
   group's own names, so no later scan raises it. A failed call or a reply
@@ -582,9 +583,10 @@ Keep this list current. Merge conflicts can only come from these files.
   The Maintenance screen's own Merge button is unchanged. Upstream edits
   to the scheduled run's merge loop or the duplicate group's fields need
   re-checking against this.
-  Tests in `src/lib/dedup.test.ts`, `src/lib/dedup-runner.test.ts` and
+  Tests in `src/lib/dedup-runner.test.ts` and
   `src/lib/scheduled-maintenance.test.ts`; a live scheduled run on #111's
-  groups 46, 43 and 44 and two pairs of twins, copied from the vault, in
+  groups 46, 43 and 44 and two pairs of twins, copied from #111's vault
+  snapshot, and a live Maintenance-screen Merge of group 46, in
   `src/lib/dedup-high-group-judge.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
