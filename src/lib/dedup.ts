@@ -8,7 +8,8 @@
  * layer only catches *exact* slug collisions; this module catches
  * the soft-collision case via an LLM-driven self-check.
  *
- * Three stages, each independently testable:
+ * Three stages and a judge between the second and third, each
+ * independently testable:
  *
  *   1. extractEntitySummaries: walk wiki/entities and wiki/concepts,
  *      pull (slug, title, description, tags) per page. Pure-data;
@@ -18,6 +19,10 @@
  *      it to identify groups of slugs likely to refer to the same
  *      thing. Returns parsed JSON groups with reason + confidence.
  *      The LLM call is injected so unit tests don't hit a model.
+ *  2b. judgeSharedSlugPages: hand the pages a group names that
+ *      share a slug, by path with their content, to an LLM, ask
+ *      which are one topic. The rest are distinct (distinctPairs),
+ *      so the caller records them and never merges them (#135).
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
  *      canonical slug, merge bodies (LLM call, its reply checked as
  *      the page merge checks one), union frontmatter
@@ -435,7 +440,11 @@ function extractFirstJsonObject(text: string): string | null {
 // Stage 2b: judge pages that share a slug (#135)
 // ──────────────────────────────────────────────────────────────────
 
-const JUDGE_SYSTEM_PROMPT = `You are a wiki maintenance assistant. Some wiki pages share a file name, for example a concept page and an entity page both named "agent-skills". You will receive each candidate page with its path, title and full content. Decide which of them describe one and the same topic, so that they should be merged into one page.
+/** The judge's system prompt holds this phrase, and no other prompt does:
+ *  a live test tells the judge's calls from the detector's by it. */
+export const JUDGE_PROMPT_MARKER = "Some wiki pages share a file name"
+
+const JUDGE_SYSTEM_PROMPT = `You are a wiki maintenance assistant. ${JUDGE_PROMPT_MARKER}, for example a concept page and an entity page both named "agent-skills". You will receive each candidate page with its path, title and full content. Decide which of them describe one and the same topic, so that they should be merged into one page.
 
 Output ONLY valid JSON. No prose, no markdown fences, no explanation outside the JSON. The schema is:
 
@@ -526,6 +535,11 @@ export function distinctPairs(candidates: string[], topics: JudgedTopic[]): stri
     }
   }
   return pairs
+}
+
+/** Every pair of candidates, each sorted. */
+export function allPairs(candidates: string[]): string[][] {
+  return distinctPairs(candidates, [])
 }
 
 /** Canonical key for a group — lowercased, sorted, comma-joined. */

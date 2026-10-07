@@ -750,6 +750,17 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
+  it("leaves no empty reason after a judge verdict that gives none", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([], () => [{ pages: TWIN_IDS, reason: " " }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([{ slugs: TWIN_IDS, reason: "Judged one topic", confidence: "high" }])
+  })
+
   it("gives the judge, on the chat route, each page's path and content", async () => {
     setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([])

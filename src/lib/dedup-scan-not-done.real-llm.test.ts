@@ -30,6 +30,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import { useWikiStore, type EmbeddingConfig, type LlmConfig } from "@/stores/wiki-store"
+import { JUDGE_PROMPT_MARKER } from "./dedup"
 
 const ENABLED =
   process.env.RUN_LLM_TESTS === "1"
@@ -84,7 +85,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
       }
       // The detector's calls are counted; the judge's (#135) are only refused.
       const messages = (args?.messages ?? []) as { content: string }[]
-      if (cmd === "claude_cli_spawn" && !messages[0]?.content.includes("share a file name")) measured.modelCalls++
+      if (cmd === "claude_cli_spawn" && !messages[0]?.content.includes(JUDGE_PROMPT_MARKER)) measured.modelCalls++
       throw new Error(`unexpected invoke ${cmd}`)
     },
   }

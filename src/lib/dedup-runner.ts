@@ -57,6 +57,7 @@ const DEDUP_MERGE_MAX_TOKENS = 16_384
 /** The judge answers with a short JSON list of page groups (#135). */
 const DEDUP_JUDGE_MAX_TOKENS = 2_048
 import {
+  allPairs,
   ambiguousSlugRefusal,
   detectDuplicateGroups,
   DetectorCallFailedError,
@@ -298,7 +299,7 @@ async function settleSharedSlugGroups(
       continue
     }
     const unrecorded = (pairs: string[][]) => pairs.filter((pair) => !recorded.has(normalizeSlugGroupKey(pair)))
-    if (unrecorded(distinctPairs(candidates, [])).length === 0) continue
+    if (unrecorded(allPairs(candidates)).length === 0) continue
     let topics
     try {
       const pages = await Promise.all(candidates.map(async (pageId) =>
@@ -311,7 +312,8 @@ async function settleSharedSlugGroups(
       continue
     }
     for (const topic of topics) {
-      out.push({ slugs: topic.pages, reason: `Judged one topic: ${topic.reason}`, confidence: "high" })
+      const reason = topic.reason.trim() ? `Judged one topic: ${topic.reason}` : "Judged one topic"
+      out.push({ slugs: topic.pages, reason, confidence: "high" })
     }
     const distinct = unrecorded(distinctPairs(candidates, topics))
     if (distinct.length === 0) continue

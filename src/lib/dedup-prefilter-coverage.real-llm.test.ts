@@ -19,6 +19,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
+import { JUDGE_PROMPT_MARKER } from "./dedup"
 
 const ENABLED =
   process.env.RUN_LLM_TESTS === "1"
@@ -88,7 +89,7 @@ vi.mock("@/lib/llm-client", async (importOriginal) => {
       callbacks: { onToken: (t: string) => void; onDone: () => void; onError: (err: Error) => void },
     ) => {
       // The shared-slug judge (#135) is refused, so it records no verdict in the copy.
-      if (messages[0]?.content.includes("share a file name")) {
+      if (messages[0]?.content.includes(JUDGE_PROMPT_MARKER)) {
         callbacks.onError(new Error("the judge is not this test's"))
         return
       }

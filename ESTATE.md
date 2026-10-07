@@ -303,9 +303,11 @@ Keep this list current. Merge conflicts can only come from these files.
   reports every slug held by more than one entity or concept page, from
   the file names alone with no model call, as one group naming each page
   by its page id (`concepts/agent-skills`, `entities/agent-skills`), at
-  medium confidence, so scheduled maintenance never merges one unasked; the
-  Maintenance screen offers those ids as the page to keep. Since #135 the
-  scan's judge settles each such group before either sees it. A merge finds
+  medium confidence. Since #135 the scan's judge settles each such group
+  before scheduled maintenance or the Maintenance screen sees it; only a
+  group whose judge call failed reaches them as found, and then scheduled
+  maintenance never merges it unasked and the Maintenance screen offers
+  those ids as the page to keep. A merge finds
   each page by its page id, or by a slug that names exactly one entity or
   concept page, and refuses a slug that names more. A slug the detector
   names twice in one group counts once, and a group left with one page is
@@ -472,8 +474,9 @@ Keep this list current. Merge conflicts can only come from these files.
   copy in `src/lib/dedup-compare-responsive.real-llm.test.ts`.
 - `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
   `src/lib/scheduled-maintenance.ts` – a high-confidence group whose slug
-  names both a concept and an entity page is saved for the Maintenance
-  screen, not queued for a scheduled merge (pearson-tfl/llm_wiki#114).
+  names both a concept and an entity page, which since #135 is only one
+  whose judge call failed, is saved for the Maintenance screen, not queued
+  for a scheduled merge (pearson-tfl/llm_wiki#114).
   The merge refuses such a slug (#109), so the queued merge failed every
   retry and the group never reached the screen. The scheduled run's choice
   of the page to keep now finds pages as a merge does, by page id or by a
@@ -484,8 +487,6 @@ Keep this list current. Merge conflicts can only come from these files.
   last.
   Upstream edits to the merge's page lookup or the scheduled run's choice
   of the page to keep need re-checking against this.
-  Since #135 the scan settles such groups by judgement first, so only a
-  group whose judge call failed still reaches this.
   Tests in `src/lib/scheduled-maintenance.test.ts`; its live run in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts` was replaced by #135's.
 - `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-queue.ts`,
@@ -508,8 +509,9 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/dedup-storage.test.ts` and
   `src/lib/scheduled-maintenance.test.ts`; a live card merge and page list
   on a vault copy in `src/lib/dedup-ambiguous-card.real-llm.test.ts`.
-- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-storage.ts`
-  – a duplicate group whose pages include two that share a slug is
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`, `src/lib/dedup-storage.ts`,
+  `src/lib/scheduled-maintenance.ts` (a comment only) – a duplicate group
+  whose pages include two that share a slug is
   settled by a model judgement at the end of the scan, never left pending
   for John (pearson-tfl/llm_wiki#135). That is a same-slug group (#109) or
   a detector group naming such a slug bare. The judge runs on the chat
@@ -522,7 +524,8 @@ Keep this list current. Merge conflicts can only come from these files.
   run merges. Each other pair is recorded in the not-duplicates list by
   path, so no later scan raises it or asks again; a group all of whose
   pairs are recorded is dropped with no call. A judge call that fails, or a
-  reply it cannot read, is a failed batch and the group stays as it was.
+  reply it cannot read or that names a page it was not given, is a failed
+  batch and the group stays as it was.
   The not-duplicates list's writers now run one at a time, and the judge's
   writer refuses a list it cannot read rather than writing over it. A
   partial run's saved groups now drop a group whose slug names two pages,

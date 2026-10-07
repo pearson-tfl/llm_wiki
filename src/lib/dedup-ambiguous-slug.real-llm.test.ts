@@ -29,7 +29,7 @@ import path from "node:path"
 import { createTempProject, realFs } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
 import { useWikiStore, type LlmConfig } from "@/stores/wiki-store"
-import type { DuplicateGroup } from "./dedup"
+import { JUDGE_PROMPT_MARKER, type DuplicateGroup } from "./dedup"
 
 const ENABLED = process.env.RUN_LLM_TESTS === "1" && !!process.env.DEDUP_VAULT_COPY
 
@@ -127,7 +127,7 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
     child.on("close", (exitCode) => resolve({ code: exitCode, stderr: err }))
   })
   const lines = (await fs.readFile(outFile, "utf8").catch(() => "")).split("\n").filter(Boolean)
-  if (system.includes("share a file name")) {
+  if (system.includes(JUDGE_PROMPT_MARKER)) {
     const result = lines.map((l) => JSON.parse(l)).find((e) => e.type === "result")
     measured.judgeCalls.push({
       pages: [...user.matchAll(/^## Page: (.+)$/gm)].map((m) => m[1]),
