@@ -335,6 +335,40 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts` and
   `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
   scan of a vault copy in `src/lib/dedup-scan-not-done.real-llm.test.ts`.
+- `src/lib/dedup.ts`, `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts`,
+  `src/components/settings/sections/dedup-scan-notices.tsx`,
+  `src/i18n/{en,it,ru,zh}.json` – a detector call that fails no longer
+  restarts the duplicate scan unprefiltered (pearson-tfl/llm_wiki#118).
+  Upstream caught a network or HTTP error from any detector call, a 429, a
+  5xx or a dropped connection, as if the embedding prefilter had failed:
+  it logged an embedding failure, dropped every group the prefiltered
+  batches had found, and scanned every page again in file order: about 80
+  calls on John's vault, which seldom put real twins in one call. The call
+  now fails with `DetectorCallFailedError`, named "Duplicate detector call
+  failed".
+  The scan reports its batch as a failed batch with that reason, as an
+  unreadable reply has been since #108. The other batches' groups stand,
+  and the scheduled run records the batch in `failedDetectorBatches`. A
+  cancelled call still cancels the scan. This holds on every detection
+  path, the unprefiltered scan of a small wiki included, so a scan whose
+  every call fails, as with a wrong key, ends as failed batches rather than
+  as an error in the run record or a toast. A scheduled run whose scan has
+  failed batches did not check every page, so, as a not-done scan does
+  (#117), it adds its groups to the ones saved for the Maintenance screen
+  rather than replacing them: an outage during the run keeps every saved
+  group. Only the prefilter's own failure reaches the full-scan fallback
+  and its log line. The Maintenance
+  screen's failed-batch notice says the batches failed, not that they
+  could not be read, in each locale; the reason after it says which.
+  Upstream edits to the detector's model call or the prefilter's fallback
+  need re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts`,
+  `src/lib/scheduled-maintenance.test.ts` and
+  `src/components/settings/sections/dedup-scan-notices.test.tsx`; a live
+  scan and scheduled run of a vault copy, with real embeddings and an
+  endpoint that fails two calls, in
+  `src/lib/dedup-scan-model-error.real-llm.test.ts`.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – a
   scheduled run whose duplicate scan is not done keeps the groups an
   earlier run saved for the Maintenance screen (pearson-tfl/llm_wiki#117).
@@ -342,7 +376,8 @@ Keep this list current. Merge conflicts can only come from these files.
   with the embedding server down lost every group the model had found for
   a decision by hand. It now adds its groups to the saved ones, a saved
   group with the same pages giving way to the fresh copy; a scan that is
-  done still replaces the list. The run's addition and the Maintenance
+  done, with no failed batch (#118), still replaces the list. The run's
+  addition and the Maintenance
   screen's drop of a group it acted on run one at a time, so neither undoes
   the other's write.
   Upstream edits to how the scheduled run saves its groups need

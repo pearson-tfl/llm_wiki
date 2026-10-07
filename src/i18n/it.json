@@ -945,7 +945,7 @@
           "scheduleNever": "mai",
           "scanning": "Analisi…",
           "noneFound": "Nessun gruppo di duplicati trovato. Il wiki è pulito.",
-          "batchesFailed": "{{count}} lotti del rilevatore ({{pages}} pagine) non sono leggibili, quindi quelle pagine non sono state controllate: {{reason}}",
+          "batchesFailed": "{{count}} lotti del rilevatore ({{pages}} pagine) non sono riusciti, quindi quelle pagine non sono state controllate: {{reason}}",
           "notDoneCoverageLow": "La scansione dei duplicati non è stata eseguita: troppe poche delle sue {{pages}} pagine hanno potuto ricevere un embedding per il prefiltro, e un wiki così grande non viene scansionato senza. Controlla le impostazioni degli embedding e ripeti la scansione.",
           "notDoneNoPairs": "La scansione dei duplicati non è stata eseguita: il prefiltro degli embedding non ha trovato coppie candidate tra le sue {{pages}} pagine, e un wiki così grande non viene scansionato senza, quindi potrebbero restare duplicati.",
           "candidates": "{{n}} candidati",

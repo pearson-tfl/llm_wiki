@@ -16,7 +16,7 @@ import {
 import { reembedWikiPages, removeWikiPageEmbeddings } from "@/lib/embedding-freshness"
 import { loadEmbeddingConfig } from "@/lib/project-store"
 import { normalizePath } from "@/lib/path-utils"
-import type { EmbeddingConfig, LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode } from "@/types/wiki"
 
 /**
@@ -52,6 +52,7 @@ const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
 const DEDUP_MERGE_MAX_TOKENS = 16_384
 import {
   detectDuplicateGroups,
+  DetectorCallFailedError,
   DetectorReplyUnreadableError,
   extractEntitySummary,
   mergeDuplicateGroup,
@@ -83,7 +84,9 @@ import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
  * (#29): a reply cut off at the cap is rejected, and a reply whose
  * signal fired throws, since the client ends a cancelled request as
  * done with whatever text had arrived. Detection refuses a cut-off reply
- * too, as unreadable (#108): its groups may be missing.
+ * too, as unreadable (#108): its groups may be missing. A detection call
+ * that fails throws DetectorCallFailedError, so the scan reports its batch
+ * as failed (#118); a cancelled one throws the client's error.
  */
 export function buildDedupLlmCall(
   llmConfig: LlmConfig,
@@ -93,7 +96,9 @@ export function buildDedupLlmCall(
   return async (systemPrompt, userMessage, signal) => {
     let result = ""
     let cutOff = false
-    let streamError: Error | null = null
+    // Asserted, not annotated: the callbacks assign it, which TypeScript
+    // does not see, so an annotated null would narrow it to never.
+    let streamError = null as Error | null
     await new Promise<void>((resolve) => {
       streamChat(
         llmConfig,
@@ -127,7 +132,12 @@ export function buildDedupLlmCall(
     if (options.completeReplyOnly && signal?.aborted) {
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
-    if (streamError) throw streamError
+    if (streamError) {
+      // A detection call that fails is its batch's failure, not the scan's
+      // (#118); a cancelled one still cancels the scan.
+      if (options.completeReplyOnly || signal?.aborted) throw streamError
+      throw new DetectorCallFailedError(streamError.message)
+    }
     if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
       const reason = "the model's reply was cut off at its output limit"
@@ -206,7 +216,8 @@ export async function loadAllWikiPages(
   return out
 }
 
-/** A detector call whose reply could not be read: its pages went unchecked. */
+/** A detector batch that failed: its reply could not be read (#108) or its
+ *  call failed (#118). Its pages went unchecked. */
 export interface FailedDetectorBatch {
   pages: number
   reason: string
@@ -264,16 +275,15 @@ async function detectWithModel(
   const embeddingEndpoint =
     typeof embeddingConfig?.endpoint === "string" ? embeddingConfig.endpoint.trim() : ""
   if (embeddingConfig?.enabled && embeddingEndpoint) {
+    // Only the prefilter's own failure falls back to the full scan: a
+    // detector call that fails is its batch's failure (#118).
+    let pairs: CandidatePair[] | undefined
     try {
-      return await detectDuplicateGroupsWithEmbeddingPrefilter(
-        summaries,
-        embeddingConfig,
-        llm,
-        {
-          signal: options.signal,
-          notDuplicates: notDup,
-        },
-      )
+      pairs = await candidatePairs(summaries.map(summaryToEmbeddingPage), embeddingConfig, {
+        topK: DEDUP_PREFILTER_TOP_K,
+        threshold: DEDUP_PREFILTER_THRESHOLD,
+        signal: options.signal,
+      })
     } catch (err) {
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
@@ -281,6 +291,12 @@ async function detectWithModel(
         return notDoneResult("embedding-coverage-low", summaries.length)
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
+    }
+    if (pairs) {
+      return detectAmongCandidatePairs(summaries, pairs, llm, {
+        signal: options.signal,
+        notDuplicates: notDup,
+      })
     }
   }
 
@@ -314,8 +330,9 @@ async function detectDuplicateGroupsInBoundedBatches(
   return detectInBatches(batches, llm, options)
 }
 
-/** One detector call per batch. A reply that cannot be read is reported as
- *  a failed batch, not counted as no duplicates (#108). */
+/** One detector call per batch. A reply that cannot be read (#108), or a
+ *  call that fails (#118), is reported as a failed batch, not counted as no
+ *  duplicates, and the other batches' groups stand. */
 async function detectInBatches(
   batches: EntitySummary[][],
   llm: DedupLlmCall,
@@ -328,25 +345,23 @@ async function detectInBatches(
     try {
       groups.push(...await detectDuplicateGroups(batch, llm, options))
     } catch (err) {
-      if (!(err instanceof DetectorReplyUnreadableError)) throw err
+      if (err instanceof DetectorCallFailedError) {
+        console.warn("[dedup] detector call failed; its batch is reported as failed:", err)
+      } else if (!(err instanceof DetectorReplyUnreadableError)) {
+        throw err
+      }
       failedBatches.push({ pages: batch.length, reason: err.message })
     }
   }
   return { groups: uniqueDuplicateGroups(groups), failedBatches }
 }
 
-async function detectDuplicateGroupsWithEmbeddingPrefilter(
+async function detectAmongCandidatePairs(
   summaries: EntitySummary[],
-  embeddingConfig: EmbeddingConfig,
+  pairs: CandidatePair[],
   llm: DedupLlmCall,
   options: { signal?: AbortSignal; notDuplicates?: string[][] },
 ): Promise<DuplicateScanResult> {
-  const pages = summaries.map(summaryToEmbeddingPage)
-  const pairs = await candidatePairs(pages, embeddingConfig, {
-    topK: DEDUP_PREFILTER_TOP_K,
-    threshold: DEDUP_PREFILTER_THRESHOLD,
-    signal: options.signal,
-  })
   if (pairs.length === 0) {
     // Preserve recall for small/medium wikis: a weak or non-multilingual
     // embedder can miss exactly the cross-language aliases the LLM detector

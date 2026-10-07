@@ -4,9 +4,9 @@ import type { FailedDetectorBatch, ScanNotDone } from "@/lib/dedup-runner"
 
 /**
  * What a finished duplicate scan says beside its groups: the detector
- * batches it could not read (#108), a check the model did not do (#112),
- * or, only when the model checked every page and found nothing, that the
- * wiki is clean.
+ * batches that failed, unreadable (#108) or erroring (#118), a check the
+ * model did not do (#112), or, only when the model checked every page and
+ * found nothing, that the wiki is clean.
  */
 export function DuplicateScanNotices({
   groupCount,
@@ -29,7 +29,7 @@ export function DuplicateScanNotices({
               pages: failedBatches.reduce((sum, batch) => sum + batch.pages, 0),
               reason: failedBatches[0].reason,
               defaultValue:
-                "{{count}} detector batches ({{pages}} pages) could not be read, so those pages were not checked: {{reason}}",
+                "{{count}} detector batches ({{pages}} pages) failed, so those pages were not checked: {{reason}}",
             })}
           </div>
         </div>

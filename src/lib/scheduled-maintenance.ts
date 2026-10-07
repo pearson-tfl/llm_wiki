@@ -67,8 +67,9 @@ export interface MaintenanceRunRecord {
    *  page changed (#24). */
   mergesRejected?: number
   rejectedMerges?: { slugs: string[]; reason: string }[]
-  /** Detector calls whose reply could not be read, so their pages went
-   *  unchecked (#108); absent when every call was read. */
+  /** Detector batches that failed, their reply unreadable (#108) or their
+   *  call failed (#118), so their pages went unchecked; absent when every
+   *  batch was checked. */
   failedDetectorBatches?: FailedDetectorBatch[]
   /** Why the model checked none of a large wiki's pages (#112); absent
    *  when it ran. */
@@ -168,10 +169,11 @@ export async function runMaintenanceTick(
 
     if (record.groupsFound) {
       // Every group not queued for a merge, withheld ones included, is kept
-      // for the Maintenance screen. A scan the model did not do found no
-      // group it would find, so the groups an earlier run saved stay (#117).
+      // for the Maintenance screen. A scan the model did not do (#117), or
+      // whose batches did not all answer (#118), did not check every page,
+      // so the groups an earlier run saved stay.
       const pending = groups.filter((g) => !enqueued.includes(g))
-      await (record.duplicateScanNotDone
+      await (record.duplicateScanNotDone || record.failedDetectorBatches
         ? addPendingDuplicateGroups(pp, pending)
         : savePendingDuplicateGroups(pp, pending))
       record.mergesEnqueued = outcomes.length

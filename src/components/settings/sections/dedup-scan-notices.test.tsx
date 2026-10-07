@@ -43,7 +43,7 @@ describe("DuplicateScanNotices", () => {
   it("names failed detector batches and says nothing is clean (#108)", () => {
     const html = render({ groupCount: 0, failedBatches: [{ pages: 80, reason: "invalid JSON" }] })
 
-    expect(html).toContain("1 detector batches (80 pages) could not be read")
+    expect(html).toContain("1 detector batches (80 pages) failed")
     expect(html).not.toContain(CLEAN)
   })
 
