@@ -31,6 +31,14 @@
  * which answers the detector with no groups and drops the connection of
  * every judge call.
  *
+ * A scheduled run on a fifth fresh project shows a merge leaves no
+ * path-style link (`[[folder/slug]]`) to a merged-away page (#141): the
+ * vault's `openclaw-onepassword` / `openclaw-1password-plugin` pair and its
+ * three `two-*-node-*` pages, every page of the copy that names one of them
+ * and the index. The pages left are read for every path-style link that
+ * named a removed page, and the structural lint lists the broken links
+ * before and after, as above.
+ *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of the copy.
  * Never point it at a live vault. Writes its measurements to DEDUP_REPORT
  * when set.
@@ -532,4 +540,130 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   }, 10 * 60 * 1000)
+})
+
+/** Two groups #111's run merged on the vault, whose pages other pages link
+ *  to by path (#141). */
+const PATH_LINKED = [
+  "entities/openclaw-onepassword",
+  "entities/openclaw-1password-plugin",
+  "concepts/two-layer-node-admission",
+  "concepts/two-stage-node-approval",
+  "concepts/two-stage-node-pairing",
+]
+
+describe.skipIf(!ENABLED)("a merge leaves no path-style link dangling, on pages from a real vault (#141)", () => {
+  it("merges pages linked as [[folder/slug]] and sends each such link to the kept page", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { saveScheduledMaintenanceConfig } = await import("@/lib/project-store")
+    const { restoreQueue, getQueue } = await import("./dedup-queue")
+    const { listWikiPages } = await import("./dedup-storage")
+    const { pageIdFromPath } = await import("./dedup")
+    const { runMaintenanceTick } = await import("./scheduled-maintenance")
+    const { runStructuralLint } = await import("./lint")
+    const fresh = await createTempProject("llmw141-path-links")
+    try {
+      const names = PATH_LINKED.map((id) => id.split("/")[1]).join("|")
+      const mentions = new RegExp(`(?<![\\w-])(concepts/|entities/)?(${names})(?![\\w-])`)
+      const copied: string[] = []
+      for (const rel of await fs.readdir(`${vault}/wiki`, { recursive: true })) {
+        if (!rel.endsWith(".md")) continue
+        const content = await fs.readFile(`${vault}/wiki/${rel}`, "utf8")
+        if (rel !== "index.md" && !PATH_LINKED.includes(rel.replace(/\.md$/, "")) && !mentions.test(content)) continue
+        await fs.mkdir(path.dirname(`${fresh.path}/wiki/${rel}`), { recursive: true })
+        await fs.writeFile(`${fresh.path}/wiki/${rel}`, content)
+        copied.push(rel)
+      }
+      // The run keeps the page with the most sources, which on the vault is
+      // the page it links to by path, so every page of both groups gets
+      // path-style links in the vault's forms (plain, aliased, and the
+      // index's), from two of the vault's own linking pages.
+      const builtLinks = {
+        "entities/1password.md": PATH_LINKED.slice(0, 2),
+        "concepts/privacy-heavy-node-command-opt-in.md": PATH_LINKED.slice(2),
+      }
+      for (const [rel, ids] of Object.entries(builtLinks)) {
+        const links = ids.map((id) => `[[${id}]] and [[${id}|${id.split("/")[1]} by path]]`).join(", ")
+        await fs.appendFile(`${fresh.path}/wiki/${rel}`, `\nSee also ${links}.\n`)
+      }
+      await fs.appendFile(`${fresh.path}/wiki/index.md`, PATH_LINKED.map((id) => `- [[${id}]] — ${id.split("/")[1]}\n`).join(""))
+
+      const projectId = "llmw-141-path-links"
+      const project = { id: projectId, name: "path-links", path: fresh.path }
+      storage.set("projectRegistry", { [projectId]: { id: projectId, path: fresh.path, name: "path-links", lastOpened: Date.now() } })
+      await saveScheduledMaintenanceConfig(fresh.path, { enabled: true, intervalHours: 24, lastRun: null })
+      useWikiStore.setState({
+        project,
+        llmConfig: LLM_CONFIG,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+      await restoreQueue(projectId, fresh.path)
+      const pagesBefore = await listWikiPages(fresh.path)
+      const contentBefore = new Map(await Promise.all(copied.map(async (rel) =>
+        [rel, await fs.readFile(`${fresh.path}/wiki/${rel}`, "utf8")] as const)))
+      const vaultPages = (await fs.readdir(`${vault}/wiki`, { recursive: true }))
+        .filter((rel) => rel.endsWith(".md")).map((rel) => ({ path: `wiki/${rel}` }))
+      const resolvesIn = (pages: { path: string }[], target: string) => pages.some((p) =>
+        pageIdFromPath(p.path) === target || p.path.endsWith(`/${target.split("/").pop()}.md`))
+      // A link to a page of the vault that the project never held is not broken.
+      const leftOut = (target: string) => resolvesIn(vaultPages, target) && !resolvesIn(pagesBefore, target)
+      const brokenLinks = async () => (await runStructuralLint(fresh.path))
+        .filter((r) => r.type === "broken-link" && !leftOut(r.brokenTarget ?? ""))
+        .map((r) => `${r.page} -> ${r.brokenTarget}`)
+      const indexLinks = async () => [...(await fs.readFile(`${fresh.path}/wiki/index.md`, "utf8")).matchAll(/\[\[([^\]|#]+)/g)]
+        .map((m) => m[1]).filter((t) => !leftOut(t))
+      const brokenBefore = await brokenLinks()
+      const indexDanglingBefore = (await indexLinks()).filter((t) => !resolvesIn(pagesBefore, t))
+      const mergesBefore = measured.merges.length
+
+      const run = await runMaintenanceTick(project, { now: () => Date.now() })
+
+      const merges = measured.merges.slice(mergesBefore)
+      const pagesAfter = await listWikiPages(fresh.path)
+      const removed = pagesBefore.filter((p) => !pagesAfter.some((a) => a.path === p.path)).map((p) => pageIdFromPath(p.path))
+      // Every path-style link, in a page left after the run, that named a
+      // removed page before it, and what that link reads now.
+      const pathLinksToRemoved: { page: string; before: string; after: string[] }[] = []
+      for (const [rel, before] of contentBefore) {
+        if (!pagesAfter.some((p) => p.path === `wiki/${rel}`)) continue
+        const after = await fs.readFile(`${fresh.path}/wiki/${rel}`, "utf8")
+        for (const m of before.matchAll(/\[\[([a-z]+\/[^\]|#]+)[^\]]*\]\]/g)) {
+          if (!removed.includes(m[1])) continue
+          pathLinksToRemoved.push({ page: rel, before: m[0], after: after.split("\n").filter((l) => l.includes(m[0])) })
+        }
+      }
+      const brokenAfter = await brokenLinks()
+      const newlyBroken = brokenAfter.filter((b) => !brokenBefore.includes(b))
+      const report = {
+        copied: copied.length,
+        run,
+        merges,
+        removed,
+        brokenBefore: brokenBefore.length,
+        brokenAfter: brokenAfter.length,
+        newlyBroken,
+        newlyBrokenPathStyle: newlyBroken.filter((b) => b.split(" -> ")[1].includes("/")),
+        newlyDanglingIndexLinks: (await indexLinks())
+          .filter((t) => !resolvesIn(pagesAfter, t) && !indexDanglingBefore.includes(t)),
+        pathLinksToRemoved,
+        queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, error: t.error })),
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.path-links.json`, JSON.stringify(report, null, 2))
+
+      // The 1Password pair was merged, and the built links to the page
+      // removed now name the page kept, by path, alias and all.
+      const pair = PATH_LINKED.slice(0, 2)
+      expect(removed.filter((id) => pair.includes(id))).toHaveLength(1)
+      const kept = pair.find((id) => !removed.includes(id)) ?? ""
+      expect(await fs.readFile(`${fresh.path}/wiki/entities/1password.md`, "utf8"))
+        .toContain(`[[${kept}]] and [[${kept}|${pair.find((id) => removed.includes(id))?.split("/")[1]} by path]]`)
+      expect(pathLinksToRemoved.length).toBeGreaterThan(0)
+      // No path-style link to a removed page is left in a page the run kept.
+      for (const link of pathLinksToRemoved) expect(link.after, `${link.page}: ${link.before}`).toEqual([])
+      expect(report.newlyBrokenPathStyle).toEqual([])
+      expect(report.newlyDanglingIndexLinks).toEqual([])
+    } finally {
+      await fresh.cleanup()
+    }
+  }, 60 * 60 * 1000)
 })

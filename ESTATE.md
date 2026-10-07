@@ -562,6 +562,23 @@ Keep this list current. Merge conflicts can only come from these files.
   topic and merged, with the app's structural lint before and after, and
   a live scan of three same-slug pairs whose judge calls all fail, in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
+- `src/lib/dedup.ts` – a merge now also sends path-style links to a
+  merged-away page, `[[folder/slug]]` as the vault writes most of its
+  links, to the kept page's own path, keeping any `|alias` or `#anchor`
+  (pearson-tfl/llm_wiki#141). `related` entries naming the page by path go
+  the same way, and the index line that names it by path is dropped, as
+  its bare one is (#139). The kept page's own links and `related` entries
+  naming a page it absorbed, by path or bare, are rewritten to name it.
+  Before, only bare links were rewritten, and a
+  merge on the vault left about 16 path-style links pointing at deleted
+  pages. A bare `[[slug#anchor]]` link is now rewritten too. Upstream
+  edits to the merge's cross-reference rewrite or index rewrite need
+  re-checking against this.
+  Tests in `src/lib/dedup.test.ts` and
+  `src/lib/dedup-runner.twins.test.ts`; a live scheduled run on a
+  vault-copy project, merging pages the vault links to by path, with the
+  app's structural lint before and after, in
+  `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

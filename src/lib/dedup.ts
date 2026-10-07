@@ -579,7 +579,8 @@ const FIELDS_TO_UNION = ["sources", "tags", "related"] as const
  *     MergeReplyRejectedError when it fails the page merge's guard
  *   - Deterministic frontmatter union (sources, tags, related)
  *   - Canonical slug enforcement on title path
- *   - Cross-reference rewrites across every other wiki page
+ *   - Cross-reference rewrites across every other wiki page, and in
+ *     the canonical page's own content (#141)
  *   - Backup snapshot of all touched files
  *
  * Returns a MergeResult; the CALLER is responsible for actually
@@ -622,13 +623,18 @@ export async function mergeDuplicateGroup(
   // If LLM output's frontmatter parses cleanly we leave its title;
   // if not, the application layer doesn't try to manufacture one.
 
-  // 4. Cross-reference rewrites: every other wiki page that mentions
-  //    a non-canonical slug needs its wikilinks / related entries
-  //    rewritten to the canonical.
+  // 4. Cross-reference rewrites: the canonical page itself, and every
+  //    other wiki page, that mentions a non-canonical slug needs its
+  //    wikilinks / related entries rewritten to the canonical.
+  //    A page id goes to the kept page's page id, so a path-style link
+  //    stays path-style (#141).
+  const canonicalPageId = pageIdFromPath(canonical.path)
   const slugRedirects = new Map<string, string>()
   for (const name of mergedAwayNames(req.group, req.canonicalSlug, req.otherWikiPages)) {
-    slugRedirects.set(name, req.canonicalSlug)
+    slugRedirects.set(name, name.includes("/") ? canonicalPageId : req.canonicalSlug)
   }
+  // The kept page's own links to a page it absorbed now name itself (#141).
+  merged = rewriteCrossReferences(merged, slugRedirects)
   const rewrites: MergeResult["rewrites"] = []
   for (const page of req.otherWikiPages) {
     const rewritten = rewriteCrossReferences(page.content, slugRedirects)
@@ -663,9 +669,10 @@ export async function mergeDuplicateGroup(
 
 /**
  * The names a merge sends to the canonical page: each merged-away page's
- * name in the group, and its bare slug where no page left after the merge
+ * name in the group, its bare slug where no page left after the merge
  * carries that slug, so a bare link to a page the group named by page id
- * does not dangle (#139).
+ * does not dangle (#139), and its page id, so a path-style link to it does
+ * not dangle either (#141).
  */
 export function mergedAwayNames(
   group: { slug: string; path: string }[],
@@ -680,6 +687,7 @@ export function mergedAwayNames(
   for (const page of mergedAway) {
     const bare = slugFromPath(page.path)
     if (!left.has(bare)) names.push(bare)
+    names.push(pageIdFromPath(page.path))
   }
   return names
 }
@@ -732,8 +740,9 @@ function buildMergerUserMessage(
  * Rewrite cross-references to merged-away slugs throughout one
  * page's content. Three forms get rewritten:
  *
- *   1. `[[old-slug]]` and `[[old-slug|alias]]` in the body
- *      — replace just the target portion, keep alias if present.
+ *   1. `[[old-slug]]`, `[[old-slug|alias]]` and `[[old-slug#anchor]]` in
+ *      the body — replace just the target portion, keep anchor and alias
+ *      if present (#141). A path-style link is matched by a page-id key.
  *   2. `related: [..., old-slug, ...]` (inline form) — substitute
  *      old-slug with canonical inside the array, then dedup.
  *   3. `related:\n  - old-slug` (block form) — same substitution.
@@ -747,11 +756,11 @@ export function rewriteCrossReferences(
 ): string {
   let out = content
 
-  // 1. Wikilinks in the body — both [[slug]] and [[slug|alias]].
+  // 1. Wikilinks in the body — [[slug]], [[slug|alias]], [[slug#anchor]].
   for (const [oldSlug, newSlug] of slugRedirects) {
     const escaped = escapeRegex(oldSlug)
-    const re = new RegExp(`\\[\\[${escaped}(\\|[^\\]]+)?\\]\\]`, "g")
-    out = out.replace(re, (_match, alias) => `[[${newSlug}${alias ?? ""}]]`)
+    const re = new RegExp(`\\[\\[${escaped}(#[^\\]|]*)?(\\|[^\\]]+)?\\]\\]`, "g")
+    out = out.replace(re, (_match, anchor, alias) => `[[${newSlug}${anchor ?? ""}${alias ?? ""}]]`)
   }
 
   // 2. & 3. `related` field — re-parse and rewrite.

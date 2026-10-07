@@ -274,6 +274,14 @@ describe("rewriteCrossReferences", () => {
     expect(out).toContain("[[unrelated]]")
   })
 
+  it("rewrites a wikilink with an anchor, keeping the anchor and any alias (#141)", () => {
+    const out = rewriteCrossReferences(
+      "See [[old-slug#Setup]] and [[old-slug#Setup|setup steps]].",
+      new Map([["old-slug", "new-slug"]]),
+    )
+    expect(out).toBe("See [[new-slug#Setup]] and [[new-slug#Setup|setup steps]].")
+  })
+
   it("rewrites the related field (inline form)", () => {
     const input = PAGE(
       "type: entity\ntitle: Foo\nrelated: [old-slug, kept]",
@@ -582,6 +590,100 @@ describe("mergeDuplicateGroup", () => {
     expect(result.rewrites.map((r) => r.newContent)).toEqual([
       PAGE("type: concept\ntitle: Other", "See [[agent-skills]] and [[entities/foo]]."),
     ])
+  })
+
+  it("sends path-style links to a merged-away page to the kept page's path, keeping alias and anchor (#141)", async () => {
+    // Line forms from the vault: entities/1password.md links
+    // `[[entities/openclaw-1password-plugin]]`, a comparison carries
+    // `[[comparisons/openclaw-approval-gates|openclaw-approval-gates]]`, and
+    // `related` lists entries such as `comparisons/openclaw-exec-modes`.
+    // The anchor form has no live sample.
+    const referencingPage = PAGE(
+      "type: entity\ntitle: 1Password\nrelated: [stricter-of-two-layer-policy, entities/openclaw-1password-plugin, openclaw-sandbox]",
+      [
+        "- **Config secrets** through the bundled [[entities/openclaw-1password-plugin]], an exec SecretRef provider.",
+        "See [[entities/openclaw-1password-plugin|openclaw-1password-plugin]] and [[entities/openclaw-1password-plugin#Setup]].",
+        "Not [[entities/openclaw-1password-plugin-cli]] or [[concepts/openclaw-1password-plugin]].",
+      ].join("\n"),
+    )
+    const llm = vi.fn().mockResolvedValue(PAGE("type: entity\ntitle: OpenClaw 1Password Plugin\n", "merged body"))
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "openclaw-onepassword", path: "wiki/entities/openclaw-onepassword.md", content: PAGE("type: entity", "o") },
+          { slug: "openclaw-1password-plugin", path: "wiki/entities/openclaw-1password-plugin.md", content: PAGE("type: entity", "p") },
+        ],
+        canonicalSlug: "openclaw-onepassword",
+        otherWikiPages: [{ path: "wiki/entities/1password.md", content: referencingPage }],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.rewrites.map((r) => r.newContent)).toEqual([
+      PAGE(
+        'type: entity\ntitle: 1Password\nrelated: ["stricter-of-two-layer-policy", "entities/openclaw-onepassword", "openclaw-sandbox"]',
+        [
+          "- **Config secrets** through the bundled [[entities/openclaw-onepassword]], an exec SecretRef provider.",
+          "See [[entities/openclaw-onepassword|openclaw-1password-plugin]] and [[entities/openclaw-onepassword#Setup]].",
+          "Not [[entities/openclaw-1password-plugin-cli]] or [[concepts/openclaw-1password-plugin]].",
+        ].join("\n"),
+      ),
+    ])
+  })
+
+  it("sends a path-style link across folders to the kept page's own folder (#141)", async () => {
+    // From the vault: concepts/privacy-heavy-node-command-opt-in.md.
+    const referencingPage = PAGE(
+      "type: concept\ntitle: Privacy-Heavy Node Command Opt-In",
+      "OpenClaw runs a node command only if it is declared by the node, included in the approved surface ([[concepts/two-stage-node-approval]]) and allowed by Gateway policy.",
+    )
+    const llm = vi.fn().mockResolvedValue(PAGE("type: entity\ntitle: Node Admission\n", "merged body"))
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "two-stage-node-approval", path: "wiki/concepts/two-stage-node-approval.md", content: PAGE("type: concept", "a") },
+          { slug: "openclaw-node-admission", path: "wiki/entities/openclaw-node-admission.md", content: PAGE("type: entity", "n") },
+        ],
+        canonicalSlug: "openclaw-node-admission",
+        otherWikiPages: [{ path: "wiki/concepts/privacy-heavy-node-command-opt-in.md", content: referencingPage }],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.rewrites.map((r) => r.newContent)).toEqual([
+      PAGE(
+        "type: concept\ntitle: Privacy-Heavy Node Command Opt-In",
+        "OpenClaw runs a node command only if it is declared by the node, included in the approved surface ([[entities/openclaw-node-admission]]) and allowed by Gateway policy.",
+      ),
+    ])
+  })
+
+  it("sends the kept page's own links to a merged-away page, by path or bare, to the kept page (#141)", async () => {
+    const llm = vi.fn().mockResolvedValue(
+      PAGE("type: concept\ntitle: Two-Stage Node Approval", "Also called [[concepts/two-stage-node-pairing]] or [[two-stage-node-pairing|node pairing]]."),
+    )
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "two-stage-node-approval", path: "wiki/concepts/two-stage-node-approval.md", content: PAGE("type: concept\nrelated: [concepts/two-stage-node-pairing]", "a") },
+          { slug: "two-stage-node-pairing", path: "wiki/concepts/two-stage-node-pairing.md", content: PAGE("type: concept", "p") },
+        ],
+        canonicalSlug: "two-stage-node-approval",
+        otherWikiPages: [],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(parseFrontmatter(result.canonicalContent).body).toContain(
+      "Also called [[concepts/two-stage-node-approval]] or [[two-stage-node-approval|node pairing]].",
+    )
+    expect(parseFrontmatterArray(result.canonicalContent, "related")).toEqual(["concepts/two-stage-node-approval"])
   })
 
   it("doesn't include unchanged pages in rewrites", async () => {
