@@ -95,7 +95,9 @@ export function buildDedupLlmCall(
   return async (systemPrompt, userMessage, signal) => {
     let result = ""
     let cutOff = false
-    let streamError: Error | null = null
+    // Asserted, not annotated: the callbacks assign it, which TypeScript
+    // does not see, so an annotated null would narrow it to never.
+    let streamError = null as Error | null
     await new Promise<void>((resolve) => {
       streamChat(
         llmConfig,
@@ -129,12 +131,11 @@ export function buildDedupLlmCall(
     if (options.completeReplyOnly && signal?.aborted) {
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
-    const failure: Error | null = streamError
-    if (failure) {
+    if (streamError) {
       // A detection call that fails is its batch's failure, not the scan's
       // (#118); a cancelled one still cancels the scan.
-      if (options.completeReplyOnly || signal?.aborted) throw failure
-      throw new DetectorCallFailedError(failure.message)
+      if (options.completeReplyOnly || signal?.aborted) throw streamError
+      throw new DetectorCallFailedError(streamError.message)
     }
     if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
