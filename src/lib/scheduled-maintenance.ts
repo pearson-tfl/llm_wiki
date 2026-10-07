@@ -28,7 +28,7 @@ import { parseFrontmatter } from "@/lib/frontmatter"
 import { runHubRebuildRequest } from "@/lib/hub-rebuild"
 import { runEmbeddingBackfill, type VectorCoverage } from "@/lib/embedding-freshness"
 import { parseSources } from "@/lib/sources-merge"
-import type { DuplicateGroup } from "@/lib/dedup"
+import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 import type { FileNode, WikiProject } from "@/types/wiki"
 
@@ -153,6 +153,9 @@ export async function runMaintenanceTick(
           break
         }
         const canonical = await chooseCanonicalSlug(pp, group)
+        // A slug naming two pages fails every retry of the merge, so the
+        // group is left for a decision by hand (#114).
+        if (canonical === null) continue
         const taskId = await enqueueMerge(project.id, group, canonical, { scheduled: true })
         enqueued.push(group)
         taskIds.push(taskId)
@@ -276,17 +279,18 @@ function appendRunRecord(
 
 /**
  * The page a group merges into: most sources, then earliest created date,
- * then first in the group. Slugs resolve to pages by basename anywhere
- * under wiki/.
+ * then first in the group. Names find their pages as a merge finds them
+ * (`pagesNamed`); a name with no page ranks last. Null when a name names
+ * more than one page, which the merge would refuse (#114).
  */
-async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string> {
-  const paths = new Map<string, string>()
-  for (const file of walkFiles(await listDirectory(`${pp}/wiki`))) {
-    if (file.name.endsWith(".md")) paths.set(file.name.slice(0, -3), file.path)
-  }
+async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string | null> {
+  const pages = [...walkFiles(await listDirectory(`${pp}/wiki`))]
+    .map((file) => ({ file: file.path, path: normalizePath(file.path).slice(pp.length + 1) }))
+  const found = group.slugs.map((slug) => pagesNamed(pages, slug))
+  if (found.some((named) => named.length > 1)) return null
   const ranked = await Promise.all(
     group.slugs.map(async (slug, position) => {
-      const path = paths.get(slug)
+      const path = found[position][0]?.file
       const content = path ? await readFile(path).catch(() => "") : ""
       const created = Date.parse(String(parseFrontmatter(content).frontmatter?.created ?? ""))
       return {

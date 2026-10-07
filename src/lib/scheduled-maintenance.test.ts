@@ -388,6 +388,27 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["codex-bridge"])
   })
+
+  it("finds pages as a merge does: by page id, and by slug among entity and concept pages only (#114)", async () => {
+    await setConfig(null)
+    // A page id names its page, which has the most sources.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md", "b.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skill.md`, page("Agent Skill", "2026-09-01", ["c.md"]))
+    // A page of the same name outside entities and concepts, read after
+    // them, is not the page the merge keeps.
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hook.md`, page("Hook", "2026-09-01", ["d.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/hooks.md`, page("Hooks", "2026-10-01", ["e.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/sources/hooks.md`, page("Hooks source", "2026-01-01", ["f.md", "g.md", "h.md"]))
+    mockDetect.mockResolvedValue({ groups: [
+      group(["agent-skill", "concepts/agent-skills"], "high"),
+      group(["hooks", "hook"], "high"),
+    ], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["concepts/agent-skills", "hook"])
+  })
 })
 
 describe("scheduled maintenance tick – groups it does not merge", () => {
@@ -406,6 +427,29 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
       mergesEnqueued: 0,
     })
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([medium, low])
+  })
+
+  it("saves a high-confidence group whose slug names a concept and an entity page, and queues no merge of it (#114)", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/entities/agent-skills.md`, page("Agent Skills", "2026-10-02", ["b.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/skills.md`, page("Skills", "2026-10-01", ["c.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["d.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["e.md"]))
+    // As the scan returns them: the same-slug group, the detector's
+    // high group naming the shared slug bare, and a group that merges.
+    const sameSlug = group(["concepts/agent-skills", "entities/agent-skills"], "medium")
+    const ambiguous = group(["agent-skills", "skills"], "high")
+    const clear = group(["agent-loop", "agent-loops"], "high")
+    mockDetect.mockResolvedValue({ groups: [sameSlug, ambiguous, clear], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[1].slugs)).toEqual([["agent-loop", "agent-loops"]])
+    expect(record).toMatchObject({ groupsFound: { high: 2, medium: 1, low: 0 }, mergesEnqueued: 1, mergesFailed: 0 })
+    expect(getQueue()).toHaveLength(0)
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([sameSlug, ambiguous])
   })
 
   it("records the scan's failed detector batches in the run record (#108)", async () => {

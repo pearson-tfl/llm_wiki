@@ -197,6 +197,20 @@ export function pageIdFromPath(path: string): string {
   return path.replace(/^wiki\//, "").replace(/\.md$/, "")
 }
 
+/**
+ * The pages a group's name names, from pages with paths relative to the
+ * project (`wiki/concepts/foo.md`): by its page id (`concepts/foo`), else
+ * by its slug among the entity and concept pages, which the scan reads.
+ * A slug shared by pages names them all (#109, #114).
+ */
+export function pagesNamed<T extends { path: string }>(pages: T[], name: string): T[] {
+  return name.includes("/")
+    ? pages.filter((p) => p.path === `wiki/${name}.md`)
+    : pages.filter((p) =>
+      (p.path.startsWith("wiki/entities/") || p.path.startsWith("wiki/concepts/"))
+      && p.path.endsWith(`/${name}.md`))
+}
+
 function slugFromPath(path: string): string {
   const base = path.split("/").pop() ?? path
   return base.replace(/\.md$/, "")
