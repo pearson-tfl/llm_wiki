@@ -290,7 +290,7 @@ Keep this list current. Merge conflicts can only come from these files.
   went unchecked instead of calling the wiki clean. A concept and an
   entity page sharing a slug are found only some of the time: they share a
   call, but the detector names pages by slug and is told not to group
-  across types.
+  across types (pearson-tfl/llm_wiki#109).
   Upstream edits to the detector's batching or reply parsing need
   re-checking against this.
   Tests in `src/lib/dedup-runner.test.ts`, `src/lib/dedup.test.ts` and

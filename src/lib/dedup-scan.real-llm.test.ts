@@ -121,7 +121,9 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
 }
 
 /** The #69 twins (comment 6013017770), as `type/slug`. A concept and an
- *  entity sharing a slug are found when a group lists that slug twice. */
+ *  entity sharing a slug are found when a group lists that slug twice; the
+ *  detector names pages by slug, so those two are reported, not required
+ *  (#109 owns them). */
 const TWINS: [string, string][] = [
   ["entity/claude-3-7-sonnet", "entity/claude-sonnet-3-7"],
   ["entity/openclaw-secretref", "entity/openclaw-secretrefs"],
@@ -172,6 +174,9 @@ describe.skipIf(!ENABLED)("the duplicate scan on a copy of a real vault", () => 
     console.log(JSON.stringify({ ...report, batchSizes: undefined, groupList: undefined }))
 
     expect(Math.max(...measured.batchSizes)).toBeLessThanOrEqual(80)
-    expect(twins.filter((t) => t.found).length).toBeGreaterThanOrEqual(4)
+    for (const [i, [a, b]] of TWINS.entries()) {
+      expect(twins[i].sharedCalls.length, twins[i].twin).toBeGreaterThan(0)
+      if (slugOf(a) !== slugOf(b)) expect(twins[i].found, twins[i].twin).toBe(true)
+    }
   }, 4 * 60 * 60 * 1000)
 })
