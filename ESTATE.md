@@ -567,7 +567,9 @@ Keep this list current. Merge conflicts can only come from these files.
   links, to the kept page's own path, keeping any `|alias` or `#anchor`
   (pearson-tfl/llm_wiki#141). `related` entries naming the page by path go
   the same way, and the index line that names it by path is dropped, as
-  its bare one is (#139). Before, only bare links were rewritten, and a
+  its bare one is (#139). The kept page's own links and `related` entries
+  naming a page it absorbed, by path or bare, are rewritten to name it.
+  Before, only bare links were rewritten, and a
   merge on the vault left about 16 path-style links pointing at deleted
   pages. A bare `[[slug#anchor]]` link is now rewritten too. Upstream
   edits to the merge's cross-reference rewrite or index rewrite need

@@ -579,7 +579,8 @@ const FIELDS_TO_UNION = ["sources", "tags", "related"] as const
  *     MergeReplyRejectedError when it fails the page merge's guard
  *   - Deterministic frontmatter union (sources, tags, related)
  *   - Canonical slug enforcement on title path
- *   - Cross-reference rewrites across every other wiki page
+ *   - Cross-reference rewrites across every other wiki page, and in
+ *     the canonical page's own content (#141)
  *   - Backup snapshot of all touched files
  *
  * Returns a MergeResult; the CALLER is responsible for actually
@@ -632,6 +633,8 @@ export async function mergeDuplicateGroup(
   for (const name of mergedAwayNames(req.group, req.canonicalSlug, req.otherWikiPages)) {
     slugRedirects.set(name, name.includes("/") ? canonicalPageId : req.canonicalSlug)
   }
+  // The kept page's own links to a page it absorbed now name itself (#141).
+  merged = rewriteCrossReferences(merged, slugRedirects)
   const rewrites: MergeResult["rewrites"] = []
   for (const page of req.otherWikiPages) {
     const rewritten = rewriteCrossReferences(page.content, slugRedirects)

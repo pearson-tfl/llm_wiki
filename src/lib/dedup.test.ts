@@ -662,6 +662,30 @@ describe("mergeDuplicateGroup", () => {
     ])
   })
 
+  it("sends the kept page's own links to a merged-away page, by path or bare, to the kept page (#141)", async () => {
+    const llm = vi.fn().mockResolvedValue(
+      PAGE("type: concept\ntitle: Two-Stage Node Approval", "Also called [[concepts/two-stage-node-pairing]] or [[two-stage-node-pairing|node pairing]]."),
+    )
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "two-stage-node-approval", path: "wiki/concepts/two-stage-node-approval.md", content: PAGE("type: concept\nrelated: [concepts/two-stage-node-pairing]", "a") },
+          { slug: "two-stage-node-pairing", path: "wiki/concepts/two-stage-node-pairing.md", content: PAGE("type: concept", "p") },
+        ],
+        canonicalSlug: "two-stage-node-approval",
+        otherWikiPages: [],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(parseFrontmatter(result.canonicalContent).body).toContain(
+      "Also called [[concepts/two-stage-node-approval]] or [[two-stage-node-approval|node pairing]].",
+    )
+    expect(parseFrontmatterArray(result.canonicalContent, "related")).toEqual(["concepts/two-stage-node-approval"])
+  })
+
   it("doesn't include unchanged pages in rewrites", async () => {
     const llm = vi.fn().mockResolvedValue(PAGE("type: entity\ntitle: A\n", "merged"))
     const irrelevant = PAGE(
