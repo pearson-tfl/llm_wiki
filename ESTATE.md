@@ -323,7 +323,8 @@ Keep this list current. Merge conflicts can only come from these files.
   would reach the app as an error, not as a reply. That is read from the
   binary; no live run has shown it. Every caller that reads the flag sees
   it on the Claude Code route too: the duplicate merge and the hub
-  rebuild reject the reply, and ingest and deep research treat it as they
+  rebuild reject the reply, the duplicate scan counts it as a failed batch
+  (#108), and ingest and deep research treat it as they
   do on HTTP; the merge, hub and ingest messages name no cap, since the CLI
   routes never receive one. A reply with no finish reason is still taken
   as complete, because the Codex route never sends one. Tests in

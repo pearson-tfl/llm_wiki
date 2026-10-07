@@ -27,7 +27,8 @@ import type { FileNode } from "@/types/wiki"
  * behind a custom endpoint, e.g. a vLLM Nemotron build) could stream
  * chain-of-thought unbounded until the 30-min backstop fires — which
  * surfaces to the user as a bare "request cancelled". Capping turns a
- * 30-min hang into a fast (truncated) response instead.
+ * 30-min hang into a fast cut-off reply instead, which the scan reports as
+ * a failed batch (#108).
  */
 const DEDUP_DETECTION_MAX_TOKENS = 8_192
 // Conservative defaults: keep enough neighbors for recall while cutting the
@@ -214,7 +215,7 @@ export interface DuplicateScanResult {
   failedBatches: FailedDetectorBatch[]
 }
 
-const NOTHING_SCANNED: DuplicateScanResult = { groups: [], failedBatches: [] }
+const noGroups = (): DuplicateScanResult => ({ groups: [], failedBatches: [] })
 
 /**
  * Stage 1 + 2 from the user's perspective: scan the project for
@@ -227,7 +228,7 @@ export async function runDuplicateDetection(
   options: { signal?: AbortSignal } = {},
 ): Promise<DuplicateScanResult> {
   const summaries = await loadAllEntitySummaries(projectPath)
-  if (summaries.length < 2) return NOTHING_SCANNED
+  if (summaries.length < 2) return noGroups()
   const notDup = await loadNotDuplicates(projectPath)
   const llm = buildDedupLlmCall(llmConfig, DEDUP_DETECTION_MAX_TOKENS)
   const embeddingConfig = await loadEmbeddingConfig()
@@ -249,7 +250,7 @@ export async function runDuplicateDetection(
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
         console.warn("[dedup] embedding prefilter coverage too low; skipping full fallback for large wiki:", err)
-        return NOTHING_SCANNED
+        return noGroups()
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
     }
@@ -326,16 +327,16 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
     // #359 hangs, so no candidates means no detector call.
     return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
       ? detectDuplicateGroupsInBoundedBatches(summaries, llm, options)
-      : NOTHING_SCANNED
+      : noGroups()
   }
 
   const summaryByPath = new Map(summaries.map((s) => [s.path, s]))
   const filteredPairs = filterWhitelistedPairs(pairs, summaryByPath, options.notDuplicates ?? [])
-  if (filteredPairs.length === 0) return NOTHING_SCANNED
+  if (filteredPairs.length === 0) return noGroups()
 
   const pageIds = summaries.map((s) => s.path)
   const clusters = clusterByPairs(pageIds, filteredPairs)
-  if (clusters.length === 0) return NOTHING_SCANNED
+  if (clusters.length === 0) return noGroups()
 
   return detectInBatches(batchCandidateClusters(clusters, summaryByPath, filteredPairs), llm, options)
 }
@@ -362,8 +363,11 @@ function batchCandidateClusters(
 
   const neighbours = new Map<string, string[]>()
   for (const [a, b] of pairs) {
-    neighbours.set(a, [...(neighbours.get(a) ?? []), b])
-    neighbours.set(b, [...(neighbours.get(b) ?? []), a])
+    for (const [from, to] of [[a, b], [b, a]]) {
+      const list = neighbours.get(from)
+      if (list) list.push(to)
+      else neighbours.set(from, [to])
+    }
   }
 
   for (const cluster of clusters) {
