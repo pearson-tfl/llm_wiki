@@ -18,11 +18,10 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 import { realFs } from "@/test-helpers/fs-temp"
 import { createFakeVectorStore } from "@/test-helpers/fake-vector-store"
-import { useWikiStore } from "@/stores/wiki-store"
+import { minutesSince, seedStoreFromAppState, tempVaultCopy } from "@/test-helpers/scheduled-preview"
 import type { DuplicateGroup } from "@/lib/dedup"
 
 const ENABLED =
@@ -32,6 +31,8 @@ const ENABLED =
   && !!process.env.PREVIEW_VAULT_COPY
 
 const settings = vi.hoisted(() => new Map<string, unknown>())
+/** The copy's real path, set once the guard has passed it. */
+const copy = vi.hoisted(() => ({ path: "" }))
 const scan = vi.hoisted(() => ({ groups: [] as DuplicateGroup[], failedBatches: [] as unknown[], notDone: undefined as unknown }))
 const vectors = createFakeVectorStore()
 
@@ -57,7 +58,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 
 vi.mock("@/lib/project-identity", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/project-identity")>()),
-  getProjectPathById: async () => path.resolve(process.env.PREVIEW_VAULT_COPY ?? ""),
+  getProjectPathById: async () => copy.path,
 }))
 
 vi.mock("@/lib/dedup-runner", async (importOriginal) => ({
@@ -72,12 +73,8 @@ vi.mock("@/lib/embedding-freshness", async (importOriginal) => ({
 
 describe.skipIf(!ENABLED)("the scheduled merges on a copy of a real vault", () => {
   it("merges the preview's high-confidence groups as the scheduled run would", async () => {
-    const vault = path.resolve(process.env.PREVIEW_VAULT_COPY ?? "")
-    const tmp = await fs.realpath(os.tmpdir())
-    expect(
-      [tmp, "/tmp", "/private/tmp"].some((root) => vault.startsWith(`${root}/`)),
-      "PREVIEW_VAULT_COPY must be a copy under the OS temp folder",
-    ).toBe(true)
+    const vault = await tempVaultCopy(process.env.PREVIEW_VAULT_COPY ?? "")
+    copy.path = vault
 
     const state = JSON.parse(await fs.readFile(process.env.APP_STATE ?? "", "utf8"))
     for (const [key, value] of Object.entries(state)) settings.set(key, value)
@@ -85,16 +82,7 @@ describe.skipIf(!ENABLED)("the scheduled merges on a copy of a real vault", () =
     const live = Object.keys(state).find((k) => k.startsWith("scheduledMaintenanceConfig:"))
     settings.set(`scheduledMaintenanceConfig:${vault}`, { ...(live ? state[live] : {}), enabled: true, lastRun: null })
     const project = { id: "llmw-111-merge-copy", name: "copy", path: vault }
-    useWikiStore.setState({
-      project,
-      llmConfig: state.llmConfig,
-      providerConfigs: state.providerConfigs ?? {},
-      customLlmPresets: state.customLlmPresets ?? [],
-      taskModelRouting: state.taskModelRouting,
-      projectLlmOverride: { enabled: false, presetId: null, model: "" },
-      proxyConfig: state.proxyConfig,
-      embeddingConfig: state.embeddingConfig,
-    })
+    seedStoreFromAppState(state, project)
 
     const preview = JSON.parse(await fs.readFile(process.env.PREVIEW_SCAN_REPORT ?? "", "utf8"))
     scan.groups = [
@@ -115,7 +103,7 @@ describe.skipIf(!ENABLED)("the scheduled merges on a copy of a real vault", () =
     await restoreQueue(project.id, vault)
     const started = Date.now()
     const record = await runMaintenanceTick(project, { now: Date.now })
-    const minutes = Math.round((Date.now() - started) / 6000) / 10
+    const minutes = minutesSince(started)
 
     const after = { brokenLinks: await brokenLinks(), pages: await pageCount() }
     const report = {

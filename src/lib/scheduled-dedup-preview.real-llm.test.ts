@@ -19,10 +19,10 @@
  */
 import { describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
-import os from "node:os"
 import path from "node:path"
 import { realFs } from "@/test-helpers/fs-temp"
-import { useWikiStore, type EmbeddingConfig } from "@/stores/wiki-store"
+import { minutesSince, seedStoreFromAppState, tempVaultCopy, type SavedAppState } from "@/test-helpers/scheduled-preview"
+import type { EmbeddingConfig } from "@/stores/wiki-store"
 
 const ENABLED =
   process.env.RUN_LLM_TESTS === "1"
@@ -130,26 +130,12 @@ function pagesFor(slug: string, pages: { path: string; content: string }[]): Pag
 
 describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vault", () => {
   it("runs on the scheduled run's own route and lists what it would merge", async () => {
-    const vault = path.resolve(process.env.PREVIEW_VAULT_COPY ?? "")
-    const tmp = await fs.realpath(os.tmpdir())
-    expect(
-      [tmp, "/tmp", "/private/tmp"].some((root) => vault.startsWith(`${root}/`)),
-      "PREVIEW_VAULT_COPY must be a copy under the OS temp folder",
-    ).toBe(true)
+    const vault = await tempVaultCopy(process.env.PREVIEW_VAULT_COPY ?? "")
 
     // The fields the app loads at start-up, as they are in app-state.
-    const state = JSON.parse(await fs.readFile(process.env.APP_STATE ?? "", "utf8"))
+    const state: SavedAppState = JSON.parse(await fs.readFile(process.env.APP_STATE ?? "", "utf8"))
     embeddingConfig = state.embeddingConfig
-    useWikiStore.setState({
-      project: { id: "llmw-111-copy", name: "copy", path: vault },
-      llmConfig: state.llmConfig,
-      providerConfigs: state.providerConfigs ?? {},
-      customLlmPresets: state.customLlmPresets ?? [],
-      taskModelRouting: state.taskModelRouting,
-      projectLlmOverride: { enabled: false, presetId: null, model: "" },
-      proxyConfig: state.proxyConfig,
-      embeddingConfig: state.embeddingConfig,
-    })
+    seedStoreFromAppState(state, { id: "llmw-111-copy", name: "copy", path: vault })
     const { getTaskLlmConfig } = await import("./llm-task-routing")
     const { hasUsableLlm } = await import("./has-usable-llm")
     const { runDuplicateDetection, loadAllWikiPages } = await import("./dedup-runner")
@@ -167,7 +153,7 @@ describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vaul
 
     const started = Date.now()
     const result = await runDuplicateDetection(vault, llmConfig)
-    const minutes = Math.round((Date.now() - started) / 6000) / 10
+    const minutes = minutesSince(started)
 
     const pages = await loadAllWikiPages(vault)
     const high = result.groups.filter((g) => g.confidence === "high")
@@ -207,6 +193,7 @@ describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vaul
     if (process.env.PREVIEW_REPORT) await fs.writeFile(process.env.PREVIEW_REPORT, JSON.stringify(report, null, 2))
     console.log(JSON.stringify({ ...report, highGroups: undefined, otherGroups: undefined }))
 
+    // The detector's batch cap, DEDUP_DETECTOR_BATCH_SUMMARIES in dedup-runner.ts.
     expect(report.largestBatch).toBeLessThanOrEqual(80)
   }, 6 * 60 * 60 * 1000)
 })
