@@ -524,8 +524,9 @@ Keep this list current. Merge conflicts can only come from these files.
   run merges. Each other pair is recorded in the not-duplicates list by
   path, so no later scan raises it or asks again; a group all of whose
   pairs are recorded is dropped with no call. A judge call that fails, or a
-  reply it cannot read or that names a page it was not given, is a failed
-  batch and the group stays as it was.
+  reply it cannot read, holding a group with no list of pages, naming a
+  page it was not given or placing a page in two groups, is a failed batch,
+  records nothing and leaves the group as it was.
   The not-duplicates list's writers now run one at a time, and the judge's
   writer refuses a list it cannot read rather than writing over it. A
   partial run's saved groups now drop a group whose slug names two pages,

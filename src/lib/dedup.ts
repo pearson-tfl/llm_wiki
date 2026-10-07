@@ -478,11 +478,11 @@ export interface JudgedTopic {
 /**
  * Ask the model which of the candidate pages, which include pages sharing a
  * slug, are one topic (#135). Each page is given by its page id, title and
- * content. A page already in an earlier group is not counted again. A reply
- * that cannot be read, that holds a group with no pages list, or that names
- * a page it was not given rejects with DetectorReplyUnreadableError: every
- * page it leaves out is recorded as distinct, so a group it could not read,
- * or a page named in another form, must not count as left out.
+ * content. A reply that cannot be read, that holds a group with no pages
+ * list, that names a page it was not given, or that places a page in two
+ * groups rejects with DetectorReplyUnreadableError: every pair no group
+ * holds is recorded as distinct, so a group it could not read or honour, or
+ * a page named in another form, must not count as left out.
  */
 export async function judgeSharedSlugPages(
   candidates: { pageId: string; content: string }[],
@@ -508,7 +508,7 @@ export async function judgeSharedSlugPages(
   if (!Array.isArray(groupsRaw)) throw new DetectorReplyUnreadableError("judge: no groups list")
 
   const given = new Set(candidates.map((c) => c.pageId))
-  const unplaced = new Set(given)
+  const placed = new Set<string>()
   const topics: JudgedTopic[] = []
   for (const g of groupsRaw) {
     const obj = (g && typeof g === "object" ? g : {}) as Record<string, unknown>
@@ -520,9 +520,13 @@ export async function judgeSharedSlugPages(
     if (unknown !== undefined) {
       throw new DetectorReplyUnreadableError(`judge: names a page it was not given: ${JSON.stringify(unknown)}`)
     }
-    const pages = [...new Set(named.filter((p): p is string => unplaced.has(p)))]
+    const pages = [...new Set(named as string[])]
     if (pages.length < 2) continue
-    for (const p of pages) unplaced.delete(p)
+    const twice = pages.find((p) => placed.has(p))
+    if (twice !== undefined) {
+      throw new DetectorReplyUnreadableError(`judge: places a page in two groups: ${JSON.stringify(twice)}`)
+    }
+    for (const p of pages) placed.add(p)
     topics.push({ pages, reason: typeof obj.reason === "string" ? obj.reason : "" })
   }
   return topics

@@ -809,6 +809,25 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     expect(mockRecordNotDuplicates).toHaveBeenCalledWith("/project", [["concepts/agent-skills", "entities/foo"]])
   })
 
+  it("reads a judge reply placing one page in two groups as unreadable, recording nothing", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorAndJudge([["agent-skills", "foo"]], (userMessage) =>
+      userMessage.includes("entities/foo")
+        ? [
+          { pages: TWIN_IDS, reason: "One standard." },
+          { pages: ["entities/agent-skills", "entities/foo"], reason: "One tool." },
+        ]
+        : [{ pages: TWIN_IDS, reason: "One standard." }])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.failedBatches).toEqual([{ pages: 3, reason: expect.stringContaining("places a page in two groups") }])
+    expect(result.groups).toContainEqual({ slugs: ["agent-skills", "foo"], reason: "same topic", confidence: "medium" })
+    expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
+  })
+
   it("asks no model again about pages every pair of which is recorded distinct", async () => {
     setupTwinProject(["foo"])
     mockLoadNotDuplicates.mockResolvedValue([
