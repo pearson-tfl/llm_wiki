@@ -450,7 +450,14 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       let body = ""
       request.on("data", (chunk) => { body += chunk })
       request.on("end", () => {
-        const judge = JSON.stringify(JSON.parse(body).system ?? "").includes(JUDGE_PROMPT_MARKER)
+        let judge: boolean
+        try {
+          judge = JSON.stringify(JSON.parse(body).system ?? "").includes(JUDGE_PROMPT_MARKER)
+        } catch {
+          // Not a model call: refused.
+          response.writeHead(400).end()
+          return
+        }
         if (judge) {
           calls.push({ judge, outcome: "connection-dropped" })
           request.socket.destroy()
@@ -470,11 +477,12 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
         response.end()
       })
     })
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
-    const port = (server.address() as AddressInfo).port
-    const fresh = await createTempProject("llmw139-stop")
     const warn = vi.spyOn(console, "warn")
+    let fresh: Awaited<ReturnType<typeof createTempProject>> | undefined
     try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+      const port = (server.address() as AddressInfo).port
+      fresh = await createTempProject("llmw139-stop")
       for (const slug of PAIRS.slice(0, 2)) {
         for (const folder of ["concepts", "entities"]) {
           await fs.mkdir(`${fresh.path}/wiki/${folder}`, { recursive: true })
@@ -504,7 +512,7 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
         calls,
         groups: scan.groups,
         failedBatches: scan.failedBatches,
-        stopLogged: warn.mock.calls.filter((args) => /shared-slug judge stopped after 2 calls/.test(String(args[0]))).length,
+        stopLogged: warn.mock.calls.filter((args) => /Not checked: the shared-slug judge stopped after 2 calls/.test(String(args[0]))).length,
       }
       if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.stop.json`, JSON.stringify(report, null, 2))
 
@@ -520,8 +528,8 @@ describe.skipIf(!ENABLED)("pages sharing a slug, on pages from a real vault, jud
       expect(report.stopLogged).toBe(1)
     } finally {
       warn.mockRestore()
-      await fresh.cleanup()
-      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await fresh?.cleanup()
+      if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   }, 10 * 60 * 1000)
 })

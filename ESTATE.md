@@ -546,11 +546,14 @@ Keep this list current. Merge conflicts can only come from these files.
   the slug; before, only links by page id were rewritten, and bare links
   to the merged-away slug pointed at nothing. A slug the kept page or
   another page still carries is left alone, so the same-slug merge (#109)
-  is unchanged. The judge also stops calling after two judge calls in a
-  row fail, as the detector does (#124): each group left stays as it was
-  and is reported as a failed batch with the reason "Not checked: the
-  shared-slug judge stopped after 2 calls in a row failed"; an answer, or
-  a reply it cannot read, resets the count. Upstream edits to the merge's
+  is unchanged. The index rewrite's bare `slug.md` match no longer takes
+  the line of a page whose slug only ends in that slug, as `swarm` would
+  have taken `openai-swarm.md`. The judge also stops calling after two
+  judge calls in a row fail, as the detector does (#124): each group left
+  stays as it was and is reported as a failed batch with the reason "Not
+  checked: the shared-slug judge stopped after 2 calls in a row failed",
+  and the log names its pages; an answer, or a reply it cannot read,
+  resets the count. Upstream edits to the merge's
   cross-reference rewrite or index rewrite need re-checking against this.
   Tests in `src/lib/dedup.test.ts`, `src/lib/dedup-runner.test.ts` and
   `src/lib/dedup-runner.twins.test.ts`; a live scheduled run on a

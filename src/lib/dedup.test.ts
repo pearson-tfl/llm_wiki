@@ -340,6 +340,20 @@ describe("rewriteIndexMd", () => {
     expect(out).toContain("[DPAO](entities/dpao.md)")
   })
 
+  it("keeps the line of a page whose slug only ends in a merged-away bare slug (#139)", () => {
+    // Line forms from the vault's index and the #109 fixture.
+    const input = [
+      "- [OpenAI Swarm](entities/openai-swarm.md)",
+      "- [[entities/openai-swarm]] — OpenAI Swarm (openai-swarm.md)",
+      "- [Swarm](entities/swarm.md)",
+      "- [[swarm]] — Swarm",
+    ].join("\n")
+    expect(rewriteIndexMd(input, new Set(["swarm"]))).toBe([
+      "- [OpenAI Swarm](entities/openai-swarm.md)",
+      "- [[entities/openai-swarm]] — OpenAI Swarm (openai-swarm.md)",
+    ].join("\n"))
+  })
+
   it("removes lines with wikilinks to merged-away slugs", () => {
     const input = [
       "## Concepts",

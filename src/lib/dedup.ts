@@ -679,7 +679,7 @@ export function mergedAwayNames(
   const names = mergedAway.map((p) => p.slug)
   for (const page of mergedAway) {
     const bare = slugFromPath(page.path)
-    if (!left.has(bare) && !names.includes(bare)) names.push(bare)
+    if (!left.has(bare)) names.push(bare)
   }
   return names
 }
@@ -840,8 +840,9 @@ function lineRefersToSlug(line: string, slugs: Set<string>): boolean {
     if (new RegExp(`\\[\\[${escaped}(\\|[^\\]]*)?\\]\\]`).test(line)) return true
     // Markdown link form: [...](slug.md) or [...](path/slug.md)
     if (new RegExp(`\\(([^)]*\\/)?${escaped}\\.md\\)`).test(line)) return true
-    // Bare slug.md mention (rare but seen in raw lists)
-    if (new RegExp(`\\b${escaped}\\.md\\b`).test(line)) return true
+    // Bare slug.md mention (rare but seen in raw lists), not the end of
+    // a longer hyphenated slug (#139)
+    if (new RegExp(`(?<!-)\\b${escaped}\\.md\\b`).test(line)) return true
   }
   return false
 }

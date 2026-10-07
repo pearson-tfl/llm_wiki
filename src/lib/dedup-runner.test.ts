@@ -946,6 +946,27 @@ describe("runDuplicateDetection – pages sharing a slug, judged (#109, #135)", 
     expect(mockRecordNotDuplicates).not.toHaveBeenCalled()
   })
 
+  it("logs the judge's stop for each group it skips, and no stop when the second failure is on the last group", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const stops = () => warn.mock.calls.filter((args) => String(args[0]).includes("judge stopped after")).map((args) => String(args[0]))
+    try {
+      setupTwinProject([], ["agent-skills", "hermes"])
+      mockLoadNotDuplicates.mockResolvedValue([])
+      setupEmbeddingConfig(false)
+      mockDetectorAndJudge([], () => new Error("Request timed out"))
+      await runDuplicateDetection("/project", cfg)
+      expect(stops()).toEqual([])
+
+      setupTwinProject([], ["agent-skills", "hermes", "openclaw"])
+      await runDuplicateDetection("/project", cfg)
+      expect(stops()).toEqual([
+        "[dedup] Not checked: the shared-slug judge stopped after 2 calls in a row failed: concepts/openclaw, entities/openclaw",
+      ])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it("counts only judge calls that fail in a row: an answer, or a reply it cannot read, in between resets the count", async () => {
     setupTwinProject([], ["agent-skills", "hermes", "openclaw", "pi-agent", "zed", "zeta"])
     mockLoadNotDuplicates.mockResolvedValue([])

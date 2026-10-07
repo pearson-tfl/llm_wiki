@@ -306,6 +306,7 @@ async function settleSharedSlugGroups(
     if (unrecorded(allPairs(candidates)).length === 0) continue
     if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
       const reason = `Not checked: the shared-slug judge stopped after ${callFailuresInARow} calls in a row failed`
+      console.warn(`[dedup] ${reason}: ${candidates.join(", ")}`)
       failedBatches.push({ pages: candidates.length, reason })
       out.push(group)
       continue
@@ -320,9 +321,6 @@ async function settleSharedSlugGroups(
       if (options.signal?.aborted) throw err
       if (err instanceof DetectorCallFailedError) {
         callFailuresInARow += 1
-        if (callFailuresInARow === DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP) {
-          console.warn(`[dedup] the shared-slug judge stopped after ${callFailuresInARow} calls in a row failed`)
-        }
       } else if (err instanceof DetectorReplyUnreadableError) {
         callFailuresInARow = 0
       }
