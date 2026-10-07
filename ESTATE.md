@@ -576,14 +576,9 @@ git diff --name-only main...estate        # files estate changed; compare with t
 git switch main && git merge --ff-only vX.Y.Z && git push origin main
 git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
                                           # in vite.config.ts keep the estate stamp
-npm ci && npm run typecheck && npm run test:mocks
-(cd src-tauri && cargo test --lib -- claude_cli agent::runtime)
+scripts/estate/check.sh                   # the check, as in Build above
 git push origin estate
 ```
-
-In a fresh checkout or worktree, `cargo test` stops in the build script
-until `mcp-server` is installed and built:
-`npm --prefix mcp-server ci && npm run mcp:build`.
 
 Then Build and Install as above. Record the release, the new commit and the
 test result on the ticket.

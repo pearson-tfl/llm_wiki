@@ -26,6 +26,7 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # 22, the Node the installed app is built with (ESTATE.md, Build).
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
