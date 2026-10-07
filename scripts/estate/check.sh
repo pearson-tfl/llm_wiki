@@ -14,6 +14,7 @@ for tool in node cargo protoc; do
 done
 
 cd "$(dirname "$0")/../.."
+scripts/estate/change_list.py
 npm ci
 npm --prefix mcp-server ci
 npm run typecheck

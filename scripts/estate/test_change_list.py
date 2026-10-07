@@ -3,7 +3,7 @@
 Each test runs a copy of the script inside a throwaway git repository in its
 own temp folder, with an origin/main ref standing in for upstream. The list
 lines are copied from ESTATE.md as it stood on estate at 5a4149b.
-Run: python3 -m unittest discover -s scripts/estate -p 'test_change_list.py'
+Run: python3 scripts/estate/test_change_list.py
 """
 
 import shutil

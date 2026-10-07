@@ -197,8 +197,9 @@ Keep this list current. Merge conflicts can only come from these files.
   queue runs those merges with no resume click, after a restart too;
   hand-queued merges restored from disk still wait for it. Every group not
   queued for a merge is saved to `.llm-wiki/dedup-pending-groups.json`,
-  which the Maintenance screen shows on open. After merges the review sweep closes stale duplicate items.
-  Each run appends a line to `.llm-wiki/maintenance-runs.jsonl`.
+  which the Maintenance screen shows on open. After merges the review
+  sweep closes stale duplicate items. Each run appends a line to
+  `.llm-wiki/maintenance-runs.jsonl`.
   Ingest and a duplicate merge never write at once (#24): the merge queue
   starts no merge while ingest is active – a source processing, or pending
   in a queue that is neither paused nor waiting on model settings
@@ -428,8 +429,9 @@ Keep this list current. Merge conflicts can only come from these files.
   backfill, after 5 failed embeds in a row, checks the endpoint with one
   request: if that fails too it stops, the run's `vectorCoverage` says why
   (`stoppedEarly`) and the rest wait for the next tick; if it answers, the
-  pages themselves failed and the run carries on. Before embedding, the backfill removes the vectors of every
-  stored page id that names no content page and whose file is gone
+  pages themselves failed and the run carries on. Before embedding, the
+  backfill removes the vectors of every stored page id that names no
+  content page and whose file is gone
   (`orphansRemoved`), then, in one write, those ids' entries in
   `.llm-wiki/embedded-pages.json` (since #80, `removeEmbeddedHashes`),
   and in the same write, since #82, the entry of every recorded id with no
@@ -489,8 +491,12 @@ Keep this list current. Merge conflicts can only come from these files.
   the flags here when `build_claude_cli_args` changes. Not part of the app.
 - `scripts/estate/check.sh`, `scripts/estate/check.test.sh` – the check
   script and its tests (pearson-tfl/llm_wiki#88); see Build below.
+- `scripts/estate/change_list.py`, `scripts/estate/test_change_list.py` –
+  the script that checks this list, and its tests (pearson-tfl/llm_wiki#91);
+  `check.sh` runs it first. See Build below.
 - `.github/workflows/estate-check.yml` – runs `check.sh` on each push to
-  `estate` (pearson-tfl/llm_wiki#88). A file of its own, not an edit to
+  `estate` (pearson-tfl/llm_wiki#88), on a checkout with full history, which
+  `change_list.py` needs (#91). A file of its own, not an edit to
   upstream's `ci.yml`, which runs only for `main`; it conflicts only if
   upstream adds a workflow of the same name.
 - `scripts/estate/ext-rename/` – a one-off rename of the Agent Harness
@@ -543,13 +549,19 @@ scripts/estate/check.sh
 ```
 
 It checks the checkout it lives in, with the same PATH set-up and missing
-tool stop as `build.sh`. It runs `npm ci` and `npm --prefix mcp-server ci`,
-then `npm run typecheck`, `npm run test:mocks`, `npm run mcp:build` and
-`cargo test` in `src-tauri`; it stops at the first failure with a non-zero
+tool stop as `build.sh`. It first runs `scripts/estate/change_list.py`,
+which fails on a line over 80 characters in "John's changes on `estate`"
+above, and on any file outside `docs/` that the checkout changes from its
+merge base with `origin/main` and the list does not name; a name in a
+`{a,b}` brace form, or a folder name ending in `/`, names a file. Then it
+runs `npm ci` and `npm --prefix mcp-server ci`, then `npm run typecheck`,
+`npm run test:mocks`, `npm run mcp:build` and `cargo test` in
+`src-tauri`; it stops at the first failure with a non-zero
 exit, and on success prints the commit it checked. In a fresh worktree on
 this Mac the first run takes about 4 minutes, 3 of them `cargo test`
 compiling the app; later runs are faster. Tests:
-`scripts/estate/check.test.sh`.
+`scripts/estate/check.test.sh`, and for `change_list.py`,
+`python3 scripts/estate/test_change_list.py`.
 
 The Estate check workflow (`.github/workflows/estate-check.yml`) runs the
 same script on GitHub on each push to `estate`, so a broken trunk shows on
@@ -584,11 +596,11 @@ estate build with nashsu's.
 ```sh
 cd /Users/johnp/Code/llm_wiki
 git fetch upstream --tags
-git diff --name-only main...estate        # files estate changed; compare with the list above
 git switch main && git merge --ff-only vX.Y.Z && git push origin main
 git switch estate && git merge vX.Y.Z     # conflicts only in the files above;
                                           # in vite.config.ts keep the estate stamp
-scripts/estate/check.sh                   # the check, as in Build above
+scripts/estate/check.sh                   # the check, as in Build above;
+                                          # it also checks the list above
 git push origin estate
 ```
 
