@@ -11,7 +11,8 @@ trap 'rm -rf "$scratch"' EXIT
 failures=0
 fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 
-# A fresh repository holding check.sh, one commit, a src-tauri folder, and a
+# A fresh repository holding check.sh, a stub change_list.py that logs its
+# run and fails when $FAIL_ON names it, one commit, a src-tauri folder, and a
 # stub bin folder with every tool named in "$@". The stubs log their
 # arguments and the folder they ran in to calls.log, and fail when their
 # command line equals $FAIL_ON.
@@ -21,6 +22,13 @@ setup() {
   stubs="$case_dir/stubs"
   mkdir -p "$repo/scripts/estate" "$repo/src-tauri" "$stubs" "$case_dir/home" "$case_dir/brew"
   cp "$here/check.sh" "$repo/scripts/estate/check.sh"
+  cat > "$repo/scripts/estate/change_list.py" <<EOF
+#!/bin/sh
+echo "change_list.py in \$(basename "\$PWD")" >> "$case_dir/calls.log"
+[ "change_list.py" = "\${FAIL_ON:-}" ] && exit 1
+exit 0
+EOF
+  chmod +x "$repo/scripts/estate/change_list.py"
   git -C "$repo" init -q
   git -C "$repo" add -A
   git -C "$repo" -c user.name=t -c user.email=t@t -c commit.gpgsign=false commit -q -m script
@@ -43,6 +51,7 @@ run() {
 
 all_tools=(node cargo protoc npm)
 steps=(
+  "change_list.py"
   "npm ci"
   "npm --prefix mcp-server ci"
   "npm run typecheck"
@@ -59,16 +68,17 @@ for missing in node cargo protoc; do
   setup "missing-$missing" "${present[@]}"
   if run; then fail "missing $missing: exited 0"; fi
   grep -q "$missing" "$case_dir/out.log" || fail "missing $missing: output does not name it"
-  if [ -e "$case_dir/calls.log" ] && grep -q '^npm' "$case_dir/calls.log"; then
-    fail "missing $missing: npm ran before the check failed"
+  if [ -e "$case_dir/calls.log" ] && grep -qE '^(change_list.py|npm) ' "$case_dir/calls.log"; then
+    fail "missing $missing: a step ran before the check failed"
   fi
 done
 
-# Every step runs, in order: npm from the checkout's root, cargo from
-# src-tauri.
+# Every step runs, in order: change_list.py and npm from the checkout's
+# root, cargo from src-tauri.
 setup ok "${all_tools[@]}"
 run || fail "ok: exited non-zero: $(cat "$case_dir/out.log")"
-expected_calls="npm ci in repo
+expected_calls="change_list.py in repo
+npm ci in repo
 npm --prefix mcp-server ci in repo
 npm run typecheck in repo
 npm run lint in repo
@@ -76,7 +86,7 @@ npm run test:mocks in repo
 npm run test:llm in repo
 npm run mcp:build in repo
 cargo test in src-tauri"
-[ "$(grep -E '^(npm|cargo) ' "$case_dir/calls.log")" = "$expected_calls" ] \
+[ "$(grep -E '^(change_list.py|npm|cargo) ' "$case_dir/calls.log")" = "$expected_calls" ] \
   || fail "ok: calls were: $(cat "$case_dir/calls.log")"
 sha="$(git -C "$repo" describe --always --dirty --exclude '*')"
 grep -q "$sha" "$case_dir/out.log" || fail "ok: output does not name commit $sha"

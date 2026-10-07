@@ -12,8 +12,12 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Full history: change_list.py diffs from the merge base with
+      # origin/main.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
