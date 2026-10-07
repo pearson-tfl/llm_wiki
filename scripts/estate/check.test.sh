@@ -153,4 +153,10 @@ run "" LLM_WIKI_CHECKOUT=/elsewhere \
 [ "$(cat "$case_dir/checkout.log")" = "$(cd "$repo" && pwd -P)" ] \
   || fail "checkout-env: cargo's LLM_WIKI_CHECKOUT was '$(cat "$case_dir/checkout.log")'"
 
+# The value only rebuilds the app crate while the real build script declares
+# it to cargo.
+grep -q '^ *println!("cargo:rerun-if-env-changed=LLM_WIKI_CHECKOUT");' \
+  "$here/../../src-tauri/build.rs" \
+  || fail "build.rs: no rerun-if-env-changed=LLM_WIKI_CHECKOUT"
+
 if [ "$failures" -eq 0 ]; then echo "check.test.sh: all passed"; else exit 1; fi

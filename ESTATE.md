@@ -493,10 +493,11 @@ Keep this list current. Merge conflicts can only come from these files.
   script and its tests (pearson-tfl/llm_wiki#88), building Rust in the
   shared target folder (#99) and naming its checkout to cargo (#104); see
   Build below.
-- `src-tauri/build.rs` – one line ahead of upstream's: cargo reruns the
-  build script, and so rebuilds the app crate, whenever `LLM_WIKI_CHECKOUT`
-  differs from its last build's (pearson-tfl/llm_wiki#104); see Build,
-  Check, below. If upstream changes the file, keep the line.
+- `src-tauri/build.rs` – one line and its comment ahead of upstream's: cargo
+  reruns the build script, and so rebuilds the app crate, whenever
+  `LLM_WIKI_CHECKOUT` differs from its last build's
+  (pearson-tfl/llm_wiki#104); see Build, Check, below. If upstream changes
+  the file, keep the line; `check.test.sh` fails without it.
 - `src/lib/llm-client.real-llm.test.ts`, `src/lib/embedding.real-llm.test.ts`
   – `npm run test:llm` passes, so the check runs it
   (pearson-tfl/llm_wiki#89). The three fake-Ollama tests expect
@@ -607,7 +608,9 @@ guarantee, so `check.sh` sets `LLM_WIKI_CHECKOUT` to the checkout's own
 root, and `src-tauri/build.rs` makes cargo rebuild the app crate whenever
 that value differs from the last build's. Cargo compares the value itself,
 not file times, so this holds when two checks wait on each other too. It
-costs nothing extra: the side effects already rebuild the app crate.
+costs nothing extra: the side effects already rebuild the app crate. A plain
+`cargo` run, with the variable unset, rebuilds the app crate once after a
+check, and the next check rebuilds it once again.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
