@@ -266,6 +266,24 @@ export async function runDuplicateDetection(
   return { ...detected, groups: [...sameSlug, ...detected.groups] }
 }
 
+/** A scan the Maintenance screen runs, with its Cancel. */
+export interface DuplicateScan {
+  /** The scan's result, or null once it is cancelled. */
+  done: Promise<DuplicateScanResult | null>
+  cancel: () => void
+}
+
+/** Starts a scan that `cancel` stops, the prefilter's compare included (#122). */
+export function startDuplicateScan(projectPath: string, llmConfig: LlmConfig): DuplicateScan {
+  const controller = new AbortController()
+  const done = runDuplicateDetection(projectPath, llmConfig, { signal: controller.signal })
+    .catch((err: unknown) => {
+      if (controller.signal.aborted) return null
+      throw err
+    })
+  return { done, cancel: () => controller.abort() }
+}
+
 /** The model's part of the scan: the embedding prefilter, then the detector. */
 async function detectWithModel(
   summaries: EntitySummary[],
