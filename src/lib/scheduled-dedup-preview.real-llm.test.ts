@@ -148,9 +148,9 @@ describe.skipIf(!ENABLED)("the scheduled duplicate scan on a copy of a real vaul
       clusters: measured.clusterSizes.length,
       largestClusters: measured.clusterSizes.slice(0, 5),
       detectorCalls: measured.calls.length,
-      largestBatch: Math.max(...measured.calls.map((c) => c.pages)),
+      largestBatch: Math.max(0, ...measured.calls.map((c) => c.pages)),
       callErrors: measured.calls.filter((c) => c.error),
-      slowestCallSeconds: Math.max(...measured.calls.map((c) => c.seconds)),
+      slowestCallSeconds: Math.max(0, ...measured.calls.map((c) => c.seconds)),
       failedBatches: result.failedBatches,
       notDone: result.notDone ?? null,
       groups: {

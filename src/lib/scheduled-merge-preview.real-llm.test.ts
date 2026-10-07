@@ -18,7 +18,8 @@
  * --network-family-autoselection-attempt-timeout=5000" (see the scan
  * preview).
  *
- * Gated behind RUN_LLM_TESTS=1, APP_STATE and PREVIEW_VAULT_COPY, a fresh
+ * Gated behind RUN_LLM_TESTS=1, APP_STATE (only read; its key never leaves
+ * this process) and PREVIEW_VAULT_COPY, a fresh
  * copy under the OS temp folder: the run changes it. Writes its report,
  * every high-confidence group with each page's title and first line, to
  * PREVIEW_MERGE_REPORT when set.
@@ -48,7 +49,7 @@ const LIVE_CLI = path.resolve(__dirname, "../../scripts/estate/live-cli.sh")
 
 const settings = vi.hoisted(() => new Map<string, unknown>())
 /** The copy's real path, set once the guard has passed it. */
-const copy = vi.hoisted(() => ({ path: "" }))
+const vaultCopy = vi.hoisted(() => ({ path: "" }))
 const measured = vi.hoisted(() => ({
   scan: null as DuplicateScanResult | null,
   calls: [] as { kind: "detector" | "judge" | "other"; pages?: number; seconds: number; error?: string }[],
@@ -103,7 +104,7 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
 
 vi.mock("@/lib/project-identity", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/project-identity")>()),
-  getProjectPathById: async () => copy.path,
+  getProjectPathById: async () => vaultCopy.path,
 }))
 
 vi.mock("@/lib/dedup-runner", async (importOriginal) => {
@@ -178,7 +179,7 @@ async function runCli(args: { streamId: string; messages: { role: string; conten
 describe.skipIf(!ENABLED)("the first scheduled run on a copy of a real vault", () => {
   it("scans and merges as the scheduled run would", async () => {
     const vault = await tempVaultCopy(process.env.PREVIEW_VAULT_COPY ?? "")
-    copy.path = vault
+    vaultCopy.path = vault
 
     const state: SavedAppState & Record<string, unknown> = JSON.parse(await fs.readFile(process.env.APP_STATE ?? "", "utf8"))
     for (const [key, value] of Object.entries(state)) settings.set(key, value)

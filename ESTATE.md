@@ -797,6 +797,14 @@ Keep this list current. Merge conflicts can only come from these files.
   `prove-on-copy.sh`, which runs the app's own startup comparison and
   change processing on a renamed copy of a vault. Not part of the app;
   upstream has no `scripts/estate/`.
+- `src/test-helpers/fs-temp.ts` – adds `appFs`, the node file layer listed
+  as the app lists it: dot-prefixed entries such as `.llm-wiki` hidden unless
+  asked for, as `entry_is_visible` in `fs.rs` does. A live test on a copy of a
+  real vault needs it, or page history under `.llm-wiki` is taken for wiki
+  pages (pearson-tfl/llm_wiki#111). The gated previews of the first
+  scheduled run, `src/lib/scheduled-dedup-preview.real-llm.test.ts` and
+  `src/lib/scheduled-merge-preview.real-llm.test.ts`, use it, with
+  `src/test-helpers/scheduled-preview.ts`.
 - `ESTATE.md` – this file.
 - `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain
