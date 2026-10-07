@@ -230,7 +230,7 @@ export interface DuplicateScanResult {
 
 const noGroups = (): DuplicateScanResult => ({ groups: [], failedBatches: [] })
 
-const notDone = (reason: ScanNotDoneReason, pages: number): DuplicateScanResult =>
+const notDoneResult = (reason: ScanNotDoneReason, pages: number): DuplicateScanResult =>
   ({ ...noGroups(), notDone: { reason, pages } })
 
 /**
@@ -278,7 +278,7 @@ async function detectWithModel(
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
         console.warn("[dedup] embedding prefilter coverage too low; skipping full fallback for large wiki:", err)
-        return notDone("embedding-coverage-low", summaries.length)
+        return notDoneResult("embedding-coverage-low", summaries.length)
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
     }
@@ -356,7 +356,7 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
     // says so rather than reporting the wiki clean (#112).
     return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
       ? detectDuplicateGroupsInBoundedBatches(summaries, llm, options)
-      : notDone("no-candidate-pairs", summaries.length)
+      : notDoneResult("no-candidate-pairs", summaries.length)
   }
 
   const summaryByPath = new Map(summaries.map((s) => [s.path, s]))
