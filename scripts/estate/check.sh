@@ -17,6 +17,7 @@ cd "$(dirname "$0")/../.."
 npm ci
 npm --prefix mcp-server ci
 npm run typecheck
+npm run lint
 npm run test:mocks
 npm run test:llm
 npm run mcp:build

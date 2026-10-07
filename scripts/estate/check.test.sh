@@ -46,6 +46,7 @@ steps=(
   "npm ci"
   "npm --prefix mcp-server ci"
   "npm run typecheck"
+  "npm run lint"
   "npm run test:mocks"
   "npm run test:llm"
   "npm run mcp:build"
@@ -70,6 +71,7 @@ run || fail "ok: exited non-zero: $(cat "$case_dir/out.log")"
 expected_calls="npm ci in repo
 npm --prefix mcp-server ci in repo
 npm run typecheck in repo
+npm run lint in repo
 npm run test:mocks in repo
 npm run test:llm in repo
 npm run mcp:build in repo
