@@ -1,7 +1,8 @@
 /**
  * Seam 2 of #16 (tickets #18, #19): the scheduled maintenance tick, called
  * with an explicit clock against a real temporary project. Detection, merge
- * and the model call are faked at the dedup runner boundary, and the
+ * and the model call are faked at the dedup runner boundary, the high-group
+ * judge's (#145) by the route it is built on, and the
  * embedding search at its own, and the Tauri vector-store and embedding
  * commands are an in-memory store (#67); the merge queue, the not-duplicates list,
  * the saved-groups file, the hub-rebuild request and archive, the page
@@ -41,12 +42,28 @@ vi.mock("@tauri-apps/plugin-store", () => ({
   })),
 }))
 
-vi.mock("@/lib/dedup-runner", () => ({
-  runDuplicateDetection: vi.fn(),
-  executeMerge: vi.fn(),
-  reembedMergedPages: vi.fn(),
-  buildDedupLlmCall: vi.fn(),
-}))
+vi.mock("@/lib/dedup-runner", async (importOriginal) => {
+  const { DEDUP_JUDGE_MAX_TOKENS, DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP } =
+    await importOriginal<typeof import("./dedup-runner")>()
+  return {
+    DEDUP_JUDGE_MAX_TOKENS,
+    DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP,
+    runDuplicateDetection: vi.fn(),
+    executeMerge: vi.fn(),
+    reembedMergedPages: vi.fn(),
+    buildDedupLlmCall: vi.fn(),
+  }
+})
+
+// Each task's route named by its model, so a test can tell the judge's
+// call (the chat route) from the run's own (the ingest route).
+vi.mock("@/lib/llm-task-routing", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./llm-task-routing")>()
+  return {
+    ...real,
+    getTaskLlmConfig: (task: "chat" | "ingest") => ({ ...real.getTaskLlmConfig(task), model: `${task}-route` }),
+  }
+})
 
 vi.mock("@/lib/embedding", async (importOriginal) => ({
   ...(await importOriginal<typeof import("./embedding")>()),
@@ -84,6 +101,7 @@ import {
 import {
   addNotDuplicate,
   loadPendingDuplicateGroups,
+  readNotDuplicates,
   removePendingDuplicateGroup,
   savePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
@@ -99,7 +117,12 @@ import {
 } from "./scheduled-maintenance"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
-import { MergeReplyRejectedError, type DuplicateGroup } from "./dedup"
+import {
+  DetectorCallFailedError,
+  JUDGE_PROMPT_MARKER,
+  MergeReplyRejectedError,
+  type DuplicateGroup,
+} from "./dedup"
 import type { WikiProject } from "@/types/wiki"
 
 const mockDetect = vi.mocked(runDuplicateDetection)
@@ -112,6 +135,18 @@ const mockBackfill = vi.mocked(runEmbeddingBackfill)
 const { runEmbeddingBackfill: realBackfill } = await vi.importActual<typeof import("./embedding-freshness")>("./embedding-freshness")
 /** The model call the hub rebuild makes: (system, user) → reply. */
 const mockModel = vi.fn<(system: string, user: string) => Promise<string>>()
+/** The high-group judge's call, on the chat route (#145): (system, user) →
+ *  reply. By default it finds every page it is given one topic. */
+const mockJudge = vi.fn<(system: string, user: string) => Promise<string>>()
+
+/** The page ids a judge prompt gives the model, in order. */
+function judgedPages(user: string): string[] {
+  return [...user.matchAll(/^## Page: (.+)$/gm)].map((m) => m[1])
+}
+
+function oneTopic(user: string): string {
+  return JSON.stringify({ groups: [{ pages: judgedPages(user), reason: "One topic." }] })
+}
 
 const HOUR = 60 * 60 * 1000
 const T0 = Date.parse("2026-10-05T09:00:00Z")
@@ -183,7 +218,11 @@ beforeEach(async () => {
   mockEmbeddingError.mockReturnValue(null)
   mockModel.mockReset()
   mockBuildLlm.mockReset()
-  mockBuildLlm.mockReturnValue((system, user) => mockModel(system, user))
+  mockJudge.mockReset()
+  mockJudge.mockImplementation(async (_system, user) => oneTopic(user))
+  mockBuildLlm.mockImplementation((config) => config.model === "chat-route"
+    ? (system, user) => mockJudge(system, user)
+    : (system, user) => mockModel(system, user))
 
   useWikiStore.getState().setProject(project)
   useWikiStore.getState().setLlmConfig({
@@ -394,6 +433,9 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
     await runMaintenanceTick(project, { now: () => T0 })
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["codex-bridge"])
+    // A group naming a page no longer on disk is not judged (#145): the
+    // merge refuses it and says why.
+    expect(mockJudge).not.toHaveBeenCalled()
   })
 
   it("finds pages as a merge does: by page id, and by slug among entity and concept pages only (#114)", async () => {
@@ -416,11 +458,11 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["concepts/agent-skills", "hook"])
   })
-  it("merges a group the judge found one topic, naming its pages by path (#135)", async () => {
+  it("merges a group the judge found one topic, naming its pages by path, and does not judge it again (#135, #145)", async () => {
     await setConfig(null)
     await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md"]))
     await writeFileRaw(`${tmp.path}/wiki/entities/agent-skills.md`, page("Agent Skills", "2026-09-30", ["b.md", "c.md"]))
-    const judged = group(["concepts/agent-skills", "entities/agent-skills"], "high")
+    const judged = { ...group(["concepts/agent-skills", "entities/agent-skills"], "high"), judged: true }
     mockDetect.mockResolvedValue({ groups: [judged], failedBatches: [] })
     mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
 
@@ -431,6 +473,156 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
     ])
     expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1 })
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([])
+    expect(mockJudge).not.toHaveBeenCalled()
+  })
+})
+
+describe("scheduled maintenance tick – the judge before a high-confidence merge (#145)", () => {
+  const MERGED = { canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] }
+  // As the vault's group 46, two tools of one name, and a pair of twins.
+  const toolPair = group(["todo-write", "todowrite"], "high")
+  const twins = group(["claude-3-7-sonnet", "claude-sonnet-3-7"], "high")
+
+  beforeEach(async () => {
+    await setConfig(null)
+    await writePages(
+      "entities/todo-write", "entities/todowrite",
+      "entities/claude-3-7-sonnet", "entities/claude-sonnet-3-7",
+      "entities/xai", "entities/openclaw-xai-provider",
+    )
+    mockMerge.mockResolvedValue(MERGED)
+  })
+
+  /** The judge answers each group by its first page: an Error is thrown,
+   *  a string is the reply, an array is the reply's groups. */
+  function judgeBy(verdicts: Record<string, Error | string | string[][]>) {
+    mockJudge.mockImplementation(async (_system, user) => {
+      const verdict = verdicts[judgedPages(user)[0]]
+      if (verdict instanceof Error) throw verdict
+      if (typeof verdict === "string") return verdict
+      return JSON.stringify({ groups: verdict.map((pages) => ({ pages, reason: "One topic." })) })
+    })
+  }
+
+  it("asks the shared-slug judge on the chat route, given the group's pages by path with their content, and merges it when one topic", async () => {
+    mockDetect.mockResolvedValue({ groups: [twins], failedBatches: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockBuildLlm).toHaveBeenCalledWith(expect.objectContaining({ model: "chat-route" }), 2_048)
+    expect(mockJudge).toHaveBeenCalledOnce()
+    const [system, user] = mockJudge.mock.calls[0]
+    expect(system).toContain(JUDGE_PROMPT_MARKER)
+    expect(judgedPages(user)).toEqual(["entities/claude-3-7-sonnet", "entities/claude-sonnet-3-7"])
+    expect(user).toContain("entities/claude-sonnet-3-7 body.")
+    expect(mockMerge.mock.calls.map((c) => c[1].slugs)).toEqual([twins.slugs])
+    expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1 })
+  })
+
+  it("merges nothing of a group judged not one topic: it is saved at medium and its pairs recorded as not duplicates", async () => {
+    mockDetect.mockResolvedValue({ groups: [toolPair, twins], failedBatches: [] })
+    judgeBy({ "entities/todo-write": [], "entities/claude-3-7-sonnet": [twins.slugs.map((s) => `entities/${s}`)] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => c[1].slugs)).toEqual([twins.slugs])
+    expect(record).toMatchObject({ groupsFound: { high: 2, medium: 0, low: 0 }, mergesEnqueued: 1 })
+    expect(record?.failedDetectorBatches).toBeUndefined()
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([{ ...toolPair, confidence: "medium" }])
+    expect(await readNotDuplicates(tmp.path)).toEqual([["todo-write", "todowrite"]])
+  })
+
+  it("merges nothing of a group the judge finds only partly one topic, and records only the pairs it kept apart", async () => {
+    const three = group(["xai", "openclaw-xai-provider", "todo-write"], "high")
+    mockDetect.mockResolvedValue({ groups: [three], failedBatches: [] })
+    judgeBy({ "entities/xai": [["entities/xai", "entities/openclaw-xai-provider"]] })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([{ ...three, confidence: "medium" }])
+    expect(await readNotDuplicates(tmp.path)).toEqual([["todo-write", "xai"], ["openclaw-xai-provider", "todo-write"]])
+  })
+
+  it("keeps a group whose judge call fails, and one whose reply cannot be read, each reported as a failed batch", async () => {
+    const saved = group(["xai", "openclaw-xai-provider"], "medium")
+    await savePendingDuplicateGroups(tmp.path, [saved])
+    mockDetect.mockResolvedValue({ groups: [toolPair, twins], failedBatches: [] })
+    judgeBy({ "entities/todo-write": new DetectorCallFailedError("429 rate limited"), "entities/claude-3-7-sonnet": "They are the same." })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(record?.failedDetectorBatches).toEqual([
+      { pages: 2, reason: "High-group judge: Duplicate detector call failed: 429 rate limited" },
+      { pages: 2, reason: "High-group judge: Duplicate detector reply could not be read: judge: no complete JSON object" },
+    ])
+    // Left as found, high, beside the group an earlier run saved: the run
+    // did not check every group.
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([saved, toolPair, twins])
+    expect(await readNotDuplicates(tmp.path)).toEqual([])
+  })
+
+  it("stops judging after two calls in a row fail: a group after them takes no call and is reported as not checked", async () => {
+    const third = group(["xai", "openclaw-xai-provider"], "high")
+    mockDetect.mockResolvedValue({ groups: [toolPair, twins, third], failedBatches: [] })
+    mockJudge.mockRejectedValue(new DetectorCallFailedError("connection reset"))
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockJudge).toHaveBeenCalledTimes(2)
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(record?.failedDetectorBatches).toEqual([
+      { pages: 2, reason: "High-group judge: Duplicate detector call failed: connection reset" },
+      { pages: 2, reason: "High-group judge: Duplicate detector call failed: connection reset" },
+      { pages: 2, reason: "Not checked: the high-group judge stopped after 2 calls in a row failed" },
+    ])
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([toolPair, twins, third])
+  })
+
+  it("counts only failed calls in a row toward the stop: an unreadable reply between them starts the count again", async () => {
+    const third = group(["xai", "openclaw-xai-provider"], "high")
+    mockDetect.mockResolvedValue({ groups: [toolPair, twins, third], failedBatches: [] })
+    judgeBy({
+      "entities/todo-write": new DetectorCallFailedError("connection reset"),
+      "entities/claude-3-7-sonnet": "not json",
+      "entities/xai": new DetectorCallFailedError("connection reset"),
+    })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockJudge).toHaveBeenCalledTimes(3)
+  })
+
+  it("saves a group judged not one topic at medium, and reports a failed batch, when its pairs cannot be recorded", async () => {
+    mockDetect.mockResolvedValue({ groups: [toolPair], failedBatches: [] })
+    mockJudge.mockImplementation(async () => {
+      await writeFileRaw(`${tmp.path}/.llm-wiki/dedup-not-duplicates.json`, "[[\"todo-write\", \"todo")
+      return JSON.stringify({ groups: [] })
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(record?.failedDetectorBatches).toEqual([{
+      pages: 2,
+      reason: expect.stringMatching(/^High-group judge: the pages judged distinct could not be recorded: .*not-duplicates/),
+    }])
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([{ ...toolPair, confidence: "medium" }])
+  })
+
+  it("re-reads the run's gate after the judge's call: a merge is withheld when the job is switched off during it", async () => {
+    mockDetect.mockResolvedValue({ groups: [twins], failedBatches: [] })
+    mockJudge.mockImplementation(async (_system, user) => {
+      await saveScheduledMaintenanceConfig(tmp.path, { enabled: false, intervalHours: 24, lastRun: null })
+      return oneTopic(user)
+    })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge).not.toHaveBeenCalled()
+    expect(record).toMatchObject({ skipReason: "switched-off", mergesEnqueued: 0 })
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([twins])
   })
 })
 

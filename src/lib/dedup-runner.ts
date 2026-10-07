@@ -42,8 +42,9 @@ const DEDUP_FALLBACK_BATCH_OVERLAP = 8
 const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
 // A hung endpoint waits out the client's 30-min timeout on every call, and a
 // rate-limited one is fired at again at once, so the scan stops calling after
-// this many detector calls in a row fail (#124).
-const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
+// this many detector calls in a row fail (#124). Both judges stop at the
+// same count (#139, #145).
+export const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
 
 /**
  * Merge rewrites a COMPLETE page that gets written to disk, so it needs
@@ -54,8 +55,8 @@ const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
  * drag in the heavy ingest dependency graph.
  */
 const DEDUP_MERGE_MAX_TOKENS = 16_384
-/** The judge answers with a short JSON list of page groups (#135). */
-const DEDUP_JUDGE_MAX_TOKENS = 2_048
+/** The judges answer with a short JSON list of page groups (#135, #145). */
+export const DEDUP_JUDGE_MAX_TOKENS = 2_048
 import {
   allPairs,
   ambiguousSlugRefusal,
@@ -330,7 +331,7 @@ async function settleSharedSlugGroups(
     }
     for (const topic of topics) {
       const reason = topic.reason.trim() ? `Judged one topic: ${topic.reason}` : "Judged one topic"
-      out.push({ slugs: topic.pages, reason, confidence: "high" })
+      out.push({ slugs: topic.pages, reason, confidence: "high", judged: true })
     }
     const distinct = unrecorded(distinctPairs(candidates, topics))
     if (distinct.length === 0) continue

@@ -188,7 +188,8 @@ Keep this list current. Merge conflicts can only come from these files.
   10 minutes for the open project only, and an overdue run starts when the
   wiki is opened. A run waits, and records why, while the ingest queue is
   busy, a previous run is still going, or no model is set. High-confidence
-  groups go onto the existing merge queue, into the page with the most
+  groups, since #145 each confirmed first by a judge, go onto the
+  existing merge queue, into the page with the most
   sources, then the earliest created date, then the first listed; a group
   holding a pair marked "not duplicates" is never merged, and a
   not-duplicates list that cannot be read merges nothing. Before each
@@ -579,6 +580,32 @@ Keep this list current. Merge conflicts can only come from these files.
   vault-copy project, merging pages the vault links to by path, with the
   app's structural lint before and after, in
   `src/lib/dedup-ambiguous-slug.real-llm.test.ts`.
+- `src/lib/dedup.ts` (a field and a comment), `src/lib/dedup-runner.ts`,
+  `src/lib/scheduled-maintenance.ts` – the scheduled run asks a judge
+  before it merges a high-confidence group with no click
+  (pearson-tfl/llm_wiki#145). The judge is #135's, on the chat route, given
+  the group's pages by path under `wiki/` with their title and content;
+  a group naming a page no longer on disk is not judged, and the merge
+  refuses it as before. When the judge puts every page in one group the
+  merge goes ahead as before. Otherwise nothing is merged,
+  the group is saved for the Maintenance screen at medium, and each pair
+  it did not put together is recorded in the not-duplicates list under the
+  group's own names, so no later scan raises it. A failed call or a reply
+  it cannot read leaves the group as found and is a failed batch with the
+  reason "High-group judge: …"; after two failed calls in a row each
+  group left is reported as "Not checked: the high-group judge stopped
+  after 2 calls in a row failed", with no call. A group #135's judge
+  confirmed carries `judged` and is not judged again. The run's merge
+  gate (switched off, ingest busy) is read again after the judge's call.
+  The Maintenance screen's own Merge button is unchanged. Upstream edits
+  to the scheduled run's merge loop or the duplicate group's fields need
+  re-checking against this.
+  Tests in `src/lib/dedup-runner.test.ts` and
+  `src/lib/scheduled-maintenance.test.ts`; a live scheduled run on #111's
+  groups 46, 43 and 44 and two pairs of twins, copied from #111's vault
+  snapshot, and a live Maintenance-screen Merge of group 46, in
+  `src/lib/dedup-high-group-judge.real-llm.test.ts`. #135's live
+  scheduled run counts only the judge calls made during its scan.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

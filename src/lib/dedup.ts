@@ -23,6 +23,8 @@
  *      share a slug, by path with their content, to an LLM, ask
  *      which are one topic. The rest are distinct (distinctPairs),
  *      so the caller records them and never merges them (#135).
+ *      The scheduled run asks it of a high group's pages too, before
+ *      merging the group with no click (#145).
  *   3. mergeDuplicateGroup: given a confirmed group + chosen
  *      canonical slug, merge bodies (LLM call, its reply checked as
  *      the page merge checks one), union frontmatter
@@ -71,6 +73,9 @@ export interface DuplicateGroup {
   /** Why the model believes these are duplicates. Short prose. */
   reason: string
   confidence: "high" | "medium" | "low"
+  /** Set on a group the shared-slug judge found one topic (#135), so the
+   *  scheduled run does not judge it again before merging it (#145). */
+  judged?: boolean
 }
 
 export interface MergeRequest {
