@@ -54,25 +54,31 @@ const DEDUP_CONSECUTIVE_CALL_FAILURES_TO_STOP = 2
  * drag in the heavy ingest dependency graph.
  */
 const DEDUP_MERGE_MAX_TOKENS = 16_384
+/** The judge answers with a short JSON list of page groups (#135). */
+const DEDUP_JUDGE_MAX_TOKENS = 2_048
 import {
   ambiguousSlugRefusal,
   detectDuplicateGroups,
   DetectorCallFailedError,
   DetectorReplyUnreadableError,
+  distinctPairs,
   extractEntitySummary,
+  judgeSharedSlugPages,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
   pagesNamed,
   rewriteIndexMd,
   sameSlugGroups,
+  sharedSlugCandidates,
   toWikiRelative,
   type DedupLlmCall,
   type DuplicateGroup,
   type EntitySummary,
   type MergeResult,
 } from "./dedup"
-import { loadNotDuplicates } from "./dedup-storage"
+import { loadNotDuplicates, recordNotDuplicates } from "./dedup-storage"
 import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
+import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 
 /**
  * Wrap streamChat into the (system, user, signal) → string shape
@@ -255,7 +261,75 @@ export async function runDuplicateDetection(
   const notDup = await loadNotDuplicates(projectPath)
   const sameSlug = sameSlugGroups(summaries, notDup)
   const detected = await detectWithModel(summaries, notDup, llmConfig, options)
-  return { ...detected, groups: [...sameSlug, ...detected.groups] }
+  const settled = await settleSharedSlugGroups(projectPath, summaries, [...sameSlug, ...detected.groups], notDup, options)
+  return {
+    ...detected,
+    groups: uniqueDuplicateGroups(settled.groups),
+    failedBatches: [...detected.failedBatches, ...settled.failedBatches],
+  }
+}
+
+/**
+ * Settle every group whose pages include two that share a slug, so none is
+ * left for a decision by hand (#135). The judge, on the chat route, is given
+ * the pages by path with their content: pages it finds one topic come back
+ * as a high group of page ids, which the scheduled run merges; each other
+ * pair is recorded as not duplicates, so no later scan asks again. A group
+ * all of whose pairs are recorded is dropped with no call. A judge call that
+ * fails, or a reply it cannot read, is a failed batch, and the group stays.
+ */
+async function settleSharedSlugGroups(
+  projectPath: string,
+  summaries: EntitySummary[],
+  groups: DuplicateGroup[],
+  notDup: string[][],
+  options: { signal?: AbortSignal },
+): Promise<Pick<DuplicateScanResult, "groups" | "failedBatches">> {
+  const pp = normalizePath(projectPath)
+  const judge = buildDedupLlmCall(getTaskLlmConfig("chat"), DEDUP_JUDGE_MAX_TOKENS)
+  // Verdicts recorded during this scan count for the groups after them.
+  const recorded = new Set(notDup.map(normalizeSlugGroupKey))
+  const out: DuplicateGroup[] = []
+  const failedBatches: FailedDetectorBatch[] = []
+  for (const group of groups) {
+    const candidates = sharedSlugCandidates(summaries, group)
+    if (!candidates) {
+      out.push(group)
+      continue
+    }
+    const unrecorded = (pairs: string[][]) => pairs.filter((pair) => !recorded.has(normalizeSlugGroupKey(pair)))
+    if (unrecorded(distinctPairs(candidates, [])).length === 0) continue
+    let topics
+    try {
+      const pages = await Promise.all(candidates.map(async (pageId) =>
+        ({ pageId, content: await readFile(`${pp}/wiki/${pageId}.md`) })))
+      topics = await judgeSharedSlugPages(pages, judge, options.signal)
+    } catch (err) {
+      if (options.signal?.aborted) throw err
+      failedBatches.push({ pages: candidates.length, reason: `Shared-slug judge: ${errorMessage(err)}` })
+      out.push(group)
+      continue
+    }
+    for (const topic of topics) {
+      out.push({ slugs: topic.pages, reason: `Judged one topic: ${topic.reason}`, confidence: "high" })
+    }
+    const distinct = unrecorded(distinctPairs(candidates, topics))
+    if (distinct.length === 0) continue
+    try {
+      await recordNotDuplicates(pp, distinct)
+      for (const pair of distinct) recorded.add(normalizeSlugGroupKey(pair))
+    } catch (err) {
+      failedBatches.push({
+        pages: candidates.length,
+        reason: `Shared-slug judge: the pages judged distinct could not be recorded: ${errorMessage(err)}`,
+      })
+    }
+  }
+  return { groups: out, failedBatches }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 /** A scan the Maintenance screen runs, with its Cancel. */

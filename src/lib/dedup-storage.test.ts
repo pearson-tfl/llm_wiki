@@ -11,9 +11,12 @@ vi.mock("@/commands/fs", () => ({ ...realFs, readFile: vi.fn(realFs.readFile) })
 
 import { readFile } from "@/commands/fs"
 import {
+  addNotDuplicate,
   addPendingDuplicateGroups,
   listWikiPages,
   loadPendingDuplicateGroups,
+  readNotDuplicates,
+  recordNotDuplicates,
   removePendingDuplicateGroup,
   replacePendingDuplicateGroups,
   savePendingDuplicateGroups,
@@ -80,7 +83,7 @@ describe("saved duplicate groups", () => {
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([fresh])
   })
 
-  it("drops a saved group naming a page no longer on disk when groups are added (#120)", async () => {
+  it("drops a saved group naming a page no longer on disk, or a slug naming two pages, when groups are added (#120, #135)", async () => {
     await writePages(
       "wiki/concepts/seat.md",
       "wiki/concepts/lane.md",
@@ -90,7 +93,8 @@ describe("saved duplicate groups", () => {
       "wiki/concepts/hook.md",
     )
     const live = group(["seat", "lane"])
-    // Its slug names two pages, which a merge refuses; still on disk (#114).
+    // Its slug names two pages, which a merge refuses; the scan that finds
+    // it again settles it by judgement (#135).
     const ambiguous = group(["agent-skills", "skills"])
     const merged = group(["pstack", "p-stack"])
     const halfGone = group(["hook", "hooks"])
@@ -101,7 +105,55 @@ describe("saved duplicate groups", () => {
 
     await addPendingDuplicateGroups(tmp.path, [added])
 
-    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live, ambiguous, byPageId, added])
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live, byPageId, added])
+  })
+})
+
+describe("the not-duplicates list", () => {
+  const listPath = () => `${tmp.path}/.llm-wiki/dedup-not-duplicates.json`
+
+  it("records the judge's pairs sorted, leaving out one already there in any casing (#135)", async () => {
+    await addNotDuplicate(tmp.path, ["hooks", "hook"])
+    await recordNotDuplicates(tmp.path, [
+      ["entities/agent-skills", "concepts/agent-skills"],
+      ["Hook", "HOOKS"],
+    ])
+
+    expect(await readNotDuplicates(tmp.path)).toEqual([
+      ["hook", "hooks"],
+      ["concepts/agent-skills", "entities/agent-skills"],
+    ])
+  })
+
+  it("refuses to record into a list it cannot read, leaving the file as it was (#135)", async () => {
+    await writeFileRaw(listPath(), "[[\"hook\", \"hooks\"]")
+
+    await expect(recordNotDuplicates(tmp.path, [["concepts/a", "entities/a"]]))
+      .rejects.toThrow("Cannot read the not-duplicates list")
+    expect(await realFs.readFile(listPath())).toBe("[[\"hook\", \"hooks\"]")
+  })
+
+  it("keeps both writes when the scan records a verdict while the Maintenance screen adds a pair (#135)", async () => {
+    await addNotDuplicate(tmp.path, ["seat", "lane"])
+    // The screen's add reads the old list, then is held before it writes.
+    const held = createDeferred()
+    vi.mocked(readFile).mockImplementationOnce(async (path) => {
+      const content = await realFs.readFile(path)
+      await held.promise
+      return content
+    })
+
+    const added = addNotDuplicate(tmp.path, ["hook", "hooks"])
+    const recorded = recordNotDuplicates(tmp.path, [["concepts/a", "entities/a"]])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    held.resolve()
+    await Promise.all([added, recorded])
+
+    expect(await readNotDuplicates(tmp.path)).toEqual([
+      ["lane", "seat"],
+      ["hook", "hooks"],
+      ["concepts/a", "entities/a"],
+    ])
   })
 })
 

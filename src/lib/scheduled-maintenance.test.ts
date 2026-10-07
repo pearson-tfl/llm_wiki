@@ -416,6 +416,22 @@ describe("scheduled maintenance tick – canonical page edge cases", () => {
 
     expect(mockMerge.mock.calls.map((c) => c[2])).toEqual(["concepts/agent-skills", "hook"])
   })
+  it("merges a group the judge found one topic, naming its pages by path (#135)", async () => {
+    await setConfig(null)
+    await writeFileRaw(`${tmp.path}/wiki/concepts/agent-skills.md`, page("Agent Skills", "2026-10-03", ["a.md"]))
+    await writeFileRaw(`${tmp.path}/wiki/entities/agent-skills.md`, page("Agent Skills", "2026-09-30", ["b.md", "c.md"]))
+    const judged = group(["concepts/agent-skills", "entities/agent-skills"], "high")
+    mockDetect.mockResolvedValue({ groups: [judged], failedBatches: [] })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(mockMerge.mock.calls.map((c) => [c[1].slugs, c[2]])).toEqual([
+      [["concepts/agent-skills", "entities/agent-skills"], "entities/agent-skills"],
+    ])
+    expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1 })
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([])
+  })
 })
 
 describe("scheduled maintenance tick – groups it does not merge", () => {
@@ -443,8 +459,9 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     await writeFileRaw(`${tmp.path}/wiki/concepts/skills.md`, page("Skills", "2026-10-01", ["c.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loop.md`, page("Agent Loop", "2026-09-01", ["d.md"]))
     await writeFileRaw(`${tmp.path}/wiki/concepts/agent-loops.md`, page("Agent Loops", "2026-10-04", ["e.md"]))
-    // As the scan returns them: the same-slug group, the detector's
-    // high group naming the shared slug bare, and a group that merges.
+    // As the scan returns them when its judge's call failed (#135): the
+    // same-slug group, the detector's high group naming the shared slug
+    // bare, and a group that merges.
     const sameSlug = group(["concepts/agent-skills", "entities/agent-skills"], "medium")
     const ambiguous = group(["agent-skills", "skills"], "high")
     const clear = group(["agent-loop", "agent-loops"], "high")
