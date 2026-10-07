@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --build --pretty",
+    "lint": "eslint src",
     "build": "npm run typecheck && vite build",
     "build:desktop": "npm --prefix mcp-server ci && npm run mcp:build && npm run build",
     "preview": "vite preview",
@@ -65,8 +66,11 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "fast-check": "^4.7.0",
     "typescript": "^5.7.3",
+    "typescript-eslint": "^8.71.1",
     "vite": "^8.0.0",
     "vitest": "^4.1.4"
   }
