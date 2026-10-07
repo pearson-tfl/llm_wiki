@@ -442,7 +442,7 @@ Keep this list current. Merge conflicts can only come from these files.
   cancel each time. Each page's vector length is worked out once and each
   pair scored once, where every pair was scored from both sides; the pairs
   found are the same, in the same order. On a copy of John's vault (2,406
-  pages) on the Dell the compare took 5.9 seconds, the app never waiting
+  pages) on the Dell the compare took 5.1 seconds, the app never waiting
   more than 34 ms, where before it froze the app for 12.8 seconds.
   The Maintenance screen's scan has a Cancel button: a cancelled scan
   shows no result and no error. The scheduled run's scan still cannot be
