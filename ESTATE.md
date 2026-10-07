@@ -600,12 +600,14 @@ another wait. Deleting the folder frees the space; the next check rebuilds it.
 Every tree's app crate has the same file names in the shared folder, and
 cargo judges a build fresh by file times, so a tree whose files are all older
 than another tree's last build could have its check test that tree's code
-(#104). So `check.sh` sets `LLM_WIKI_CHECKOUT` to the checkout's own root,
-and `src-tauri/build.rs` makes cargo rebuild the app crate whenever that
-value differs from the last build's. Cargo compares the value itself, not
-file times, so the rule holds when two checks wait on each other too. The
-rebuild costs nothing extra: `npm run mcp:build`, just before, rewrites
-files the build script watches and already makes the app crate rebuild.
+(#104). Two side effects prevent that today: `npm run mcp:build` rewrites
+files the app's build script watches, and Tauri's build script records its
+config files by absolute path, which differs per tree. Neither is a
+guarantee, so `check.sh` sets `LLM_WIKI_CHECKOUT` to the checkout's own
+root, and `src-tauri/build.rs` makes cargo rebuild the app crate whenever
+that value differs from the last build's. Cargo compares the value itself,
+not file times, so this holds when two checks wait on each other too. It
+costs nothing extra: the side effects already rebuild the app crate.
 
 The lint runs only the two promise rules, type-aware, over `src/`. The 141
 violations already in `src/` when it was added (#90), most in upstream's
