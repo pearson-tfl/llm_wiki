@@ -67,7 +67,8 @@ export function isOpenRouterEndpoint(endpoint: string): boolean {
  * Resolve only capabilities that are part of the selected wire contract.
  * Generic custom gateways deliberately stay Auto-only: a vendor-looking
  * model name does not prove that an aggregator accepts that vendor's private
- * request fields.
+ * request fields. A custom route in Anthropic-messages mode also offers Off,
+ * the Messages API's own `thinking.type=disabled`.
  */
 export function resolveReasoningCapabilities(config: LlmConfig): ReasoningCapabilities {
   if (config.provider === "claude-code" || config.provider === "codex-cli") {

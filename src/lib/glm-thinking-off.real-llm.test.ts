@@ -17,10 +17,11 @@
  * - APP_STATE, the app-state.json (on the Mac,
  *   ~/Library/Application Support/com.llmwiki.app/app-state.json);
  * - GLM_ROUTE, a route file holding provider, apiMode, baseUrl, model,
- *   maxContextSize and apiKey (on the Dell, ~/.config/llm-wiki/glm-route.json),
- *   which stands for an app-state whose only route is that one.
- * Skips when the ingest route is not a custom Anthropic-messages one. api.z.ai is slow to
- * connect over IPv6 from the Mac (#111); run it with
+ *   maxContextSize and apiKey (on the Dell,
+ *   ~/.config/llm-wiki/glm-route.json), which stands for an app-state whose
+ *   only route is that one.
+ * Skips when the ingest route is not a custom Anthropic-messages one.
+ * api.z.ai is slow to connect over IPv6 from the Mac (#111); run it with
  * NODE_OPTIONS="--dns-result-order=ipv4first
  * --network-family-autoselection-attempt-timeout=5000".
  */
