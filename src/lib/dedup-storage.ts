@@ -11,9 +11,10 @@
  * lexical-graph.json (when added) — same `.llm-wiki/` directory,
  * same JSON-on-disk pattern.
  */
-import { readFile, writeFile, fileExists } from "@/commands/fs"
+import { readFile, writeFile, fileExists, listDirectory } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
-import type { DuplicateGroup } from "@/lib/dedup"
+import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
+import type { FileNode } from "@/types/wiki"
 
 const FILE_NAME = ".llm-wiki/dedup-not-duplicates.json"
 /** Groups the scheduled scan found but did not merge, kept for the
@@ -102,10 +103,19 @@ export async function savePendingDuplicateGroups(
   )
 }
 
+/** Replace the saved groups, for a scan that checked every page (#120). */
+export async function replacePendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  await editPendingGroups(() => savePendingDuplicateGroups(projectPath, groups))
+}
+
 /**
  * Add groups to the saved ones, for a scan that did not check every page
  * (#117). A saved group with the same pages as an added one is replaced by
- * it.
+ * it, and one naming a page no longer on disk is dropped (#120): a merge
+ * of it would be refused.
  */
 export async function addPendingDuplicateGroups(
   projectPath: string,
@@ -114,8 +124,11 @@ export async function addPendingDuplicateGroups(
   const added = new Set(groups.map((g) => canonicalKey(g.slugs)))
   await editPendingGroups(async () => {
     const saved = await loadPendingDuplicateGroups(projectPath)
+    const pages = await listWikiPages(projectPath)
     await savePendingDuplicateGroups(projectPath, [
-      ...saved.filter((g) => !added.has(canonicalKey(g.slugs))),
+      ...saved.filter((g) =>
+        !added.has(canonicalKey(g.slugs))
+        && g.slugs.every((slug) => pagesNamed(pages, slug).length > 0)),
       ...groups,
     ])
   })
@@ -143,6 +156,23 @@ function editPendingGroups(edit: () => Promise<void>): Promise<void> {
   const run = pendingEdits.then(edit)
   pendingEdits = run.catch(() => undefined)
   return run
+}
+
+/** The wiki's pages on disk: `file` as listed, `path` from the project
+ *  root, as `pagesNamed` finds them. */
+export async function listWikiPages(
+  projectPath: string,
+): Promise<{ file: string; path: string }[]> {
+  const pp = normalizePath(projectPath)
+  return [...walkFiles(await listDirectory(`${pp}/wiki`))]
+    .map((node) => ({ file: node.path, path: normalizePath(node.path).slice(pp.length + 1) }))
+}
+
+function* walkFiles(nodes: FileNode[]): Generator<FileNode> {
+  for (const node of nodes) {
+    if (node.is_dir) yield* walkFiles(node.children ?? [])
+    else yield node
+  }
 }
 
 function canonicalKey(slugs: string[]): string {

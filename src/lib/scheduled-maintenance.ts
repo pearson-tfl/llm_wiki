@@ -4,7 +4,7 @@
  * duplicate scan, then any hub-rebuild request, with no click. Started and stopped the same way as
  * scheduled import, for the open project only.
  */
-import { fileExists, listDirectory, readFile, writeFile } from "@/commands/fs"
+import { fileExists, readFile, writeFile } from "@/commands/fs"
 import { normalizePath } from "@/lib/path-utils"
 import {
   loadScheduledMaintenanceConfig,
@@ -21,8 +21,9 @@ import { enqueueMerge, getQueue, waitForTask, type DedupTaskOutcome } from "@/li
 import {
   addPendingDuplicateGroups,
   holdsNotDuplicate,
+  listWikiPages,
   readNotDuplicates,
-  savePendingDuplicateGroups,
+  replacePendingDuplicateGroups,
 } from "@/lib/dedup-storage"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { runHubRebuildRequest } from "@/lib/hub-rebuild"
@@ -30,7 +31,7 @@ import { runEmbeddingBackfill, type VectorCoverage } from "@/lib/embedding-fresh
 import { parseSources } from "@/lib/sources-merge"
 import { pagesNamed, type DuplicateGroup } from "@/lib/dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
-import type { FileNode, WikiProject } from "@/types/wiki"
+import type { WikiProject } from "@/types/wiki"
 
 const RUN_RECORD_PATH = ".llm-wiki/maintenance-runs.jsonl"
 
@@ -171,11 +172,12 @@ export async function runMaintenanceTick(
       // Every group not queued for a merge, withheld ones included, is kept
       // for the Maintenance screen. A scan the model did not do (#117), or
       // whose batches did not all answer (#118), did not check every page,
-      // so the groups an earlier run saved stay.
+      // so the groups an earlier run saved stay, less any naming a page no
+      // longer on disk (#120).
       const pending = groups.filter((g) => !enqueued.includes(g))
       await (record.duplicateScanNotDone || record.failedDetectorBatches
         ? addPendingDuplicateGroups(pp, pending)
-        : savePendingDuplicateGroups(pp, pending))
+        : replacePendingDuplicateGroups(pp, pending))
       record.mergesEnqueued = outcomes.length
       const settled = await Promise.all(outcomes)
       record.mergesDone = settled.filter((o) => o === "done").length
@@ -286,8 +288,7 @@ function appendRunRecord(
  * more than one page, which the merge would refuse (#114).
  */
 async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<string | null> {
-  const pages = [...walkFiles(await listDirectory(`${pp}/wiki`))]
-    .map((file) => ({ file: file.path, path: normalizePath(file.path).slice(pp.length + 1) }))
+  const pages = await listWikiPages(pp)
   const found = group.slugs.map((slug) => pagesNamed(pages, slug))
   if (found.some((named) => named.length > 1)) return null
   const ranked = await Promise.all(
@@ -307,11 +308,4 @@ async function chooseCanonicalSlug(pp: string, group: DuplicateGroup): Promise<s
     b.sources - a.sources || a.created - b.created || a.position - b.position,
   )
   return ranked[0].slug
-}
-
-function* walkFiles(nodes: FileNode[]): Generator<FileNode> {
-  for (const node of nodes) {
-    if (node.is_dir) yield* walkFiles(node.children ?? [])
-    else yield node
-  }
 }

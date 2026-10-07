@@ -144,6 +144,13 @@ function group(slugs: string[], confidence: DuplicateGroup["confidence"]): Dupli
   return { slugs, confidence, reason: "same topic" }
 }
 
+/** Pages by page id, as `concepts/seat`, with front matter. */
+async function writePages(...pageIds: string[]) {
+  for (const id of pageIds) {
+    await writeFileRaw(`${tmp.path}/wiki/${id}.md`, page(id, "2026-09-01", ["a.md"]))
+  }
+}
+
 async function runRecords(): Promise<Record<string, unknown>[]> {
   const raw = await readFileRaw(`${tmp.path}/.llm-wiki/maintenance-runs.jsonl`)
   return raw.trim().split("\n").map((line) => JSON.parse(line))
@@ -486,6 +493,7 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     ["no-candidate-pairs"],
   ] as const)("keeps the groups an earlier run saved when the scan is not done, %s, adding its same-slug groups (#117)", async (reason) => {
     await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack", "concepts/seat", "entities/seat")
     const modelFound = group(["pstack", "p-stack"], "medium")
     const sameSlug = group(["concepts/seat", "entities/seat"], "medium")
     await savePendingDuplicateGroups(tmp.path, [modelFound, sameSlug])
@@ -506,6 +514,7 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
 
   it("keeps the groups an earlier run saved when every detector call fails (#118)", async () => {
     await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
     const modelFound = group(["pstack", "p-stack"], "medium")
     await savePendingDuplicateGroups(tmp.path, [modelFound])
     const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }
@@ -519,6 +528,7 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
 
   it("adds the groups a scan with failed batches found to the saved ones (#118)", async () => {
     await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
     const modelFound = group(["pstack", "p-stack"], "medium")
     await savePendingDuplicateGroups(tmp.path, [modelFound])
     const found = group(["seat", "lane"], "low")
@@ -528,6 +538,23 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     await runMaintenanceTick(project, { now: () => T0 })
 
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([modelFound, found])
+  })
+
+  it.each<[string, Partial<DuplicateScanResult>]>([
+    ["not done", { notDone: { reason: "embedding-coverage-low", pages: 251 } }],
+    ["with a failed batch", { failedBatches: [{ pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }] }],
+  ])("drops a saved group naming a page no longer on disk after a scan %s (#120)", async (_, scan) => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack", "concepts/seat")
+    const live = group(["pstack", "p-stack"], "medium")
+    // `lane` was merged into `seat` since the run that saved it.
+    const dead = group(["seat", "lane"], "low")
+    await savePendingDuplicateGroups(tmp.path, [live, dead])
+    mockDetect.mockResolvedValue({ groups: [], failedBatches: [], ...scan })
+
+    await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live])
   })
 
   it("replaces the groups an earlier run saved when the scan is done", async () => {
