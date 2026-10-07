@@ -5,7 +5,9 @@
  * loaded from app-state field by field – with the real embedding endpoint.
  * The Tauri layer is replaced: files through node:fs, embeddings by a
  * direct call to the endpoint. HTTP model calls go out through node's
- * fetch, as tauri-fetch does outside the webview.
+ * fetch, as tauri-fetch does outside the webview; run it with
+ * NODE_OPTIONS=--dns-result-order=ipv4first where node's fetch times out
+ * on a host's IPv6 address (api.z.ai from the Mac, #111).
  *
  * Gated behind RUN_LLM_TESTS=1, APP_STATE (the app-state.json to read; it
  * is only read, and its key never leaves this process) and
@@ -79,6 +81,7 @@ vi.mock("@/lib/llm-client", async (importOriginal) => {
         }, signal, overrides)
       } finally {
         call.seconds = Math.round((Date.now() - started) / 1000)
+        process.stderr.write(`detector call ${measured.calls.length}: ${JSON.stringify(call)}\n`)
       }
     },
   }
