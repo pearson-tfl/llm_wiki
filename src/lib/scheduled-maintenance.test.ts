@@ -557,6 +557,24 @@ describe("scheduled maintenance tick – groups it does not merge", () => {
     expect(await loadPendingDuplicateGroups(tmp.path)).toEqual([live])
   })
 
+  it("records the merges it queued when saving the groups it kept fails (#126)", async () => {
+    await setConfig(null)
+    await writePages("concepts/pstack", "concepts/p-stack")
+    // A folder where the saved-groups file goes, so its write fails.
+    await writeFileRaw(`${tmp.path}/.llm-wiki/dedup-pending-groups.json/stray`, "")
+    const failed = { pages: 80, reason: "Duplicate detector call failed: HTTP 429: Too Many Requests" }
+    mockDetect.mockResolvedValue({
+      groups: [group(["pstack", "p-stack"], "high"), group(["seat", "lane"], "low")],
+      failedBatches: [failed],
+    })
+    mockMerge.mockResolvedValue({ canonicalPath: "", canonicalContent: "", rewrites: [], pagesToDelete: [], backup: [] })
+
+    const record = await runMaintenanceTick(project, { now: () => T0 })
+
+    expect(record?.error).toMatch(/dedup-pending-groups\.json/)
+    expect(record).toMatchObject({ mergesEnqueued: 1, mergesDone: 1, mergesFailed: 0 })
+  })
+
   it("replaces the groups an earlier run saved when the scan is done", async () => {
     await setConfig(null)
     await savePendingDuplicateGroups(tmp.path, [group(["pstack", "p-stack"], "medium")])
