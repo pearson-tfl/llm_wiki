@@ -53,6 +53,7 @@ const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
 const DEDUP_MERGE_MAX_TOKENS = 16_384
 import {
   detectDuplicateGroups,
+  DetectorCallFailedError,
   DetectorReplyUnreadableError,
   extractEntitySummary,
   mergeDuplicateGroup,
@@ -127,7 +128,12 @@ export function buildDedupLlmCall(
     if (options.completeReplyOnly && signal?.aborted) {
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
-    if (streamError) throw streamError
+    if (streamError) {
+      // A detection call that fails is its batch's failure, not the scan's
+      // (#118); a cancelled one still cancels the scan.
+      if (options.completeReplyOnly || signal?.aborted) throw streamError
+      throw new DetectorCallFailedError((streamError as Error).message)
+    }
     if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
       const reason = "the model's reply was cut off at its output limit"
@@ -264,16 +270,11 @@ async function detectWithModel(
   const embeddingEndpoint =
     typeof embeddingConfig?.endpoint === "string" ? embeddingConfig.endpoint.trim() : ""
   if (embeddingConfig?.enabled && embeddingEndpoint) {
+    // Only the prefilter's own failure falls back to the full scan: a
+    // detector call that fails is its batch's failure (#118).
+    let pairs: CandidatePair[] | undefined
     try {
-      return await detectDuplicateGroupsWithEmbeddingPrefilter(
-        summaries,
-        embeddingConfig,
-        llm,
-        {
-          signal: options.signal,
-          notDuplicates: notDup,
-        },
-      )
+      pairs = await embeddingCandidatePairs(summaries, embeddingConfig, options.signal)
     } catch (err) {
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
@@ -281,6 +282,12 @@ async function detectWithModel(
         return notDoneResult("embedding-coverage-low", summaries.length)
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
+    }
+    if (pairs) {
+      return detectAmongCandidatePairs(summaries, pairs, llm, {
+        signal: options.signal,
+        notDuplicates: notDup,
+      })
     }
   }
 
@@ -314,8 +321,9 @@ async function detectDuplicateGroupsInBoundedBatches(
   return detectInBatches(batches, llm, options)
 }
 
-/** One detector call per batch. A reply that cannot be read is reported as
- *  a failed batch, not counted as no duplicates (#108). */
+/** One detector call per batch. A reply that cannot be read (#108), or a
+ *  call that fails (#118), is reported as a failed batch, not counted as no
+ *  duplicates, and the other batches' groups stand. */
 async function detectInBatches(
   batches: EntitySummary[][],
   llm: DedupLlmCall,
@@ -328,26 +336,36 @@ async function detectInBatches(
     try {
       groups.push(...await detectDuplicateGroups(batch, llm, options))
     } catch (err) {
-      if (!(err instanceof DetectorReplyUnreadableError)) throw err
+      if (err instanceof DetectorCallFailedError) {
+        console.warn("[dedup] detector call failed; its batch is reported as failed:", err)
+      } else if (!(err instanceof DetectorReplyUnreadableError)) {
+        throw err
+      }
       failedBatches.push({ pages: batch.length, reason: err.message })
     }
   }
   return { groups: uniqueDuplicateGroups(groups), failedBatches }
 }
 
-async function detectDuplicateGroupsWithEmbeddingPrefilter(
+function embeddingCandidatePairs(
   summaries: EntitySummary[],
   embeddingConfig: EmbeddingConfig,
-  llm: DedupLlmCall,
-  options: { signal?: AbortSignal; notDuplicates?: string[][] },
-): Promise<DuplicateScanResult> {
-  const pages = summaries.map(summaryToEmbeddingPage)
-  const pairs = await candidatePairs(pages, embeddingConfig, {
+  signal: AbortSignal | undefined,
+): Promise<CandidatePair[]> {
+  return candidatePairs(summaries.map(summaryToEmbeddingPage), embeddingConfig, {
     topK: DEDUP_PREFILTER_TOP_K,
     threshold: DEDUP_PREFILTER_THRESHOLD,
     maxPages: DEDUP_PREFILTER_MAX_PAGES,
-    signal: options.signal,
+    signal,
   })
+}
+
+async function detectAmongCandidatePairs(
+  summaries: EntitySummary[],
+  pairs: CandidatePair[],
+  llm: DedupLlmCall,
+  options: { signal?: AbortSignal; notDuplicates?: string[][] },
+): Promise<DuplicateScanResult> {
   if (pairs.length === 0) {
     // Preserve recall for small/medium wikis: a weak or non-multilingual
     // embedder can miss exactly the cross-language aliases the LLM detector

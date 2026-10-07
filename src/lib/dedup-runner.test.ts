@@ -52,7 +52,7 @@ vi.mock("@/lib/dedup_embedding", () => ({
 }))
 
 import { buildDedupLlmCall, runDuplicateDetection } from "./dedup-runner"
-import { DetectorReplyUnreadableError } from "./dedup"
+import { DetectorCallFailedError, DetectorReplyUnreadableError } from "./dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 
 const cfg: LlmConfig = {
@@ -203,6 +203,24 @@ describe("buildDedupLlmCall", () => {
     )
   })
 
+  it("names a detection call that fails as a model-call failure (#118)", async () => {
+    mockStreamChat.mockRejectedValue(new Error("connect ECONNREFUSED"))
+
+    await expect(buildDedupLlmCall(cfg, 8192)("s", "u", undefined)).rejects.toThrow(
+      new DetectorCallFailedError("connect ECONNREFUSED"),
+    )
+  })
+
+  it("leaves a merge call's failure as the client reported it (#118)", async () => {
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 503: overloaded"))
+    })
+
+    const call = buildDedupLlmCall(cfg, 16384, { completeReplyOnly: true })("s", "u", undefined)
+    await expect(call).rejects.toThrow("HTTP 503: overloaded")
+    await expect(call).rejects.not.toThrow(DetectorCallFailedError)
+  })
+
   it("refuses a detection reply the client reports cut off at the cap (#108)", async () => {
     mockStreamChat.mockImplementation(async (_c, _m, cb) => {
       cb.onToken('{"groups": []}')
@@ -331,6 +349,60 @@ describe("runDuplicateDetection embedding prefilter", () => {
       { pages: calls[1].length, reason: expect.stringMatching(/could not be read/) },
       { pages: calls[2].length, reason: expect.stringMatching(/cut off/) },
     ])
+  })
+
+  it("reports a detector call that errors as a failed batch, never restarting unprefiltered (#118)", async () => {
+    setupLargeProject(300)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    const rel = (i: number) => `wiki/entities/p${i}.md`
+    const cluster = (from: number) => Array.from({ length: 80 }, (_, i) => rel(from + i))
+    mockCandidatePairs.mockResolvedValue([[rel(0), rel(1)], [rel(80), rel(81)], [rel(160), rel(161)]])
+    mockClusterByPairs.mockReturnValue([cluster(0), cluster(80), cluster(160)])
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, messages, cb) => {
+      call += 1
+      if (call === 2) {
+        cb.onError(new Error("HTTP 429: rate limited"))
+        return
+      }
+      const slugs = [...(messages[1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1])
+      cb.onToken(JSON.stringify({
+        groups: [{ slugs: slugs.slice(0, 2), reason: "same topic", confidence: "high" }],
+      }))
+      cb.onDone()
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(detectorCallSlugs()).toHaveLength(3)
+    expect(result.groups.map((g) => g.slugs)).toEqual([["p0", "p1"], ["p160", "p161"]])
+    expect(result.failedBatches).toEqual([
+      { pages: 80, reason: "Duplicate detector call failed: HTTP 429: rate limited" },
+    ])
+    expect(result.notDone).toBeUndefined()
+    const logged = warn.mock.calls.map((args) => String(args[0]))
+    expect(logged.some((line) => /embedding prefilter/.test(line))).toBe(false)
+    expect(logged.some((line) => /detector call failed/.test(line))).toBe(true)
+    warn.mockRestore()
+  })
+
+  it("propagates cancellation from a detector call instead of recording a failed batch (#118)", async () => {
+    setupThreePageProject()
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([[FOO_REL, BAR_REL]])
+    mockClusterByPairs.mockReturnValue([[FOO_REL, BAR_REL]])
+    const controller = new AbortController()
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      controller.abort()
+      cb.onError(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
+    })
+
+    await expect(runDuplicateDetection("/project", cfg, { signal: controller.signal }))
+      .rejects.toThrow(/aborted/)
+    expect(mockStreamChat).toHaveBeenCalledOnce()
   })
 
   it("falls back to the full LLM scan when the embedding prefilter fails", async () => {

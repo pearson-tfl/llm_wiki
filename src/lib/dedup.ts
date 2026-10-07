@@ -121,6 +121,17 @@ export class DetectorReplyUnreadableError extends Error {
 }
 
 /**
+ * The detector's model call itself failed – a network error, an HTTP error
+ * such as a 429 or a 5xx – so its batch went unchecked (#118).
+ */
+export class DetectorCallFailedError extends Error {
+  constructor(reason: string) {
+    super(`Duplicate detector call failed: ${reason}`)
+    this.name = "DetectorCallFailedError"
+  }
+}
+
+/**
  * Generic two-prompt LLM call. Both detector and merger use it.
  * Production wraps `streamChat`; tests use mocks.
  */
