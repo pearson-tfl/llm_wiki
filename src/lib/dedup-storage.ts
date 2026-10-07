@@ -102,6 +102,23 @@ export async function savePendingDuplicateGroups(
   )
 }
 
+/**
+ * Add groups to the saved ones, for a scan that did not check every page
+ * (#117). A saved group with the same pages as an added one is replaced by
+ * it.
+ */
+export async function addPendingDuplicateGroups(
+  projectPath: string,
+  groups: DuplicateGroup[],
+): Promise<void> {
+  const added = new Set(groups.map((g) => canonicalKey(g.slugs)))
+  const saved = await loadPendingDuplicateGroups(projectPath)
+  await savePendingDuplicateGroups(projectPath, [
+    ...saved.filter((g) => !added.has(canonicalKey(g.slugs))),
+    ...groups,
+  ])
+}
+
 /** Drop a group once the Maintenance screen has acted on it. */
 export async function removePendingDuplicateGroup(
   projectPath: string,
