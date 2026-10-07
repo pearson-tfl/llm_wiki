@@ -26,7 +26,7 @@ import {
   type ChatMessage,
   type ContentBlock,
 } from "./llm-providers"
-import type { LlmConfig } from "@/stores/wiki-store"
+import type { LlmConfig, ReasoningConfig } from "@/stores/wiki-store"
 
 const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABXvMqOgAAAABJRU5ErkJggg=="
@@ -773,6 +773,42 @@ describe("reasoning controls", () => {
 
     expect(body.temperature).toBeUndefined()
     expect(body.max_tokens).toBe(4096)
+  })
+
+  it("turns thinking off on a custom Anthropic-messages route only for reasoning off (#134)", () => {
+    const cfg = mkConfig({
+      provider: "custom",
+      model: "glm-5.3-flash",
+      customEndpoint: "https://api.z.ai/api/anthropic",
+      apiMode: "anthropic_messages",
+    })
+    const bodyFor = (reasoning: ReasoningConfig) =>
+      getProviderConfig(cfg).buildBody(
+        [{ role: "user", content: "hi" }],
+        { reasoning, temperature: 0.1, max_tokens: 8192 },
+      ) as Record<string, unknown>
+
+    const off = bodyFor({ mode: "off" })
+    expect(off.thinking).toEqual({ type: "disabled" })
+    expect(off.temperature).toBe(0.1)
+    expect(off.max_tokens).toBe(8192)
+
+    // Auto, and every level the route does not offer, send no thinking field.
+    const levels: ReasoningConfig[] = [
+      { mode: "auto" },
+      { mode: "low" },
+      { mode: "medium" },
+      { mode: "high" },
+      { mode: "max" },
+      { mode: "custom", budgetTokens: 2048 },
+    ]
+    for (const reasoning of levels) {
+      const body = bodyFor(reasoning)
+      expect(body.thinking, reasoning.mode).toBeUndefined()
+      expect(body.output_config, reasoning.mode).toBeUndefined()
+      expect(body.temperature, reasoning.mode).toBe(0.1)
+      expect(body.max_tokens, reasoning.mode).toBe(8192)
+    }
   })
 
   it("maps Anthropic reasoning budget to extended thinking and removes sampling knobs", () => {

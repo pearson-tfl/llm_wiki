@@ -624,6 +624,13 @@ function buildAnthropicBodyWithReasoning(
 ): Record<string, unknown> {
   const body = buildAnthropicBody(messages, overrides, streaming)
   const reasoning = effectiveReasoning(config, overrides)
+  if (reasoning.mode === "off" && config.provider === "custom") {
+    // A model behind a custom route, such as GLM on z.ai, can think unless
+    // told not to (pearson-tfl/llm_wiki#134). An Anthropic model does not
+    // think unless asked, so the anthropic provider's body stays as it was.
+    body.thinking = { type: "disabled" }
+    return body
+  }
   if (reasoning.mode === "auto" || reasoning.mode === "off") return body
 
   if (isAdaptiveAnthropicModel(config)) {
