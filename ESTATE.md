@@ -387,6 +387,23 @@ Keep this list current. Merge conflicts can only come from these files.
   of a vault copy, with real embeddings and an endpoint that answers 429
   from the second call on, in
   `src/lib/dedup-scan-model-error.real-llm.test.ts`.
+- `src/lib/reasoning-capabilities.ts`, `src/lib/llm-providers.ts` – reasoning
+  "off" turns thinking off on a custom route in Anthropic-messages mode
+  (pearson-tfl/llm_wiki#134), the scheduled run's z.ai GLM route. Upstream
+  offers such a route Auto only, so ingest's "off" became "auto" and the
+  body carried no `thinking` field; GLM then thought by default, its
+  thinking spent the reply's `max_tokens`, and a quarter of a duplicate
+  scan's detector calls were cut off (#111). The route now offers Auto and
+  Off, and Off sends `thinking: {type: "disabled"}`. Auto, and every other
+  level, which still falls back to Auto, send no field, as before. Every
+  custom Anthropic-messages endpoint gets the field on ingest's structured
+  calls, ingest's default being Off; one that rejects it can be set back to
+  Auto in Settings. The `anthropic` and `minimax` providers are unchanged.
+  Upstream edits to custom-route reasoning need re-checking against this.
+  Tests in `src/lib/reasoning-capabilities.test.ts` and
+  `src/lib/llm-providers.test.ts`; a live call on the route, read from
+  app-state or a route file, with Off and with Auto as the control, in
+  `src/lib/glm-thinking-off.real-llm.test.ts`.
 - `src/lib/scheduled-maintenance.ts`, `src/lib/dedup-storage.ts` – a
   scheduled run whose duplicate scan is not done keeps the groups an
   earlier run saved for the Maintenance screen (pearson-tfl/llm_wiki#117).
