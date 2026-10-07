@@ -455,3 +455,72 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 })
+
+describe("runDuplicateDetection – pages sharing a slug (#109)", () => {
+  const TWIN_GROUP = {
+    slugs: ["concepts/agent-skills", "entities/agent-skills"],
+    reason: 'Pages share the slug "agent-skills": concepts/agent-skills, entities/agent-skills',
+    confidence: "high",
+  }
+
+  /** The vault's pairs: one concept and one entity page per slug, beside `extra` other entity pages. */
+  function setupTwinProject(extra: string[]) {
+    const file = (folder: string, slug: string) =>
+      ({ name: `${slug}.md`, path: `/project/wiki/${folder}/${slug}.md`, is_dir: false })
+    mockListDirectory.mockResolvedValue([
+      {
+        name: "wiki",
+        path: "/project/wiki",
+        is_dir: true,
+        children: [
+          { name: "concepts", path: "/project/wiki/concepts", is_dir: true, children: [file("concepts", "agent-skills")] },
+          {
+            name: "entities",
+            path: "/project/wiki/entities",
+            is_dir: true,
+            children: [file("entities", "agent-skills"), ...extra.map((slug) => file("entities", slug))],
+          },
+        ],
+      },
+    ])
+    mockReadFile.mockImplementation(async (path: string) => {
+      const type = path.includes("/concepts/") ? "concept" : "entity"
+      const slug = path.split("/").pop()?.replace(/\.md$/, "") ?? "unknown"
+      return `---\ntype: ${type}\ntitle: ${slug}\ntags: []\n---\n${slug} body`
+    })
+  }
+
+  it("reports them as one group of their page ids when the model groups nothing", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    mockDetectorGroup([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result).toEqual({ groups: [TWIN_GROUP], failedBatches: [] })
+  })
+
+  it("finds them from file names alone: a large wiki whose prefilter finds nothing calls no model", async () => {
+    setupTwinProject(Array.from({ length: 250 }, (_, i) => `p${i}`))
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    mockCandidatePairs.mockResolvedValue([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(result.groups).toEqual([TWIN_GROUP])
+  })
+
+  it("leaves out a pair the user marked not duplicates", async () => {
+    setupTwinProject(["foo"])
+    mockLoadNotDuplicates.mockResolvedValue([["concepts/agent-skills", "entities/agent-skills"]])
+    setupEmbeddingConfig(false)
+    mockDetectorGroup([])
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    expect(result.groups).toEqual([])
+  })
+})

@@ -57,7 +57,9 @@ export interface EntitySummary {
 }
 
 export interface DuplicateGroup {
-  /** Two or more slugs from the input list. */
+  /** Two or more pages from the input list, each named by its slug, or,
+   *  where pages share a slug, by its page id: its path under `wiki/`
+   *  without `.md`, e.g. `concepts/agent-skills` (#109). */
   slugs: string[]
   /** Why the model believes these are duplicates. Short prose. */
   reason: string
@@ -155,6 +157,36 @@ export function extractEntitySummary(
     description: description ? truncate(description, 200) : undefined,
     tags,
   }
+}
+
+/**
+ * Group the pages that share a slug – a concept and an entity page of one
+ * name – from their paths alone, with no model call (#109). The detector
+ * names pages by slug, so it cannot tell such pages apart; each is named
+ * here by its page id, its path under `wiki/` without `.md`. Groups in
+ * `notDuplicates` are left out, as the detector's are.
+ */
+export function sameSlugGroups(
+  summaries: EntitySummary[],
+  notDuplicates: string[][] = [],
+): DuplicateGroup[] {
+  const pageIdsBySlug = new Map<string, string[]>()
+  for (const s of summaries) {
+    const pageId = s.path.replace(/^wiki\//, "").replace(/\.md$/, "")
+    pageIdsBySlug.set(s.slug, [...(pageIdsBySlug.get(s.slug) ?? []), pageId])
+  }
+  const notDupSet = new Set(notDuplicates.map(normalizeGroupKey))
+  const groups: DuplicateGroup[] = []
+  for (const [slug, found] of pageIdsBySlug) {
+    const pageIds = [...found].sort()
+    if (pageIds.length < 2 || notDupSet.has(normalizeGroupKey(pageIds))) continue
+    groups.push({
+      slugs: pageIds,
+      reason: `Pages share the slug "${slug}": ${pageIds.join(", ")}`,
+      confidence: "high",
+    })
+  }
+  return groups
 }
 
 function slugFromPath(path: string): string {
@@ -288,8 +320,9 @@ export function parseDetectorResponse(raw: string): DuplicateGroup[] {
   for (const g of groupsRaw) {
     if (!g || typeof g !== "object") continue
     const obj = g as Record<string, unknown>
+    // A slug named twice is one page, not two (#109).
     const slugs = Array.isArray(obj.slugs)
-      ? obj.slugs.filter((s): s is string => typeof s === "string")
+      ? [...new Set(obj.slugs.filter((s): s is string => typeof s === "string"))]
       : []
     if (slugs.length < 2) continue
     const reason = typeof obj.reason === "string" ? obj.reason : ""

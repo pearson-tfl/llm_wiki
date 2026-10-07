@@ -58,6 +58,7 @@ import {
   mergeDuplicateGroup,
   MergeReplyRejectedError,
   rewriteIndexMd,
+  sameSlugGroups,
   type DedupLlmCall,
   type DuplicateGroup,
   type EntitySummary,
@@ -230,6 +231,17 @@ export async function runDuplicateDetection(
   const summaries = await loadAllEntitySummaries(projectPath)
   if (summaries.length < 2) return noGroups()
   const notDup = await loadNotDuplicates(projectPath)
+  const detected = await detectWithModel(summaries, notDup, llmConfig, options)
+  return { ...detected, groups: [...sameSlugGroups(summaries, notDup), ...detected.groups] }
+}
+
+/** The model's part of the scan: the embedding prefilter, then the detector. */
+async function detectWithModel(
+  summaries: EntitySummary[],
+  notDup: string[][],
+  llmConfig: LlmConfig,
+  options: { signal?: AbortSignal },
+): Promise<DuplicateScanResult> {
   const llm = buildDedupLlmCall(llmConfig, DEDUP_DETECTION_MAX_TOKENS)
   const embeddingConfig = await loadEmbeddingConfig()
 

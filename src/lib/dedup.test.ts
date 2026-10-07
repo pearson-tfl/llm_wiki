@@ -99,6 +99,19 @@ describe("parseDetectorResponse", () => {
     expect(parseDetectorResponse(raw)).toEqual([])
   })
 
+  // The #108 live scan's reply named one slug twice (#109, PM note N2).
+  it("removes a repeated slug, dropping a group left with one page", () => {
+    const raw = JSON.stringify({
+      groups: [
+        { slugs: ["openclaw-code-mode", "openclaw-code-mode"], reason: "same page twice", confidence: "high" },
+        { slugs: ["agent-skills", "agentskills-spec", "agent-skills"], reason: "same standard", confidence: "medium" },
+      ],
+    })
+    expect(parseDetectorResponse(raw)).toEqual([
+      { slugs: ["agent-skills", "agentskills-spec"], reason: "same standard", confidence: "medium" },
+    ])
+  })
+
   it("defaults invalid confidence values to 'low'", () => {
     const raw = '{"groups": [{"slugs": ["a","b"], "reason": "", "confidence": "extremely-high"}]}'
     expect(parseDetectorResponse(raw)[0].confidence).toBe("low")
