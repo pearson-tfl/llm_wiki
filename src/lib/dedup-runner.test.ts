@@ -264,6 +264,17 @@ function detectorCallSlugs(): string[][] {
   )
 }
 
+/** `count` prefilter clusters of 80 pages each, one detector batch apiece. */
+function setupPrefilteredClusters(count: number) {
+  setupLargeProject(count * 80)
+  mockLoadNotDuplicates.mockResolvedValue([])
+  setupEmbeddingConfig()
+  const rel = (i: number) => `wiki/entities/p${i}.md`
+  const starts = Array.from({ length: count }, (_, i) => i * 80)
+  mockCandidatePairs.mockResolvedValue(starts.map((from) => [rel(from), rel(from + 1)]))
+  mockClusterByPairs.mockReturnValue(starts.map((from) => Array.from({ length: 80 }, (_, i) => rel(from + i))))
+}
+
 describe("runDuplicateDetection embedding prefilter", () => {
   it("sends only embedding candidate summaries to the LLM detector", async () => {
     setupThreePageProject()
@@ -391,13 +402,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
   })
 
   it("stops calling after two detector calls in a row fail, recording the rest as failed (#124)", async () => {
-    setupLargeProject(400)
-    mockLoadNotDuplicates.mockResolvedValue([])
-    setupEmbeddingConfig()
-    const rel = (i: number) => `wiki/entities/p${i}.md`
-    const cluster = (from: number) => Array.from({ length: 80 }, (_, i) => rel(from + i))
-    mockCandidatePairs.mockResolvedValue([0, 80, 160, 240, 320].map((from) => [rel(from), rel(from + 1)]))
-    mockClusterByPairs.mockReturnValue([0, 80, 160, 240, 320].map(cluster))
+    setupPrefilteredClusters(5)
     let call = 0
     mockStreamChat.mockImplementation(async (_c, messages, cb) => {
       call += 1
@@ -431,13 +436,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
   })
 
   it("counts only consecutive call failures: an answered call in between resets the count (#124)", async () => {
-    setupLargeProject(480)
-    mockLoadNotDuplicates.mockResolvedValue([])
-    setupEmbeddingConfig()
-    const rel = (i: number) => `wiki/entities/p${i}.md`
-    const cluster = (from: number) => Array.from({ length: 80 }, (_, i) => rel(from + i))
-    mockCandidatePairs.mockResolvedValue([0, 80, 160, 240, 320, 400].map((from) => [rel(from), rel(from + 1)]))
-    mockClusterByPairs.mockReturnValue([0, 80, 160, 240, 320, 400].map(cluster))
+    setupPrefilteredClusters(6)
     let call = 0
     mockStreamChat.mockImplementation(async (_c, _m, cb) => {
       call += 1
@@ -462,14 +461,31 @@ describe("runDuplicateDetection embedding prefilter", () => {
     ])
   })
 
-  it("still cancels when the signal aborts after the second call in a row fails (#124)", async () => {
+  it("stops the unprefiltered scan too after two detector calls in a row fail (#124)", async () => {
     setupLargeProject(400)
     mockLoadNotDuplicates.mockResolvedValue([])
-    setupEmbeddingConfig()
-    const rel = (i: number) => `wiki/entities/p${i}.md`
-    const cluster = (from: number) => Array.from({ length: 80 }, (_, i) => rel(from + i))
-    mockCandidatePairs.mockResolvedValue([0, 80, 160, 240, 320].map((from) => [rel(from), rel(from + 1)]))
-    mockClusterByPairs.mockReturnValue([0, 80, 160, 240, 320].map(cluster))
+    setupEmbeddingConfig(false)
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onError(new Error("HTTP 429: rate limited"))
+    })
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await runDuplicateDetection("/project", cfg).finally(() => warn.mockRestore())
+
+    expect(mockStreamChat).toHaveBeenCalledTimes(2)
+    expect(result.failedBatches.slice(0, 2).map((b) => b.reason)).toEqual([
+      "Duplicate detector call failed: HTTP 429: rate limited",
+      "Duplicate detector call failed: HTTP 429: rate limited",
+    ])
+    const notChecked = result.failedBatches.slice(2)
+    expect(notChecked.length).toBeGreaterThan(0)
+    for (const batch of notChecked) {
+      expect(batch.reason).toBe("Not checked: the scan stopped after 2 detector calls in a row failed")
+    }
+  })
+
+  it("still cancels when the signal aborts after the second call in a row fails (#124)", async () => {
+    setupPrefilteredClusters(5)
     const controller = new AbortController()
     mockStreamChat.mockImplementation(async (_c, _m, cb) => {
       cb.onError(new Error("HTTP 429: rate limited"))
