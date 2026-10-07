@@ -57,6 +57,7 @@ import {
   mergeDuplicateGroup,
   MergeReplyRejectedError,
   pageIdFromPath,
+  pagesNamed,
   rewriteIndexMd,
   sameSlugGroups,
   type DedupLlmCall,
@@ -604,20 +605,14 @@ export async function executeMerge(
 }
 
 /**
- * The page a group names: by its page id (`concepts/foo`) where pages share
- * a slug, else by its slug among the scanned entity and concept pages. A
- * slug that names more than one page is refused, not resolved to one of
- * them (#109).
+ * The page a group names, found by `pagesNamed`. A slug that names more
+ * than one page is refused, not resolved to one of them (#109).
  */
 function findGroupPage(
   allPages: { path: string; content: string }[],
   slug: string,
 ): { path: string; content: string } {
-  const found = slug.includes("/")
-    ? allPages.filter((p) => p.path === `wiki/${slug}.md`)
-    : allPages.filter((p) =>
-      (p.path.startsWith("wiki/entities/") || p.path.startsWith("wiki/concepts/"))
-      && p.path.endsWith(`/${slug}.md`))
+  const found = pagesNamed(allPages, slug)
   if (found.length === 0) {
     throw new Error(
       `Slug "${slug}" not found on disk — was the page deleted between detection and merge?`,
