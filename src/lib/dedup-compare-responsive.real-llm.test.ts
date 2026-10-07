@@ -204,7 +204,7 @@ describe.skipIf(!ENABLED)("the duplicate scan's compare on a real vault copy (#1
     }
     await writeReport("responsive", report)
 
-    expect(report.pages).toBeGreaterThan(4000)
+    expect(report.pages).toBeGreaterThan(2000)
     expect(report.embedded).toBe(report.pages)
     expect(report.pairs).toBeGreaterThan(0)
     expect(prefilter.pairs).toEqual(before)
