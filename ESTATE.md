@@ -587,7 +587,8 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-maintenance.test.ts`; a live scheduled run on #111's
   groups 46, 43 and 44 and two pairs of twins, copied from #111's vault
   snapshot, and a live Maintenance-screen Merge of group 46, in
-  `src/lib/dedup-high-group-judge.real-llm.test.ts`.
+  `src/lib/dedup-high-group-judge.real-llm.test.ts`. #135's live
+  scheduled run counts only the judge calls made during its scan.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
