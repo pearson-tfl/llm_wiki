@@ -27,7 +27,8 @@ import type { FileNode } from "@/types/wiki"
  * behind a custom endpoint, e.g. a vLLM Nemotron build) could stream
  * chain-of-thought unbounded until the 30-min backstop fires — which
  * surfaces to the user as a bare "request cancelled". Capping turns a
- * 30-min hang into a fast (truncated) response instead.
+ * 30-min hang into a fast cut-off reply instead, which the scan reports as
+ * a failed batch (#108).
  */
 const DEDUP_DETECTION_MAX_TOKENS = 8_192
 // Conservative defaults: keep enough neighbors for recall while cutting the
@@ -52,6 +53,7 @@ const DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT = 250
 const DEDUP_MERGE_MAX_TOKENS = 16_384
 import {
   detectDuplicateGroups,
+  DetectorReplyUnreadableError,
   extractEntitySummary,
   mergeDuplicateGroup,
   MergeReplyRejectedError,
@@ -78,7 +80,8 @@ import { resolveIngestReasoning } from "@/lib/reasoning-capabilities"
  * `completeReplyOnly` is for the merge, whose reply is written to disk
  * (#29): a reply cut off at the cap is rejected, and a reply whose
  * signal fired throws, since the client ends a cancelled request as
- * done with whatever text had arrived. Detection keeps a cut-off reply.
+ * done with whatever text had arrived. Detection refuses a cut-off reply
+ * too, as unreadable (#108): its groups may be missing.
  */
 export function buildDedupLlmCall(
   llmConfig: LlmConfig,
@@ -123,9 +126,12 @@ export function buildDedupLlmCall(
       throw new Error("Duplicate merge cancelled before the model's reply finished")
     }
     if (streamError) throw streamError
-    if (options.completeReplyOnly && cutOff) {
+    if (cutOff) {
       // Not the cap asked for: the CLI routes ignore it and stop at their own.
-      throw new MergeReplyRejectedError("the model's reply was cut off at its output limit")
+      const reason = "the model's reply was cut off at its output limit"
+      throw options.completeReplyOnly
+        ? new MergeReplyRejectedError(reason)
+        : new DetectorReplyUnreadableError(reason)
     }
     return result
   }
@@ -198,6 +204,19 @@ export async function loadAllWikiPages(
   return out
 }
 
+/** A detector call whose reply could not be read: its pages went unchecked. */
+export interface FailedDetectorBatch {
+  pages: number
+  reason: string
+}
+
+export interface DuplicateScanResult {
+  groups: DuplicateGroup[]
+  failedBatches: FailedDetectorBatch[]
+}
+
+const noGroups = (): DuplicateScanResult => ({ groups: [], failedBatches: [] })
+
 /**
  * Stage 1 + 2 from the user's perspective: scan the project for
  * duplicate-candidate groups. Reads notDuplicates whitelist from
@@ -207,9 +226,9 @@ export async function runDuplicateDetection(
   projectPath: string,
   llmConfig: LlmConfig,
   options: { signal?: AbortSignal } = {},
-): Promise<DuplicateGroup[]> {
+): Promise<DuplicateScanResult> {
   const summaries = await loadAllEntitySummaries(projectPath)
-  if (summaries.length < 2) return []
+  if (summaries.length < 2) return noGroups()
   const notDup = await loadNotDuplicates(projectPath)
   const llm = buildDedupLlmCall(llmConfig, DEDUP_DETECTION_MAX_TOKENS)
   const embeddingConfig = await loadEmbeddingConfig()
@@ -231,7 +250,7 @@ export async function runDuplicateDetection(
       if (isAbortError(err) || options.signal?.aborted) throw err
       if (summaries.length > DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT && isEmbeddingCoverageError(err)) {
         console.warn("[dedup] embedding prefilter coverage too low; skipping full fallback for large wiki:", err)
-        return []
+        return noGroups()
       }
       console.warn("[dedup] embedding prefilter failed; falling back to full LLM scan:", err)
     }
@@ -247,9 +266,9 @@ async function detectDuplicateGroupsInBoundedBatches(
   summaries: EntitySummary[],
   llm: DedupLlmCall,
   options: { signal?: AbortSignal; notDuplicates?: string[][] },
-): Promise<DuplicateGroup[]> {
+): Promise<DuplicateScanResult> {
   if (summaries.length <= DEDUP_DETECTOR_BATCH_SUMMARIES) {
-    return detectDuplicateGroups(summaries, llm, options)
+    return detectInBatches([summaries], llm, options)
   }
 
   // Keep likely aliases adjacent while bounding every LLM request. A small
@@ -258,14 +277,34 @@ async function detectDuplicateGroupsInBoundedBatches(
     `${left.title}\u0000${left.slug}`.localeCompare(`${right.title}\u0000${right.slug}`),
   )
   const stride = DEDUP_DETECTOR_BATCH_SUMMARIES - DEDUP_FALLBACK_BATCH_OVERLAP
-  const groups: DuplicateGroup[] = []
+  const batches: EntitySummary[][] = []
   for (let start = 0; start < ordered.length; start += stride) {
-    if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
     const batch = ordered.slice(start, start + DEDUP_DETECTOR_BATCH_SUMMARIES)
     if (batch.length < 2) break
-    groups.push(...await detectDuplicateGroups(batch, llm, options))
+    batches.push(batch)
   }
-  return uniqueDuplicateGroups(groups)
+  return detectInBatches(batches, llm, options)
+}
+
+/** One detector call per batch. A reply that cannot be read is reported as
+ *  a failed batch, not counted as no duplicates (#108). */
+async function detectInBatches(
+  batches: EntitySummary[][],
+  llm: DedupLlmCall,
+  options: { signal?: AbortSignal; notDuplicates?: string[][] },
+): Promise<DuplicateScanResult> {
+  const groups: DuplicateGroup[] = []
+  const failedBatches: FailedDetectorBatch[] = []
+  for (const batch of batches) {
+    if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
+    try {
+      groups.push(...await detectDuplicateGroups(batch, llm, options))
+    } catch (err) {
+      if (!(err instanceof DetectorReplyUnreadableError)) throw err
+      failedBatches.push({ pages: batch.length, reason: err.message })
+    }
+  }
+  return { groups: uniqueDuplicateGroups(groups), failedBatches }
 }
 
 async function detectDuplicateGroupsWithEmbeddingPrefilter(
@@ -273,7 +312,7 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
   embeddingConfig: EmbeddingConfig,
   llm: DedupLlmCall,
   options: { signal?: AbortSignal; notDuplicates?: string[][] },
-): Promise<DuplicateGroup[]> {
+): Promise<DuplicateScanResult> {
   const pages = summaries.map(summaryToEmbeddingPage)
   const pairs = await candidatePairs(pages, embeddingConfig, {
     topK: DEDUP_PREFILTER_TOP_K,
@@ -288,27 +327,18 @@ async function detectDuplicateGroupsWithEmbeddingPrefilter(
     // #359 hangs, so no candidates means no detector call.
     return summaries.length <= DEDUP_EMPTY_PREFILTER_FULL_SCAN_LIMIT
       ? detectDuplicateGroupsInBoundedBatches(summaries, llm, options)
-      : []
+      : noGroups()
   }
 
   const summaryByPath = new Map(summaries.map((s) => [s.path, s]))
   const filteredPairs = filterWhitelistedPairs(pairs, summaryByPath, options.notDuplicates ?? [])
-  if (filteredPairs.length === 0) return []
+  if (filteredPairs.length === 0) return noGroups()
 
   const pageIds = summaries.map((s) => s.path)
   const clusters = clusterByPairs(pageIds, filteredPairs)
-  if (clusters.length === 0) return []
+  if (clusters.length === 0) return noGroups()
 
-  const batches = batchCandidateClusters(clusters, summaryByPath)
-  const out: DuplicateGroup[] = []
-
-  for (const batch of batches) {
-    if (options.signal?.aborted) throw new Error("Duplicate scan cancelled")
-    const detected = await detectDuplicateGroups(batch, llm, options)
-    out.push(...detected)
-  }
-
-  return uniqueDuplicateGroups(out)
+  return detectInBatches(batchCandidateClusters(clusters, summaryByPath, filteredPairs), llm, options)
 }
 
 export function summaryToEmbeddingPage(summary: EntitySummary): DedupEmbeddingPage {
@@ -323,14 +353,29 @@ export function summaryToEmbeddingPage(summary: EntitySummary): DedupEmbeddingPa
 function batchCandidateClusters(
   clusters: string[][],
   summaryByPath: Map<string, EntitySummary>,
+  pairs: CandidatePair[],
 ): EntitySummary[][] {
   const batches: EntitySummary[][] = []
   let current: EntitySummary[] = []
+  const toSummaries = (pageIds: string[]) => pageIds
+    .map((pageId) => summaryByPath.get(pageId))
+    .filter((summary): summary is EntitySummary => !!summary)
+
+  const neighbours = new Map<string, string[]>()
+  for (const [a, b] of pairs) {
+    for (const [from, to] of [[a, b], [b, a]]) {
+      const list = neighbours.get(from)
+      if (list) list.push(to)
+      else neighbours.set(from, [to])
+    }
+  }
 
   for (const cluster of clusters) {
-    const summaries = cluster
-      .map((pageId) => summaryByPath.get(pageId))
-      .filter((summary): summary is EntitySummary => !!summary)
+    if (cluster.length > DEDUP_DETECTOR_BATCH_SUMMARIES) {
+      for (const part of splitOversizedCluster(cluster, neighbours)) batches.push(toSummaries(part))
+      continue
+    }
+    const summaries = toSummaries(cluster)
     if (summaries.length < 2) continue
 
     if (
@@ -350,6 +395,42 @@ function batchCandidateClusters(
   }
 
   if (current.length > 0) batches.push(current)
+  return batches
+}
+
+/**
+ * Split a cluster too big for one detector call so every candidate pair in
+ * it shares at least one batch (#108). Pairs chain into clusters, so one
+ * cluster can hold most of the wiki. Each page's pairs are walked in turn:
+ * both ends of a pair go into the current batch, which is closed when the
+ * next pair would take it past the cap, and a pair a closed batch already
+ * holds is skipped.
+ */
+function splitOversizedCluster(cluster: string[], neighbours: Map<string, string[]>): string[][] {
+  const batches: string[][] = []
+  const covered = new Set<string>()
+  const pairKey = (a: string, b: string) => (a < b ? `${a}\t${b}` : `${b}\t${a}`)
+  let current = new Set<string>()
+  const close = () => {
+    for (const page of current) {
+      for (const other of neighbours.get(page) ?? []) {
+        if (current.has(other)) covered.add(pairKey(page, other))
+      }
+    }
+    batches.push([...current])
+    current = new Set()
+  }
+
+  for (const page of cluster) {
+    for (const other of neighbours.get(page) ?? []) {
+      if (covered.has(pairKey(page, other))) continue
+      const adding = Number(!current.has(page)) + Number(!current.has(other))
+      if (current.size + adding > DEDUP_DETECTOR_BATCH_SUMMARIES) close()
+      current.add(page)
+      current.add(other)
+    }
+  }
+  if (current.size > 0) close()
   return batches
 }
 

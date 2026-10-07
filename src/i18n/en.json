@@ -945,6 +945,7 @@
           "scheduleNever": "never",
           "scanning": "Scanning…",
           "noneFound": "No duplicate groups found. The wiki is clean.",
+          "batchesFailed": "{{count}} detector batches ({{pages}} pages) could not be read, so those pages were not checked: {{reason}}",
           "candidates": "{{n}} candidates",
           "canonicalLabel": "Keep this slug as canonical:",
           "mergeButton": "Merge into {{slug}}",

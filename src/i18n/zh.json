@@ -945,6 +945,7 @@
           "scheduleNever": "从未",
           "scanning": "扫描中…",
           "noneFound": "未发现重复分组，wiki 很干净。",
+          "batchesFailed": "{{count}} 个检测批次（{{pages}} 个页面）的回复无法读取，这些页面未被检查：{{reason}}",
           "candidates": "{{n}} 个候选",
           "canonicalLabel": "保留以下 slug 作为主条目：",
           "mergeButton": "合并到 {{slug}}",

@@ -52,6 +52,7 @@ vi.mock("@/lib/dedup_embedding", () => ({
 }))
 
 import { buildDedupLlmCall, runDuplicateDetection } from "./dedup-runner"
+import { DetectorReplyUnreadableError } from "./dedup"
 import type { LlmConfig } from "@/stores/wiki-store"
 
 const cfg: LlmConfig = {
@@ -202,13 +203,15 @@ describe("buildDedupLlmCall", () => {
     )
   })
 
-  it("returns a detection reply the client reports cut off at the cap", async () => {
+  it("refuses a detection reply the client reports cut off at the cap (#108)", async () => {
     mockStreamChat.mockImplementation(async (_c, _m, cb) => {
-      cb.onToken('{"groups": [')
+      cb.onToken('{"groups": []}')
       cb.onDone({ finishReason: "length", truncated: true })
     })
 
-    await expect(buildDedupLlmCall(cfg, 8192)("s", "u", undefined)).resolves.toBe('{"groups": [')
+    await expect(buildDedupLlmCall(cfg, 8192)("s", "u", undefined)).rejects.toThrow(
+      DetectorReplyUnreadableError,
+    )
   })
 
   it("refuses a merge reply the client reports cut off at the cap (#29)", async () => {
@@ -236,6 +239,13 @@ describe("buildDedupLlmCall", () => {
   })
 })
 
+/** The slugs in each detector call, read from the prompt the model got. */
+function detectorCallSlugs(): string[][] {
+  return mockStreamChat.mock.calls.map((call) =>
+    [...(call[1][1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1]),
+  )
+}
+
 describe("runDuplicateDetection embedding prefilter", () => {
   it("sends only embedding candidate summaries to the LLM detector", async () => {
     setupThreePageProject()
@@ -247,7 +257,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual([
+    expect(result.groups).toEqual([
       { slugs: ["foo", "bar"], reason: "same topic", confidence: "high" },
     ])
     expect(mockCandidatePairs).toHaveBeenCalledOnce()
@@ -255,6 +265,72 @@ describe("runDuplicateDetection embedding prefilter", () => {
     expect(detectorUserMessage).toContain("slug=foo")
     expect(detectorUserMessage).toContain("slug=bar")
     expect(detectorUserMessage).not.toContain("slug=baz")
+  })
+
+  it("splits a cluster bigger than the detector cap so every candidate pair shares a call (#108)", async () => {
+    const count = 200
+    setupLargeProject(count)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig()
+    const rel = (i: number) => `wiki/entities/p${i % count}.md`
+    // A near pair, a mid-range pair and a far pair per page: one cluster of 200.
+    const pairs = Array.from({ length: count }, (_, i) => [
+      [rel(i), rel(i + 1)],
+      [rel(i), rel(i + 7)],
+      [rel(i), rel(i + 61)],
+    ]).flat()
+    mockCandidatePairs.mockResolvedValue(pairs)
+    mockClusterByPairs.mockReturnValue([Array.from({ length: count }, (_, i) => rel(i))])
+    mockStreamChat.mockImplementation(async (_c, _m, cb) => {
+      cb.onToken('{"groups": []}')
+      cb.onDone()
+    })
+
+    await runDuplicateDetection("/project", cfg)
+
+    const calls = detectorCallSlugs()
+    expect(calls.length).toBeGreaterThan(1)
+    for (const slugs of calls) expect(slugs.length).toBeLessThanOrEqual(80)
+    const slug = (path: string) => path.replace(/^wiki\/entities\/|\.md$/g, "")
+    for (const [a, b] of pairs) {
+      expect(calls.some((slugs) => slugs.includes(slug(a)) && slugs.includes(slug(b))), `${a} ${b}`)
+        .toBe(true)
+    }
+  })
+
+  it("reports a batch whose reply cannot be read as failed, keeping the other batches' groups (#108)", async () => {
+    setupLargeProject(170)
+    mockLoadNotDuplicates.mockResolvedValue([])
+    setupEmbeddingConfig(false)
+    let call = 0
+    mockStreamChat.mockImplementation(async (_c, messages, cb) => {
+      call += 1
+      const slugs = [...(messages[1].content as string).matchAll(/slug=([^,]+),/g)].map((m) => m[1])
+      if (call === 2) {
+        cb.onToken("I found several duplicates, listed below:")
+      } else if (call === 3) {
+        cb.onToken('{"groups": [{"slugs": ["p1", "p2"]')
+        cb.onDone({ finishReason: "length", truncated: true })
+        return
+      } else {
+        cb.onToken(JSON.stringify({
+          groups: [{ slugs: slugs.slice(0, 2), reason: "same topic", confidence: "high" }],
+        }))
+      }
+      cb.onDone()
+    })
+
+    const result = await runDuplicateDetection("/project", cfg)
+
+    const calls = detectorCallSlugs()
+    expect(calls).toHaveLength(3)
+    expect(result.groups).toEqual([
+      { slugs: calls[0].slice(0, 2), reason: "same topic", confidence: "high" },
+    ])
+    expect(result.failedBatches).toEqual([
+      { pages: calls[1].length, reason: expect.stringMatching(/could not be read/) },
+      { pages: calls[2].length, reason: expect.stringMatching(/cut off/) },
+    ])
   })
 
   it("falls back to the full LLM scan when the embedding prefilter fails", async () => {
@@ -298,7 +374,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual([
+    expect(result.groups).toEqual([
       { slugs: ["foo", "bar"], reason: "same topic", confidence: "high" },
     ])
     const detectorUserMessage = mockStreamChat.mock.calls[0][1][1].content
@@ -316,7 +392,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual([])
+    expect(result).toEqual({ groups: [], failedBatches: [] })
     expect(mockStreamChat).not.toHaveBeenCalled()
     expect(mockClusterByPairs).not.toHaveBeenCalled()
   })
@@ -329,7 +405,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual([])
+    expect(result).toEqual({ groups: [], failedBatches: [] })
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
@@ -362,7 +438,7 @@ describe("runDuplicateDetection embedding prefilter", () => {
 
     const result = await runDuplicateDetection("/project", cfg)
 
-    expect(result).toEqual([])
+    expect(result).toEqual({ groups: [], failedBatches: [] })
     expect(mockStreamChat).not.toHaveBeenCalled()
   })
 
