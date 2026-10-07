@@ -458,8 +458,10 @@ Keep this list current. Merge conflicts can only come from these files.
   The card now says which pages the slug names, in the merge's own words,
   from one shared check (`ambiguousSlugRefusal`), and the group stays
   saved. The scheduled run's page list now uses the merge's own path
-  conversion (`toWikiRelative`, moved to `dedup.ts`). A run whose save of
-  the kept groups fails still records the merges it queued.
+  conversion (`toWikiRelative`, moved to `dedup.ts`). For a project path
+  ending in a slash both give absolute paths, so such a project still
+  cannot merge, as before. A run whose save of the kept groups fails
+  still records the merges it queued.
   Upstream edits to the card's Merge button or the merge's page lookup
   need re-checking against this.
   Tests in `src/lib/dedup-queue.card-merge.test.ts`,

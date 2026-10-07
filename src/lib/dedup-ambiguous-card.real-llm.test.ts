@@ -36,15 +36,15 @@ describe.skipIf(!ENABLED)("a card merge of a shared slug on a vault copy (#126)"
   it("is refused before queueing, in the merge's own words", async () => {
     const { executeMerge } = await import("./dedup-runner")
     const { enqueueCardMerge, getQueue, restoreQueue } = await import("./dedup-queue")
-    const { loadPendingDuplicateGroups, savePendingDuplicateGroups } = await import("./dedup-storage")
+    const { listWikiPages, loadPendingDuplicateGroups, savePendingDuplicateGroups } = await import("./dedup-storage")
     const { pagesNamed } = await import("./dedup")
-    const { listWikiPages } = await import("./dedup-storage")
 
     const pages = await listWikiPages(vault)
     const concepts = (await fs.readdir(`${vault}/wiki/concepts`)).map((f) => f.replace(/\.md$/, ""))
     const shared = concepts.find((slug) => pagesNamed(pages, slug).length === 2)
     const single = concepts.find((slug) => pagesNamed(pages, slug).length === 1)
     expect(shared, "the copy holds a concept and an entity page of one slug").toBeDefined()
+    expect(single, "the copy holds a concept page whose slug no other page has").toBeDefined()
     const group: DuplicateGroup = {
       slugs: [shared!, single!],
       confidence: "high",
