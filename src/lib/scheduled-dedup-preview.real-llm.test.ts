@@ -5,9 +5,11 @@
  * loaded from app-state field by field – with the real embedding endpoint.
  * The Tauri layer is replaced: files through node:fs, embeddings by a
  * direct call to the endpoint. HTTP model calls go out through node's
- * fetch, as tauri-fetch does outside the webview; run it with
- * NODE_OPTIONS=--dns-result-order=ipv4first where node's fetch times out
- * on a host's IPv6 address (api.z.ai from the Mac, #111).
+ * fetch, as tauri-fetch does outside the webview. Where a host is slow to
+ * connect, node's fetch gives each address 250 ms and fails; run it with
+ * NODE_OPTIONS="--dns-result-order=ipv4first
+ * --network-family-autoselection-attempt-timeout=5000" (api.z.ai from the
+ * Mac, #111).
  *
  * Gated behind RUN_LLM_TESTS=1, APP_STATE (the app-state.json to read; it
  * is only read, and its key never leaves this process) and
