@@ -311,7 +311,10 @@ impl AgentRuntime {
             skills.is_empty(),
         );
         // Deep research covers the wiki's own pages as well as the raw sources,
-        // skill turns included; faithful-source mode keeps to raw sources.
+        // skill turns included, as the fallback above does not: a Deep turn
+        // already searches the raw sources for any question, skill questions
+        // too, and the wiki pages are the better evidence for most.
+        // Faithful-source mode keeps to raw sources.
         let deep_wiki_search = matches!(request.mode, AgentMode::Deep)
             && request.tools.wiki
             && request.retrieval_mode != AgentRetrievalMode::Faithful;
@@ -4669,11 +4672,27 @@ mod tests {
         let faithful = runtime
             .run_once(AgentChatRequest {
                 retrieval_mode: AgentRetrievalMode::Faithful,
-                ..request
+                ..request.clone()
             })
             .await
             .unwrap();
         assert!(!faithful
+            .tool_events
+            .iter()
+            .any(|event| event.tool == "wiki.search"));
+
+        let wiki_off = runtime
+            .run_once(AgentChatRequest {
+                tools: AgentToolOptions {
+                    wiki: false,
+                    web: false,
+                    anytxt: false,
+                },
+                ..request
+            })
+            .await
+            .unwrap();
+        assert!(!wiki_off
             .tool_events
             .iter()
             .any(|event| event.tool == "wiki.search"));
