@@ -616,7 +616,7 @@ Keep this list current. Merge conflicts can only come from these files.
   task's merge starts, a name with no page on disk that a merge since the
   queue opened removed becomes the page it now lives in, which covers a
   task queued after that merge and a bare name that could name another
-  page; a task left naming one page on disk is done with no model call.
+  page; a task left naming one page is done with no model call.
   A page missing for any other reason is left named, and the
   merge still refuses it (#109). A merge cancelled while it writes rewrites
   no other task, and the record of removed pages is forgotten when the
