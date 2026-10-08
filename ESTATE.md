@@ -736,8 +736,8 @@ Keep this list current. Merge conflicts can only come from these files.
   question got the same files. Its words now leave out the keyword search's
   stop words and punctuation; a question with no other words is searched
   whole. The words naming the raw sources are still left out, but a Chinese
-  one, such as `原始资料`, now leaves its two-character pieces in, as the
-  keyword search splits it. Tests in `tools.rs`.
+  one, such as `原始资料`, now leaves its pieces in, two-character and
+  single-character, as the keyword search splits it. Tests in `tools.rs`.
 - `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
   `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
   from a one-off request file (pearson-tfl/llm_wiki#19, fix 3 of #16). After
