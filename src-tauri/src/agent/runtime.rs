@@ -310,8 +310,18 @@ impl AgentRuntime {
             &request.tools,
             skills.is_empty(),
         );
-        let should_search_wiki =
-            router.should_search_wiki || planned_has("wiki.search") || fallback_wiki_search;
+        // Deep research covers the wiki's own pages as well as the raw sources,
+        // skill turns included, as the fallback above does not: a Deep turn
+        // already searches the raw sources for any question, skill questions
+        // too, and the wiki pages are the better evidence for most.
+        // Faithful-source mode keeps to raw sources.
+        let deep_wiki_search = matches!(request.mode, AgentMode::Deep)
+            && request.tools.wiki
+            && request.retrieval_mode != AgentRetrievalMode::Faithful;
+        let should_search_wiki = router.should_search_wiki
+            || planned_has("wiki.search")
+            || fallback_wiki_search
+            || deep_wiki_search;
         let should_include_sources = router.should_include_sources || planned_has("source.search");
         let should_search_graph = matches!(router.intent, super::router::QueryIntent::NeedsGraph)
             || planned_has("graph.search");
@@ -4592,6 +4602,100 @@ mod tests {
             .iter()
             .any(|event| event.tool == "wiki.read_page" && event.status == "completed"));
         assert!(response.message.contains("Detailed evidence"));
+    }
+
+    #[tokio::test]
+    async fn deep_skill_turn_without_planner_searches_wiki_pages_and_raw_sources() {
+        let project = temp_project("deep-skill-wiki");
+        fs::create_dir_all(project.join(".llm-wiki").join("skills").join("demo")).unwrap();
+        fs::write(
+            project
+                .join(".llm-wiki")
+                .join("skills")
+                .join("demo")
+                .join("SKILL.md"),
+            "---\nname: demo\ndescription: Demo skill\n---\nUse this skill for demos.",
+        )
+        .unwrap();
+        fs::write(
+            project.join("wiki").join("concepts").join("cold-start.md"),
+            "---\ntitle: Cold Start Context\n---\n# Cold Start Context\n\nLevers for an agent's cold start context.",
+        )
+        .unwrap();
+        let source_dir = project.join("raw").join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("cold-starts.md"),
+            "Notes on cold starts and lazy loading.",
+        )
+        .unwrap();
+
+        let runtime = AgentRuntime::new(
+            "project-1",
+            project.to_string_lossy(),
+            None,
+            None,
+            None,
+            None,
+        );
+        let request = AgentChatRequest {
+            message: "What does the wiki expose about the levers for managing agents’ cold start context, and what should be in it?".to_string(),
+            session_id: None,
+            mode: AgentMode::Deep,
+            tools: AgentToolOptions::default(),
+            top_k: Some(8),
+            include_content: Some(true),
+            history: Vec::new(),
+            skills: vec!["demo".to_string()],
+            skill_mode: AgentSkillMode::Auto,
+            ..Default::default()
+        };
+        let response = runtime.run_once(request.clone()).await.unwrap();
+
+        let ran = |tool: &str| {
+            response
+                .tool_events
+                .iter()
+                .any(|event| event.tool == tool && event.status == "completed")
+        };
+        assert!(ran("wiki.search"));
+        assert!(ran("source.search"));
+        assert!(response
+            .references
+            .iter()
+            .any(|reference| reference.path == "wiki/concepts/cold-start.md"));
+        assert!(response
+            .references
+            .iter()
+            .any(|reference| reference.path == "raw/sources/cold-starts.md"));
+
+        let faithful = runtime
+            .run_once(AgentChatRequest {
+                retrieval_mode: AgentRetrievalMode::Faithful,
+                ..request.clone()
+            })
+            .await
+            .unwrap();
+        assert!(!faithful
+            .tool_events
+            .iter()
+            .any(|event| event.tool == "wiki.search"));
+
+        let wiki_off = runtime
+            .run_once(AgentChatRequest {
+                tools: AgentToolOptions {
+                    wiki: false,
+                    web: false,
+                    anytxt: false,
+                },
+                ..request
+            })
+            .await
+            .unwrap();
+        assert!(!wiki_off
+            .tool_events
+            .iter()
+            .any(|event| event.tool == "wiki.search"));
     }
 
     #[tokio::test]

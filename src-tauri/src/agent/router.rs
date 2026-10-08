@@ -21,7 +21,8 @@ pub struct RouterDecision {
     // Compatibility field for existing API/debug consumers. The router no
     // longer turns this on from message shape; wiki retrieval is selected by
     // the model planner, with a runtime fallback only when the planner is not
-    // available.
+    // available, and by a Deep turn with wiki tools on outside faithful-source
+    // mode.
     pub should_search_wiki: bool,
     pub should_hint_web: bool,
     pub should_hint_anytxt: bool,
