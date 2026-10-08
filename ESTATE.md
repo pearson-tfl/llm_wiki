@@ -610,12 +610,14 @@ Keep this list current. Merge conflicts can only come from these files.
   all merge (pearson-tfl/llm_wiki#149). Before, the later group's merge
   refused the page the earlier merge had removed, at every retry, and
   failed, leaving its other pages unmerged. Once a merge is done, every
-  task still on the queue that names a page it removed names the kept page
-  instead, its own kept page included, and is saved so; a task left naming
-  the kept page alone is done with no model call. A task queued after that
-  merge is read the same way when its merge starts: a name with no page on
-  disk that a merge since the queue opened removed becomes the page it now
-  lives in. A page missing for any other reason is left named, and the
+  task still on the queue that names a page it removed by its page id names
+  the kept page instead, its own kept page included, and is saved so; a
+  task left naming the kept page alone is done with no model call. When a
+  task's merge starts, a name with no page on disk that a merge since the
+  queue opened removed becomes the page it now lives in, which covers a
+  task queued after that merge and a bare name that could name another
+  page; a task left naming one page on disk is done with no model call.
+  A page missing for any other reason is left named, and the
   merge still refuses it (#109). A merge cancelled while it writes rewrites
   no other task, and the record of removed pages is forgotten when the
   project is switched or the app restarts.

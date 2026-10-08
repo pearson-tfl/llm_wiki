@@ -672,31 +672,27 @@ type MergeTurn = MergeResult | "merged-earlier" | null
 /**
  * Groups a scan queues can share pages, so a merge can remove a page a
  * later task names (#149). The merge is recorded; and in every task still
- * queued, a name of a page it removed becomes the kept page's id, its
+ * queued, a page id of a page it removed becomes the kept page's id, its
  * task's kept page included, and a task left naming the kept page alone is
- * done, its pages merged already. A page gone for any other reason stays
- * named, and its merge still refuses it (#109).
+ * done, its pages merged already. A bare name may name another page too,
+ * so it is left for the check when the task's merge starts, which reads
+ * the disk. A page gone for any other reason stays named, and its merge
+ * still refuses it (#109).
  */
 function foldMergedAwayPages(result: MergeResult): void {
   const kept = pageIdFromPath(result.canonicalPath)
   const removed = new Set(result.pagesToDelete.map(pageIdFromPath))
   for (const [page, into] of mergedInto) if (removed.has(into)) mergedInto.set(page, kept)
   for (const page of removed) mergedInto.set(page, kept)
-  const removedPages = result.pagesToDelete.map((path) => ({ path }))
-  const wasRemoved = (name: string) => pagesNamed(removedPages, name).length > 0
-  const namesKept = (name: string) => pagesNamed([{ path: result.canonicalPath }], name).length > 0
+  const livesIn = (name: string) => (removed.has(name) ? kept : undefined)
   for (const task of [...queue]) {
-    if (!task.group.slugs.some(wasRemoved)) continue
-    const slugs = [...new Set(task.group.slugs.map((name) => (wasRemoved(name) ? kept : name)))]
-    if (slugs.every(namesKept)) {
+    if (!task.group.slugs.some(livesIn)) continue
+    if (renameMergedPages(task, livesIn).every((name) => name === kept)) {
       restoredPausedTaskIds.delete(task.id)
       queue = queue.filter((t) => t !== task)
       notifyScheduledOutcome(task, "done")
       console.log(`[Dedup Queue] Done by an earlier merge: ${task.group.slugs.join(",")} → ${kept}`)
-      continue
     }
-    task.group = { ...task.group, slugs }
-    if (wasRemoved(task.canonicalSlug)) task.canonicalSlug = kept
   }
 }
 
@@ -704,23 +700,31 @@ function foldMergedAwayPages(result: MergeResult): void {
  * A task queued after the merge that removed one of its pages still names
  * that page (#149). Read against the wiki as it is now, a name with no page
  * that a merge since the queue opened removed becomes the page it lives in,
- * the task's kept page included. True when the task then names one page:
- * its pages are merged already. A name with no page that no merge removed
- * stays, and the merge refuses it (#109).
+ * the task's kept page included. True when a task a merge touched then
+ * names one page on disk: its pages are merged already. A name with no
+ * page that no merge removed stays, and the merge refuses it (#109).
  */
 async function mergedEarlier(pp: string, task: DedupTask): Promise<boolean> {
   const pages = await listWikiPages(pp)
   const removedPages = [...mergedInto.keys()].map((pageId) => ({ path: `wiki/${pageId}.md` }))
+  const keptPages = new Set(mergedInto.values())
   const livesIn = (name: string): string | undefined => {
     if (pagesNamed(pages, name).length > 0) return undefined
     const [page] = pagesNamed(removedPages, name)
     return page && mergedInto.get(pageIdFromPath(page.path))
   }
-  if (!task.group.slugs.some(livesIn)) return false
+  if (!task.group.slugs.some((name) => livesIn(name) || keptPages.has(name))) return false
+  const slugs = renameMergedPages(task, livesIn)
+  return new Set(slugs.map((name) => pagesNamed(pages, name)[0]?.path ?? name)).size < 2
+}
+
+/** Name each page `livesIn` places as the page it lives in, the task's kept
+ *  page included; returns the task's names. */
+function renameMergedPages(task: DedupTask, livesIn: (name: string) => string | undefined): string[] {
   const slugs = [...new Set(task.group.slugs.map((name) => livesIn(name) ?? name))]
   task.group = { ...task.group, slugs }
   task.canonicalSlug = livesIn(task.canonicalSlug) ?? task.canonicalSlug
-  return new Set(slugs.map((name) => pagesNamed(pages, name)[0]?.path ?? name)).size < 2
+  return slugs
 }
 
 async function processNext(projectId: string): Promise<void> {
