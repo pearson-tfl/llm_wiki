@@ -26,14 +26,17 @@ fence='{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|NotebookEdit","hooks"
 app_args=(
   -p --output-format stream-json --input-format stream-json --verbose
   --setting-sources project --disable-slash-commands --tools "" --no-session-persistence
-  --prompt-suggestions false --model claude-opus-5-5
+  --prompt-suggestions false
+  --append-system-prompt "You are answering inside LLM Wiki, which runs you with no tools: you cannot read files, run commands, search or fetch anything. Answer from the text of the user's message alone. This reply is your only turn and nothing in it is executed, so never write a tool call or tool-call markup, and never say you will come back with results later."
+  --model claude-opus-5-5
   --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 )
 
 # As the app does, unless the caller names a config folder.
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
-# The app runs claude in the wiki's folder; a scratch folder stands in for it.
+# With isolation on, the app runs claude in an empty folder of its own under
+# the OS temp folder, not the wiki's (#148); a scratch folder stands in for it.
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 echo "live-cli.sh: $(claude --version), CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR" >&2
