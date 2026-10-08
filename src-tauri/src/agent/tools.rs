@@ -2521,8 +2521,8 @@ pub fn search_sources(
     if !root.exists() {
         return Ok(Vec::new());
     }
-    let query_phrase = crate::commands::search::trim_query_punctuation(&query.to_lowercase());
-    let query_terms = source_query_terms(query, &query_phrase);
+    let query_phrase = search::trim_query_punctuation(&query.to_lowercase());
+    let query_terms = source_query_terms(query);
     let mut scored = Vec::new();
     let mut seen_files = 0usize;
     for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
@@ -2596,7 +2596,7 @@ pub fn search_sources(
         } else {
             continue;
         };
-        let Some(hit) = crate::commands::search::score_file(
+        let Some(hit) = search::score_file(
             project_path,
             entry.path(),
             &content,
@@ -2607,6 +2607,7 @@ pub fn search_sources(
         ) else {
             continue;
         };
+        // A file matched by its name alone has its snippet from the top.
         let lower = content.to_lowercase();
         let byte_idx = std::iter::once(query_phrase.as_str())
             .chain(query_terms.iter().map(String::as_str))
@@ -2646,10 +2647,10 @@ pub fn search_sources(
 }
 
 /// The wiki keyword search's terms, stop words dropped, less the words that
-/// only name the raw sources. A question of stop words alone is searched as
-/// its whole phrase.
-fn source_query_terms(query: &str, query_phrase: &str) -> Vec<String> {
-    let terms = crate::commands::search::tokenize_query(query)
+/// only name the raw sources. A question of stop words or punctuation alone
+/// is searched as the whole question, as the wiki keyword search does.
+fn source_query_terms(query: &str) -> Vec<String> {
+    let terms = search::tokenize_query(query)
         .into_iter()
         .filter(|term| {
             !matches!(
@@ -2666,7 +2667,7 @@ fn source_query_terms(query: &str, query_phrase: &str) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     if terms.is_empty() {
-        vec![query_phrase.to_string()]
+        vec![query.trim().to_lowercase()]
     } else {
         terms
     }
@@ -3592,6 +3593,40 @@ mod tests {
             .iter()
             .chain(&cold_start)
             .all(|path| !path.contains("filler-")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_sources_falls_back_to_the_whole_question_and_breaks_ties_by_path() {
+        let root =
+            std::env::temp_dir().join(format!("llm-wiki-source-fallback-{}", Uuid::new_v4()));
+        let source_dir = root.join("raw").join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("b-phrase.md"),
+            "Notes: what is it? Nobody knows.",
+        )
+        .unwrap();
+        fs::write(source_dir.join("a-phrase.md"), "Asked again: what is it?").unwrap();
+        fs::write(source_dir.join("other.md"), "What it is, the cat is.").unwrap();
+        fs::write(source_dir.join("marks.md"), "Header ??? marker").unwrap();
+
+        let paths = |query: &str| -> Vec<String> {
+            search_sources(root.to_str().unwrap(), query, 8)
+                .unwrap()
+                .into_iter()
+                .map(|reference| reference.path)
+                .collect()
+        };
+
+        // Stop words alone: the whole question is the term, and equal
+        // scores come back in path order.
+        assert_eq!(
+            paths("What is it?"),
+            vec!["raw/sources/a-phrase.md", "raw/sources/b-phrase.md"]
+        );
+        // Punctuation alone matches only files holding it, not every file.
+        assert_eq!(paths("???"), vec!["raw/sources/marks.md"]);
         let _ = fs::remove_dir_all(root);
     }
 
