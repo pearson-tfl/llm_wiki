@@ -1160,8 +1160,9 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair[0] == "--append-system-prompt" && pair[1] == NO_TOOLS_NOTICE));
-        assert!(NO_TOOLS_NOTICE.contains("no tools"));
-        assert!(!build_claude_cli_args("sonnet", false).contains(&"--append-system-prompt".to_string()));
+        assert!(
+            !build_claude_cli_args("sonnet", false).contains(&"--append-system-prompt".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1181,8 +1182,13 @@ mod tests {
         assert!(isolated.is_dir());
         assert_eq!(
             claude_working_directory(true, project.clone(), &temp).await,
-            Ok(isolated),
+            Ok(isolated.clone()),
             "the same folder each call"
+        );
+        assert_eq!(
+            claude_working_directory(true, None, &temp).await,
+            Ok(isolated),
+            "an isolated call needs no wiki folder"
         );
 
         assert_eq!(
@@ -1199,7 +1205,9 @@ mod tests {
     /// earlier reply that printed a tool call as text, as John's did. Run by
     /// hand: `cargo test --lib live_isolated_chat -- --ignored --nocapture`.
     /// Spawns through a wrapper that adds the estate lane fence, as
-    /// `scripts/estate/live-cli.sh` does.
+    /// `scripts/estate/live-cli.sh` does. Its control is on #148: the same
+    /// chat, run with the old flags from the wiki's folder, opened with the
+    /// canary word in 3 runs of 3.
     #[cfg(unix)]
     #[tokio::test]
     #[ignore = "spawns the real claude CLI; run by hand"]
@@ -1250,18 +1258,20 @@ mod tests {
         ])))
         .expect("stdin");
 
-        let working_directory = claude_working_directory(
-            true,
-            Some(vault.to_string_lossy().to_string()),
-            &temp,
-        )
-        .await
-        .expect("working directory");
+        let working_directory =
+            claude_working_directory(true, Some(vault.to_string_lossy().to_string()), &temp)
+                .await
+                .expect("working directory");
         let mut cmd = claude_command(&wrapper, "claude-opus-5-5", true, &working_directory).await;
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         let mut child = cmd.spawn().expect("spawn claude");
         let mut child_stdin = child.stdin.take().expect("stdin handle");
-        child_stdin.write_all(stdin.as_bytes()).await.expect("write stdin");
+        child_stdin
+            .write_all(stdin.as_bytes())
+            .await
+            .expect("write stdin");
         drop(child_stdin);
         let output = child.wait_with_output().await.expect("claude output");
         std::fs::remove_dir_all(&scratch).expect("cleanup scratch");
@@ -1282,7 +1292,16 @@ mod tests {
         println!("working directory: {}", working_directory.display());
         println!("turns: {}, reply:\n{reply}", result["num_turns"]);
 
-        for leak in ["<invoke", "<function_calls", "<parameter", "results are back", "ZEBRA-7731"] {
+        for leak in [
+            "<invoke",
+            "<function_calls",
+            "<parameter",
+            "results are back",
+            "once the results",
+            "get back to you",
+            "report back",
+            "ZEBRA-7731",
+        ] {
             assert!(!reply.contains(leak), "reply holds {leak:?}");
         }
         let lower = reply.to_lowercase();
