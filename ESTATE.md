@@ -738,14 +738,15 @@ Keep this list current. Merge conflicts can only come from these files.
   whole. The words naming the raw sources are still left out, but a Chinese
   one, such as `原始资料`, now leaves its pieces in, two-character and
   single-character, as the keyword search splits it. Tests in `tools.rs`.
-- `src-tauri/src/agent/runtime.rs` – a Deep chat turn searches the wiki's
-  own pages, `wiki.search`, as well as the raw sources, when skills are
-  loaded too and no tool planner runs, as with the Claude Code or Codex CLI
+- `src-tauri/src/agent/runtime.rs`, `src-tauri/src/agent/router.rs` – a
+  Deep chat turn searches the wiki's own pages, `wiki.search`, as well as
+  the raw sources, when skills are loaded too and no tool planner runs, as with the Claude Code or Codex CLI
   provider (#154). Upstream searched the wiki on such a turn only when no
   skill was loaded, and the chat panel sends every enabled skill, so a Deep
   turn read raw sources alone. Each search keeps the Deep result count; the
   retrieval answer a CLI model gets still lists the first 10 references,
   wiki pages first. Faithful-source mode still searches raw sources only.
+  `router.rs` changes only its comment on how wiki search is chosen.
   Tests in `runtime.rs`.
 - `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
   `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
