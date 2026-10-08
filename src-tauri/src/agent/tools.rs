@@ -2521,9 +2521,9 @@ pub fn search_sources(
     if !root.exists() {
         return Ok(Vec::new());
     }
-    let lower_query = query.to_lowercase();
-    let query_terms = source_query_terms(&lower_query);
-    let mut refs = Vec::new();
+    let query_phrase = search::trim_query_punctuation(&query.to_lowercase());
+    let query_terms = source_query_terms(query);
+    let mut scored = Vec::new();
     let mut seen_files = 0usize;
     for entry in WalkDir::new(&root).into_iter().filter_map(Result::ok) {
         if !entry.file_type().is_file() {
@@ -2596,45 +2596,65 @@ pub fn search_sources(
         } else {
             continue;
         };
-        let lower = content.to_lowercase();
-        let matched = std::iter::once(lower_query.as_str())
-            .chain(query_terms.iter().map(String::as_str))
-            .find_map(|term| lower.find(term).map(|idx| (idx, term.len())));
-        let Some((byte_idx, _matched_len)) = matched else {
+        let Some(hit) = search::score_file(
+            project_path,
+            entry.path(),
+            &content,
+            &query_terms,
+            &query_phrase,
+            query,
+            false,
+        ) else {
             continue;
         };
-        refs.push(AgentReference {
-            title: entry
-                .path()
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or(&rel)
-                .to_string(),
-            path: rel,
-            kind: "source".to_string(),
-            snippet: Some(snippet_around_byte(
-                &content,
-                byte_idx,
-                MAX_SOURCE_SNIPPET_CHARS,
-            )),
-            score: None,
-            knowledge_context: None,
-        });
-        if refs.len() >= top_k.clamp(1, 10) {
-            break;
-        }
+        // A file matched by its name alone has its snippet from the top.
+        let lower = content.to_lowercase();
+        let byte_idx = std::iter::once(query_phrase.as_str())
+            .chain(query_terms.iter().map(String::as_str))
+            .find_map(|term| lower.find(term))
+            .unwrap_or(0);
+        scored.push((
+            hit.score,
+            AgentReference {
+                title: entry
+                    .path()
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&rel)
+                    .to_string(),
+                path: rel,
+                kind: "source".to_string(),
+                snippet: Some(snippet_around_byte(
+                    &content,
+                    byte_idx,
+                    MAX_SOURCE_SNIPPET_CHARS,
+                )),
+                score: None,
+                knowledge_context: None,
+            },
+        ));
     }
-    Ok(refs)
+    // Every matching file is scored before any is kept, so the files returned
+    // are the most relevant ones, not the first ones in folder order (#152).
+    scored.sort_by(|(a_score, a), (b_score, b)| {
+        b_score.total_cmp(a_score).then_with(|| a.path.cmp(&b.path))
+    });
+    Ok(scored
+        .into_iter()
+        .take(top_k.clamp(1, 10))
+        .map(|(_, reference)| reference)
+        .collect())
 }
 
+/// The wiki keyword search's terms, stop words dropped, less the words that
+/// only name the raw sources. A question of stop words or punctuation alone
+/// is searched as the whole question, as the wiki keyword search does.
 fn source_query_terms(query: &str) -> Vec<String> {
-    query
-        .split(|c: char| c.is_whitespace() || matches!(c, ',' | '，' | ';' | '；' | ':' | '：'))
-        .map(str::trim)
-        .filter(|term| term.chars().count() >= 2)
+    let terms = search::tokenize_query(query)
+        .into_iter()
         .filter(|term| {
             !matches!(
-                *term,
+                term.as_str(),
                 "raw"
                     | "source"
                     | "sources"
@@ -2645,8 +2665,12 @@ fn source_query_terms(query: &str) -> Vec<String> {
                     | "源文件"
             )
         })
-        .map(ToString::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+    if terms.is_empty() {
+        vec![query.trim().to_lowercase()]
+    } else {
+        terms
+    }
 }
 
 fn safe_project_join(project_path: &str, rel: &str) -> Result<PathBuf, String> {
@@ -3517,6 +3541,92 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].kind, "source");
         assert!(refs[0].snippet.as_deref().unwrap().contains("safety"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_sources_ranks_each_question_by_its_own_words() {
+        // #152: John's two Deep questions both returned the first eight
+        // files in folder order, matched only on "what" and "the".
+        let root = std::env::temp_dir().join(format!("llm-wiki-source-rank-{}", Uuid::new_v4()));
+        let source_dir = root.join("raw").join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        for i in 0..10 {
+            fs::write(
+                source_dir.join(format!("filler-{i}.md")),
+                "What is in the box? The cat is on the mat.",
+            )
+            .unwrap();
+        }
+        fs::write(
+            source_dir.join("wiki-overview.md"),
+            "# Wiki overview\n\nThis wiki is about agent harnesses. What do you think?",
+        )
+        .unwrap();
+        fs::write(
+            source_dir.join("cold-start-context.md"),
+            "# Cold start context\n\nLevers for managing agents' cold start context.",
+        )
+        .unwrap();
+
+        let paths = |query: &str| -> Vec<String> {
+            search_sources(root.to_str().unwrap(), query, 8)
+                .unwrap()
+                .into_iter()
+                .map(|reference| reference.path)
+                .collect()
+        };
+        let about = paths("What do you think the wiki is about?");
+        let cold_start = paths(
+            "What does the wiki expose about the levers for managing agents\u{2019} cold start context, and what should be in it?",
+        );
+
+        assert_eq!(
+            about.first().map(String::as_str),
+            Some("raw/sources/wiki-overview.md")
+        );
+        assert_eq!(
+            cold_start.first().map(String::as_str),
+            Some("raw/sources/cold-start-context.md")
+        );
+        assert!(about
+            .iter()
+            .chain(&cold_start)
+            .all(|path| !path.contains("filler-")));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn search_sources_falls_back_to_the_whole_question_and_breaks_ties_by_path() {
+        let root =
+            std::env::temp_dir().join(format!("llm-wiki-source-fallback-{}", Uuid::new_v4()));
+        let source_dir = root.join("raw").join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("b-phrase.md"),
+            "Notes: what is it? Nobody knows.",
+        )
+        .unwrap();
+        fs::write(source_dir.join("a-phrase.md"), "Asked again: what is it?").unwrap();
+        fs::write(source_dir.join("other.md"), "What it is, the cat is.").unwrap();
+        fs::write(source_dir.join("marks.md"), "Header ??? marker").unwrap();
+
+        let paths = |query: &str| -> Vec<String> {
+            search_sources(root.to_str().unwrap(), query, 8)
+                .unwrap()
+                .into_iter()
+                .map(|reference| reference.path)
+                .collect()
+        };
+
+        // Stop words alone: the whole question is the term, and equal
+        // scores come back in path order.
+        assert_eq!(
+            paths("What is it?"),
+            vec!["raw/sources/a-phrase.md", "raw/sources/b-phrase.md"]
+        );
+        // Punctuation alone matches only files holding it, not every file.
+        assert_eq!(paths("???"), vec!["raw/sources/marks.md"]);
         let _ = fs::remove_dir_all(root);
     }
 

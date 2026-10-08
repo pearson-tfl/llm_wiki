@@ -727,6 +727,17 @@ Keep this list current. Merge conflicts can only come from these files.
   the agent's search tool do not pass `vectorError` on. `searchWikiMatches`
   in `search.ts` is ingest's caller. Tests in `search.rs` and
   `src/lib/ingest-candidates.test.ts`.
+- `src-tauri/src/agent/tools.rs`, `src-tauri/src/commands/search.rs` – the
+  agent's raw source search, `source.search`, which a Deep chat turn runs,
+  scores every file in `raw/sources/` with the wiki keyword search's own
+  scorer and returns the highest scores, ties in path order (#152).
+  Upstream kept the first files in folder order holding any word of the
+  question of two or more letters, "what" and "the" included, so every
+  question got the same files. Its words now leave out the keyword search's
+  stop words and punctuation; a question with no other words is searched
+  whole. The words naming the raw sources are still left out, but a Chinese
+  one, such as `原始资料`, now leaves its two-character pieces in, as the
+  keyword search splits it. Tests in `tools.rs`.
 - `src/lib/hub-rebuild.ts`, `src/lib/scheduled-maintenance.ts`,
   `src/lib/page-merge.ts` – the scheduled maintenance job rebuilds hub pages
   from a one-off request file (pearson-tfl/llm_wiki#19, fix 3 of #16). After
