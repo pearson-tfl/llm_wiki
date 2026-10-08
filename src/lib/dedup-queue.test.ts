@@ -1506,3 +1506,107 @@ describe("dedup-queue — a merge's re-embed runs once its task is done (#73 gat
     expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
   })
 })
+
+describe("dedup-queue — groups of one scan that share pages (#149)", () => {
+  // The two groups John's scheduled scan queued on 2026-10-08 (#149).
+  const pair = ["concepts/agent-skills", "entities/agent-skills"]
+  const trio = ["entities/agent-skills", "concepts/agent-skills", "entities/agentskills-spec"]
+
+  function mergedInto(canonicalPath: string, pagesToDelete: string[]): MergeResult {
+    return { ...EMPTY_MERGE, canonicalPath, pagesToDelete }
+  }
+
+  it("the later group merges the kept page in place of one the earlier merge removed, with no failed task", async () => {
+    mockExecuteMerge
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/entities/agentskills-spec.md"]))
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(first)).toBe("done")
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(2)
+    const [, group, canonical] = mockExecuteMerge.mock.calls[1]
+    expect(group.slugs).toEqual(["entities/agent-skills", "entities/agentskills-spec"])
+    expect(canonical).toBe("entities/agent-skills")
+    expect(getQueue()).toHaveLength(0)
+  })
+
+  it("a later group whose kept page the earlier merge removed keeps the earlier merge's page instead", async () => {
+    mockExecuteMerge.mockResolvedValue(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+
+    await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(trio), "concepts/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge.mock.calls[1][2]).toBe("entities/agent-skills")
+  })
+
+  it("a later group left naming only the kept page is done with no merge, whatever form its names take", async () => {
+    mockExecuteMerge.mockResolvedValueOnce(
+      mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md", "wiki/entities/agentskills-spec.md"]),
+    )
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    const third = await enqueueMerge(TEST_ID, makeGroup(["agentskills-spec", "entities/agent-skills"]), "entities/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(first)).toBe("done")
+    expect(await waitForTask(second)).toBe("done")
+    expect(await waitForTask(third)).toBe("done")
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+    expect(getQueue()).toHaveLength(0)
+  })
+
+  it("a bare name of the kept page counts as the kept page", async () => {
+    mockExecuteMerge.mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/skills.md"]))
+
+    await enqueueMerge(TEST_ID, makeGroup(["concepts/skills", "entities/agent-skills"]), "entities/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(["concepts/skills", "agent-skills"]), "agent-skills", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+  })
+
+  it("the queue file holds the rewritten group, so a restart before the later merge keeps it", async () => {
+    mockExecuteMerge
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+      .mockImplementationOnce(() => new Promise(() => {}))
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(first)).toBe("done")
+    for (let i = 0; i < 50 && mockExecuteMerge.mock.calls.length < 2; i++) await flushMicrotasks(20)
+
+    const saves = mockWriteFile.mock.calls.filter((c) => String(c[0]).endsWith("dedup-queue.json"))
+    const saved = JSON.parse(String(saves[saves.length - 1][1])) as { group: DuplicateGroup }[]
+    expect(saved.map((t) => t.group.slugs)).toEqual([["entities/agent-skills", "entities/agentskills-spec"]])
+  })
+
+  it("a page no earlier merge removed is left named, so the merge still refuses it if it is gone (#109)", async () => {
+    mockExecuteMerge.mockResolvedValue(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+
+    await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(["entities/agentskills-spec", "concepts/gone"]), "entities/agentskills-spec", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge.mock.calls[1][1].slugs).toEqual(["entities/agentskills-spec", "concepts/gone"])
+  })
+
+  it("a failed task left naming only the kept page leaves the queue once a later merge settles it", async () => {
+    mockExecuteMerge.mockImplementation(async (_pp, g) => {
+      if (g.slugs.length === 2) throw new Error("boom")
+      return mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md", "wiki/entities/agentskills-spec.md"])
+    })
+
+    const failing = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills")
+    for (let i = 0; i < 50 && getQueue()[0]?.status !== "failed"; i++) await flushMicrotasks(20)
+    expect(getQueue().find((t) => t.id === failing)?.status).toBe("failed")
+
+    const later = await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(later)).toBe("done")
+    expect(getQueue()).toHaveLength(0)
+  })
+})

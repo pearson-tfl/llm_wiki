@@ -32,6 +32,8 @@ import { executeMerge, reembedMergedPages } from "@/lib/dedup-runner"
 import {
   ambiguousSlugRefusal,
   MergeReplyRejectedError,
+  pageIdFromPath,
+  pagesNamed,
   type DuplicateGroup,
   type MergeResult,
 } from "@/lib/dedup"
@@ -658,6 +660,34 @@ async function reembedAfterMerge(pp: string, task: DedupTask, result: MergeResul
   }
 }
 
+/**
+ * Groups a scan queues can share pages, so a merge can remove a page a
+ * later task names (#149). In every task still queued, a name of a page
+ * the merge removed becomes the kept page's id, its merge's kept page
+ * included; a task left naming the kept page alone is done, its pages
+ * merged already. A page gone for any other reason stays named, and its
+ * merge still refuses it (#109).
+ */
+function foldMergedAwayPages(result: MergeResult): void {
+  const removed = result.pagesToDelete.map((path) => ({ path }))
+  const wasRemoved = (name: string) => pagesNamed(removed, name).length > 0
+  const kept = pageIdFromPath(result.canonicalPath)
+  const namesKept = (name: string) => pagesNamed([{ path: result.canonicalPath }], name).length > 0
+  for (const task of [...queue]) {
+    if (!task.group.slugs.some(wasRemoved)) continue
+    const slugs = [...new Set(task.group.slugs.map((name) => (wasRemoved(name) ? kept : name)))]
+    if (slugs.every(namesKept)) {
+      restoredPausedTaskIds.delete(task.id)
+      queue = queue.filter((t) => t !== task)
+      notifyScheduledOutcome(task, "done")
+      console.log(`[Dedup Queue] Done by an earlier merge: ${task.group.slugs.join(",")} → ${kept}`)
+      continue
+    }
+    task.group = { ...task.group, slugs }
+    if (wasRemoved(task.canonicalSlug)) task.canonicalSlug = kept
+  }
+}
+
 async function processNext(projectId: string): Promise<void> {
   if (processing) return
   if (currentProjectId !== projectId) return
@@ -754,6 +784,7 @@ async function processNext(projectId: string): Promise<void> {
     restoredPausedTaskIds.delete(next.id)
     queue = queue.filter((t) => t.id !== next.id)
     notifyScheduledOutcome(next, "done")
+    foldMergedAwayPages(result)
     await saveQueue(pp)
 
     console.log(`[Dedup Queue] Done: ${next.group.slugs.join(",")}`)
