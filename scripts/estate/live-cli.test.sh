@@ -76,7 +76,9 @@ expected_args=(
   '{"hooks":{"PreToolUse":[{"matcher":"Bash|Write|Edit|NotebookEdit","hooks":[{"type":"command","command":"python3 /Users/johnp/Code/Agent-Harness-Reconfig/ops/hooks/lane-fence.py"}]}]}}'
   -p --output-format stream-json --input-format stream-json --verbose
   --setting-sources project --disable-slash-commands --tools "" --no-session-persistence
-  --prompt-suggestions false --model claude-opus-5-5
+  --prompt-suggestions false
+  --append-system-prompt "You are answering inside LLM Wiki, which runs you with no tools: you cannot read files, run commands, search or fetch anything. Answer from the text of the user's message alone. This reply is your only turn and nothing in it is executed, so never write a tool call or tool-call markup, and never say you will come back with results later."
+  --model claude-opus-5-5
   --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 )
 cmp -s "$case_dir/argv" <(printf '%s\0' "${expected_args[@]}") \

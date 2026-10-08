@@ -670,6 +670,25 @@ Keep this list current. Merge conflicts can only come from these files.
   `success` result. A version whose prompt-injection guard refuses a
   transcript with `<assistant>` sections would turn every chat with history
   into an error.
+- `src-tauri/src/commands/claude_cli.rs`, `scripts/estate/live-cli.sh`,
+  `scripts/estate/live-cli.test.sh` – with local CLI isolation on, the
+  Claude Code provider tells the model it has no tools, and runs `claude`
+  in an empty folder of its own, not the wiki's (pearson-tfl/llm_wiki#148).
+  The model had no tools and was not told so: asked a broad chat question,
+  it wrote a tool call as text and promised results that never came. It
+  also ran in the wiki's folder, so a wiki inside a repository loaded that
+  repository's `CLAUDE.md` files as project memory, which urged it to run
+  shell commands. Now `--append-system-prompt` carries a notice that it has
+  no tools, must answer from the message alone and has only this turn; the
+  working folder is `llm-wiki-claude-cli` under the OS temp folder, the
+  same each call. The other isolation flags are unchanged. With isolation
+  off, nothing changes: no notice, and the wiki is the working folder.
+  Upstream runs `claude` in the wiki's folder with no notice. `live-cli.sh`
+  passes the new flag. Tests in `claude_cli.rs`; a live test there, ignored
+  unless asked for, runs the real CLI as the app does for a wiki inside a
+  repository whose `CLAUDE.md` names a canary word, with a chat history
+  holding an earlier reply that printed a tool call:
+  `cargo test --lib live_isolated_chat -- --ignored --nocapture`.
 - `src/lib/embedding.ts` – `searchByEmbedding` takes an option to throw when
   the vector store search fails, which ingest's candidate search uses when
   it falls back from the hybrid search, so the failure reaches its log (#22,
