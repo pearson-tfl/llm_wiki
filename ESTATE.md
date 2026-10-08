@@ -606,6 +606,20 @@ Keep this list current. Merge conflicts can only come from these files.
   snapshot, and a live Maintenance-screen Merge of group 46, in
   `src/lib/dedup-high-group-judge.real-llm.test.ts`. #135's live
   scheduled run counts only the judge calls made during its scan.
+- `src/lib/dedup-queue.ts` – duplicate groups of one scan that share pages
+  all merge (pearson-tfl/llm_wiki#149). Before, the later group's merge
+  refused the page the earlier merge had removed, at every retry, and
+  failed, leaving its other pages unmerged. Once a merge is done, every
+  task still on the queue that names a page it removed names the kept page
+  instead, its own kept page included, and is saved so; a task left naming
+  the kept page alone is done with no model call. A page missing for any
+  other reason is left named, and the merge still refuses it (#109). A
+  merge cancelled while it writes rewrites no other task.
+  Upstream edits to the queue's handling of a finished merge need
+  re-checking against this.
+  Tests in `src/lib/dedup-queue.test.ts`; a live scheduled run on the
+  agent-skills pages of John's vault as they stood before 2026-10-08's
+  merges in `src/lib/dedup-overlap-groups.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude
