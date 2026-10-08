@@ -709,7 +709,6 @@ function foldMergedAwayPages(result: MergeResult): void {
  * stays, and the merge refuses it (#109).
  */
 async function mergedEarlier(pp: string, task: DedupTask): Promise<boolean> {
-  if (mergedInto.size === 0) return false
   const pages = await listWikiPages(pp)
   const removedPages = [...mergedInto.keys()].map((pageId) => ({ path: `wiki/${pageId}.md` }))
   const livesIn = (name: string): string | undefined => {
@@ -796,7 +795,7 @@ async function processNext(projectId: string): Promise<void> {
     const result: MergeTurn = await withProjectLock(pp, async () => {
       // The page list is read before the ingest check, so the check is
       // the last thing before the merge.
-      const earlier = await mergedEarlier(pp, next)
+      const earlier = mergedInto.size > 0 && await mergedEarlier(pp, next)
       if (isIngestActive() || signal.aborted) return null
       if (earlier) return "merged-earlier"
       return await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
