@@ -947,7 +947,7 @@ fn build_vector_snippet(result: &PageVectorResult) -> String {
     }
 }
 
-fn score_file(
+pub(crate) fn score_file(
     project_path: &str,
     path: &Path,
     content: &str,
@@ -1118,7 +1118,7 @@ fn is_stop_word(token: &str) -> bool {
     )
 }
 
-fn trim_query_punctuation(value: &str) -> String {
+pub(crate) fn trim_query_punctuation(value: &str) -> String {
     value.trim_matches(is_query_separator).to_string()
 }
 
