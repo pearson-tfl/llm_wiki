@@ -14,6 +14,9 @@
  * pair and the trio holding it; the pair merged first, and the trio failed
  * every retry on the page the pair's merge removed. The scan here is not
  * steered: whichever groups it finds are queued as the run queues them.
+ * A second run queues the same two groups through the real queue, the trio
+ * only once the pair's merge is done, as the scheduled run does when a
+ * judge call between them outlasts the merge.
  *
  * Gated behind RUN_LLM_TESTS=1 and DEDUP_VAULT_COPY, the path of a copy
  * holding those pages under `wiki/`. Writes its measurements to
@@ -219,4 +222,57 @@ describe.skipIf(!ENABLED)("two groups of one scan that share pages, on the agent
       await fresh.cleanup()
     }
   }, 60 * 60 * 1000)
+
+  it("merges the trio queued only after the pair's merge removed one of its pages", async () => {
+    const vault = process.env.DEDUP_VAULT_COPY ?? ""
+    const { enqueueMerge, restoreQueue, getQueue, waitForTask } = await import("./dedup-queue")
+    const { listWikiPages } = await import("./dedup-storage")
+
+    const fresh = await createTempProject("llmw149-after")
+    try {
+      for (const page of [...PAGES.map((id) => `wiki/${id}.md`), "wiki/index.md"]) {
+        await fs.mkdir(path.dirname(`${fresh.path}/${page}`), { recursive: true })
+        await fs.copyFile(`${vault}/${page}`, `${fresh.path}/${page}`)
+      }
+      const projectId = `${PROJECT_ID}-after`
+      storage.set("projectRegistry", { [projectId]: { id: projectId, path: fresh.path, name: "after", lastOpened: Date.now() } })
+      useWikiStore.setState({
+        project: { id: projectId, name: "after", path: fresh.path },
+        llmConfig: LLM_CONFIG,
+        embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" },
+      })
+      await restoreQueue(projectId, fresh.path)
+      const mergesBefore = measured.merges.length
+
+      // The two groups John's run queued on 2026-10-08, the trio queued as
+      // the scheduled run would once a judge call had taken longer than
+      // the pair's merge.
+      const pairOutcome = await waitForTask(await enqueueMerge(projectId, {
+        slugs: ["concepts/agent-skills", "entities/agent-skills"], reason: "Judged one topic", confidence: "high", judged: true,
+      }, "entities/agent-skills", { scheduled: true }))
+      const trioOutcome = await waitForTask(await enqueueMerge(projectId, {
+        slugs: ["entities/agent-skills", "concepts/agent-skills", "entities/agentskills-spec"], reason: "Judged one topic", confidence: "high", judged: true,
+      }, "entities/agent-skills", { scheduled: true }))
+      const pagesAfter = (await listWikiPages(fresh.path)).map((p) => p.path).filter((p) => p !== "wiki/index.md")
+      const report = {
+        pairOutcome,
+        trioOutcome,
+        merges: measured.merges.slice(mergesBefore),
+        pagesAfter,
+        queue: getQueue().map((t) => ({ slugs: t.group.slugs, status: t.status, retryCount: t.retryCount, error: t.error })),
+      }
+      if (process.env.DEDUP_REPORT) await fs.writeFile(`${process.env.DEDUP_REPORT}.after.json`, JSON.stringify(report, null, 2))
+
+      expect(pairOutcome).toBe("done")
+      expect(trioOutcome).toBe("done")
+      expect(report.merges.map((m) => [m.slugs, m.outcome])).toEqual([
+        [["concepts/agent-skills", "entities/agent-skills"], "merged"],
+        [["entities/agent-skills", "entities/agentskills-spec"], "merged"],
+      ])
+      expect(pagesAfter).toEqual(["wiki/entities/agent-skills.md"])
+      expect(report.queue).toEqual([])
+    } finally {
+      await fresh.cleanup()
+    }
+  }, 30 * 60 * 1000)
 })

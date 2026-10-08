@@ -612,14 +612,20 @@ Keep this list current. Merge conflicts can only come from these files.
   failed, leaving its other pages unmerged. Once a merge is done, every
   task still on the queue that names a page it removed names the kept page
   instead, its own kept page included, and is saved so; a task left naming
-  the kept page alone is done with no model call. A page missing for any
-  other reason is left named, and the merge still refuses it (#109). A
-  merge cancelled while it writes rewrites no other task.
-  Upstream edits to the queue's handling of a finished merge need
-  re-checking against this.
+  the kept page alone is done with no model call. A task queued after that
+  merge is read the same way when its merge starts: a name with no page on
+  disk that a merge since the queue opened removed becomes the page it now
+  lives in. A page missing for any other reason is left named, and the
+  merge still refuses it (#109). A merge cancelled while it writes rewrites
+  no other task, and the record of removed pages is forgotten when the
+  project is switched or the app restarts.
+  Upstream edits to the queue's handling of a finished merge, or to what
+  it does before a merge starts, need re-checking against this.
   Tests in `src/lib/dedup-queue.test.ts`; a live scheduled run on the
   agent-skills pages of John's vault as they stood before 2026-10-08's
-  merges in `src/lib/dedup-overlap-groups.real-llm.test.ts`.
+  merges, and a live queue run of the same two groups with the second
+  queued only after the first merged, in
+  `src/lib/dedup-overlap-groups.real-llm.test.ts`.
 - `src/lib/claude-cli-transport.ts`, `src/lib/dedup.ts`,
   `src/lib/dedup-runner.ts`, `src/lib/hub-rebuild.ts`, `src/lib/ingest.ts`
   – a reply cut off at the model's output limit is caught on the Claude

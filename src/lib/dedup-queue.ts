@@ -73,6 +73,9 @@ let restoredPausedTaskIds = new Set<string>()
 let currentProjectId = ""
 let currentProjectPath = ""
 let currentAbortController: AbortController | null = null
+/** Each page a merge removed since this project's queue opened, by page
+ *  id, with the page id of the page it now lives in (#149). */
+let mergedInto = new Map<string, string>()
 /** Set while a merge waits for ingest to go idle; fires the next check. */
 let ingestWaitTimer: ReturnType<typeof setTimeout> | null = null
 /** Callers awaiting a scheduled task's outcome, and outcomes of scheduled
@@ -412,6 +415,7 @@ export function clearQueueState(): void {
   }
   queue = []
   restoredPausedTaskIds.clear()
+  mergedInto = new Map()
   interruptScheduledWaiters()
   stopIngestWait()
   processing = false
@@ -462,6 +466,7 @@ function stopActiveQueue(): void {
   currentProjectPath = ""
   queue = []
   restoredPausedTaskIds.clear()
+  mergedInto = new Map()
   interruptScheduledWaiters()
   stopIngestWait()
 }
@@ -660,18 +665,25 @@ async function reembedAfterMerge(pp: string, task: DedupTask, result: MergeResul
   }
 }
 
+/** What a merge's lock turn did: merged, found the task's pages merged
+ *  already (#149), or held back for ingest (null). */
+type MergeTurn = MergeResult | "merged-earlier" | null
+
 /**
  * Groups a scan queues can share pages, so a merge can remove a page a
- * later task names (#149). In every task still queued, a name of a page
- * the merge removed becomes the kept page's id, its merge's kept page
- * included; a task left naming the kept page alone is done, its pages
- * merged already. A page gone for any other reason stays named, and its
- * merge still refuses it (#109).
+ * later task names (#149). The merge is recorded; and in every task still
+ * queued, a name of a page it removed becomes the kept page's id, its
+ * task's kept page included, and a task left naming the kept page alone is
+ * done, its pages merged already. A page gone for any other reason stays
+ * named, and its merge still refuses it (#109).
  */
 function foldMergedAwayPages(result: MergeResult): void {
-  const removed = result.pagesToDelete.map((path) => ({ path }))
-  const wasRemoved = (name: string) => pagesNamed(removed, name).length > 0
   const kept = pageIdFromPath(result.canonicalPath)
+  const removed = new Set(result.pagesToDelete.map(pageIdFromPath))
+  for (const [page, into] of mergedInto) if (removed.has(into)) mergedInto.set(page, kept)
+  for (const page of removed) mergedInto.set(page, kept)
+  const removedPages = result.pagesToDelete.map((path) => ({ path }))
+  const wasRemoved = (name: string) => pagesNamed(removedPages, name).length > 0
   const namesKept = (name: string) => pagesNamed([{ path: result.canonicalPath }], name).length > 0
   for (const task of [...queue]) {
     if (!task.group.slugs.some(wasRemoved)) continue
@@ -686,6 +698,30 @@ function foldMergedAwayPages(result: MergeResult): void {
     task.group = { ...task.group, slugs }
     if (wasRemoved(task.canonicalSlug)) task.canonicalSlug = kept
   }
+}
+
+/**
+ * A task queued after the merge that removed one of its pages still names
+ * that page (#149). Read against the wiki as it is now, a name with no page
+ * that a merge since the queue opened removed becomes the page it lives in,
+ * the task's kept page included. True when the task then names one page:
+ * its pages are merged already. A name with no page that no merge removed
+ * stays, and the merge refuses it (#109).
+ */
+async function mergedEarlier(pp: string, task: DedupTask): Promise<boolean> {
+  if (mergedInto.size === 0) return false
+  const pages = await listWikiPages(pp)
+  const removedPages = [...mergedInto.keys()].map((pageId) => ({ path: `wiki/${pageId}.md` }))
+  const livesIn = (name: string): string | undefined => {
+    if (pagesNamed(pages, name).length > 0) return undefined
+    const [page] = pagesNamed(removedPages, name)
+    return page && mergedInto.get(pageIdFromPath(page.path))
+  }
+  if (!task.group.slugs.some(livesIn)) return false
+  const slugs = [...new Set(task.group.slugs.map((name) => livesIn(name) ?? name))]
+  task.group = { ...task.group, slugs }
+  task.canonicalSlug = livesIn(task.canonicalSlug) ?? task.canonicalSlug
+  return new Set(slugs.map((name) => pagesNamed(pages, name)[0]?.path ?? name)).size < 2
 }
 
 async function processNext(projectId: string): Promise<void> {
@@ -757,11 +793,15 @@ async function processNext(projectId: string): Promise<void> {
     // last write, so an ingest that reaches its write meanwhile waits for
     // it. Ingest may have started during the waits above: re-check once
     // the lock is held, and hand the turn back if it has.
-    const result = await withProjectLock(pp, async () => {
-      if (isIngestActive()) return null
+    const result: MergeTurn = await withProjectLock(pp, async () => {
+      // The page list is read before the ingest check, so the check is
+      // the last thing before the merge.
+      const earlier = await mergedEarlier(pp, next)
+      if (isIngestActive() || signal.aborted) return null
+      if (earlier) return "merged-earlier"
       return await executeMerge(pp, next.group, next.canonicalSlug, llmConfig, { signal })
     })
-    const merged = result !== null
+    const merged = result !== null && result !== "merged-earlier"
     // Tell the rest of the app the wiki tree changed, even if a cancel
     // landed while the merge wrote.
     if (merged && currentProjectId === projectId) useWikiStore.getState().bumpDataVersion()
@@ -771,7 +811,7 @@ async function processNext(projectId: string): Promise<void> {
       if (merged) await reembedAfterMerge(pp, next, result)
       return
     }
-    if (!merged) {
+    if (result === null) {
       currentAbortController = null
       next.status = "pending"
       processing = false
@@ -784,15 +824,15 @@ async function processNext(projectId: string): Promise<void> {
     restoredPausedTaskIds.delete(next.id)
     queue = queue.filter((t) => t.id !== next.id)
     notifyScheduledOutcome(next, "done")
-    foldMergedAwayPages(result)
+    if (merged) foldMergedAwayPages(result)
     await saveQueue(pp)
 
-    console.log(`[Dedup Queue] Done: ${next.group.slugs.join(",")}`)
+    console.log(`[Dedup Queue] Done${merged ? "" : " by an earlier merge"}: ${next.group.slugs.join(",")}`)
     // The task is done, so a cancel during the re-embed finds nothing to
     // cancel; the next merge waits for it. It runs after the lock is
     // released: a hung embedding endpoint must not hold an ingest's write
     // (#73). A failure here cannot fail the finished merge (#80).
-    await reembedAfterMerge(pp, next, result)
+    if (merged) await reembedAfterMerge(pp, next, result)
   } catch (err) {
     if (currentProjectId !== projectId) return
     const message = err instanceof Error ? err.message : String(err)

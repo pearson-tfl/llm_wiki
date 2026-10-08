@@ -9,6 +9,7 @@ vi.mock("./dedup-runner", () => ({
 vi.mock("@/commands/fs", () => ({
   readFile: vi.fn(),
   writeFile: vi.fn(),
+  listDirectory: vi.fn(),
 }))
 
 const TEST_ID = "test-project-uuid"
@@ -58,7 +59,7 @@ import {
 import { executeMerge, reembedMergedPages } from "./dedup-runner"
 import { isIngestActive } from "@/lib/ingest-queue"
 import { useReviewStore } from "@/stores/review-store"
-import { readFile, writeFile } from "@/commands/fs"
+import { listDirectory, readFile, writeFile } from "@/commands/fs"
 import { useWikiStore } from "@/stores/wiki-store"
 import { __resetProjectLocksForTesting } from "./project-mutex"
 import { MergeReplyRejectedError, type DuplicateGroup, type MergeResult } from "./dedup"
@@ -1516,6 +1517,19 @@ describe("dedup-queue — groups of one scan that share pages (#149)", () => {
     return { ...EMPTY_MERGE, canonicalPath, pagesToDelete }
   }
 
+  /** The wiki's pages on disk, by page id, as a merge starts. */
+  function onDisk(pageIds: string[]): void {
+    vi.mocked(listDirectory).mockResolvedValue(pageIds.map((id) => ({
+      name: `${id.split("/")[1]}.md`,
+      path: `${TEST_PATH}/wiki/${id}.md`,
+      is_dir: false,
+    })))
+  }
+
+  beforeEach(() => {
+    onDisk(["entities/agent-skills", "entities/agentskills-spec"])
+  })
+
   it("the later group merges the kept page in place of one the earlier merge removed, with no failed task", async () => {
     mockExecuteMerge
       .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
@@ -1592,6 +1606,100 @@ describe("dedup-queue — groups of one scan that share pages (#149)", () => {
 
     expect(await waitForTask(second)).toBe("done")
     expect(mockExecuteMerge.mock.calls[1][1].slugs).toEqual(["entities/agentskills-spec", "concepts/gone"])
+  })
+
+  it("a group queued after the earlier merge removed one of its pages merges the kept page in its place", async () => {
+    mockExecuteMerge
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/entities/agentskills-spec.md"]))
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(first)).toBe("done")
+    const second = await enqueueMerge(TEST_ID, makeGroup(trio), "concepts/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    const [, group, canonical] = mockExecuteMerge.mock.calls[1]
+    expect(group.slugs).toEqual(["entities/agent-skills", "entities/agentskills-spec"])
+    expect(canonical).toBe("entities/agent-skills")
+    expect(getQueue()).toHaveLength(0)
+  })
+
+  it("a group queued after the earlier merge, left naming the kept page alone, is done with no merge", async () => {
+    mockExecuteMerge.mockResolvedValueOnce(
+      mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md", "wiki/entities/agentskills-spec.md"]),
+    )
+    onDisk(["entities/agent-skills"])
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(first)).toBe("done")
+    const second = await enqueueMerge(TEST_ID, makeGroup(["agentskills-spec", "agent-skills"]), "agent-skills", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+    expect(getQueue()).toHaveLength(0)
+  })
+
+  it("a page an earlier merge removed that is on disk again stays named", async () => {
+    mockExecuteMerge.mockResolvedValue(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(first)).toBe("done")
+    onDisk(["entities/agent-skills", "concepts/agent-skills", "entities/agentskills-spec"])
+    const second = await enqueueMerge(TEST_ID, makeGroup(["concepts/agent-skills", "entities/agentskills-spec"]), "concepts/agent-skills", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge.mock.calls[1][1].slugs).toEqual(["concepts/agent-skills", "entities/agentskills-spec"])
+  })
+
+  it("a group queued after the earlier merge naming a page no merge removed still names it, for the merge to refuse (#109)", async () => {
+    mockExecuteMerge.mockResolvedValue(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+
+    const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(first)).toBe("done")
+    const second = await enqueueMerge(TEST_ID, makeGroup(["entities/agentskills-spec", "concepts/gone"]), "entities/agentskills-spec", { scheduled: true })
+
+    expect(await waitForTask(second)).toBe("done")
+    expect(mockExecuteMerge.mock.calls[1][1].slugs).toEqual(["entities/agentskills-spec", "concepts/gone"])
+  })
+
+  it("a page merged into one a later merge removed is read as the later merge's kept page", async () => {
+    mockExecuteMerge
+      .mockResolvedValueOnce(mergedInto("wiki/concepts/agent-skills.md", ["wiki/entities/agentskills-spec.md"]))
+      .mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+      .mockResolvedValueOnce(EMPTY_MERGE)
+    onDisk(["entities/agent-skills", "entities/skills"])
+
+    await enqueueMerge(TEST_ID, makeGroup(["concepts/agent-skills", "entities/agentskills-spec"]), "concepts/agent-skills", { scheduled: true })
+    const second = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+    expect(await waitForTask(second)).toBe("done")
+    const third = await enqueueMerge(TEST_ID, makeGroup(["entities/agentskills-spec", "entities/skills"]), "entities/skills", { scheduled: true })
+
+    expect(await waitForTask(third)).toBe("done")
+    expect(mockExecuteMerge.mock.calls[2][1].slugs).toEqual(["entities/agent-skills", "entities/skills"])
+  })
+
+  it("an ingest that starts while a merge reads the page list holds the merge back", async () => {
+    const realIsIngestActive = mockIsIngestActive.getMockImplementation()!
+    try {
+      mockExecuteMerge.mockResolvedValueOnce(mergedInto("wiki/entities/agent-skills.md", ["wiki/concepts/agent-skills.md"]))
+      const first = await enqueueMerge(TEST_ID, makeGroup(pair), "entities/agent-skills", { scheduled: true })
+      expect(await waitForTask(first)).toBe("done")
+      vi.mocked(listDirectory).mockImplementationOnce(async () => {
+        mockIsIngestActive.mockReturnValue(true)
+        return []
+      })
+
+      const second = await enqueueMerge(TEST_ID, makeGroup(trio), "entities/agent-skills", { scheduled: true })
+      for (let i = 0; i < 50 && vi.mocked(listDirectory).mock.calls.length === 0; i++) await flushMicrotasks(20)
+      await flushMicrotasks(20)
+
+      expect(mockExecuteMerge).toHaveBeenCalledTimes(1)
+      expect(getQueue().find((t) => t.id === second)?.status).toBe("pending")
+    } finally {
+      clearQueueState()
+      mockIsIngestActive.mockReset()
+      mockIsIngestActive.mockImplementation(realIsIngestActive)
+    }
   })
 
   it("a failed task left naming only the kept page leaves the queue once a later merge settles it", async () => {
