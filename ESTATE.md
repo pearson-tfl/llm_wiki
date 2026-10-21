@@ -937,7 +937,7 @@ Keep this list current. Merge conflicts can only come from these files.
   `src/lib/scheduled-merge-preview.real-llm.test.ts`, use it, with
   `src/test-helpers/scheduled-preview.ts`.
 - `ESTATE.md` – this file.
-- `CONTEXT.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
+- `GLOSSARY.md`, `CODING_STANDARDS.md`, `docs/adr/`, `docs/agents/` – the
   project files the `llm-wiki-pm` seat works from (AHR #2941): the domain
   glossary, a pointer to the estate's coding standards, the decision
   record and the tracker docs. Upstream has none of them today, so they
