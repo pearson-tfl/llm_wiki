@@ -945,9 +945,15 @@ Keep this list current. Merge conflicts can only come from these files.
   `.gitignore` ignores `docs/`, so a new file there is added with
   `git add -f`; once tracked, it stays tracked.
 
-`CLAUDE.md` is not on the list because it is not committed: it is a link to
-the estate's project file, `config/projects/llm-wiki.md` in
-Agent-Harness-Reconfig, kept out of git by `.git/info/exclude`.
+- `AGENTS.md` – the repository's own agent rules (AHR #5096). Upstream's
+  `.gitignore` ignores it, so it was added with `git add -f`.
+- `CLAUDE.md` – the two-line pointer that has Claude Code import
+  `AGENTS.md` (AHR #5096).
+- `.gitignore` – adds `CLAUDE.local.md`.
+
+`CLAUDE.local.md` is not on the list because it is not committed: it holds
+the seat's local paths, account rule and PM seat facts, which stay out of
+this public repository. Claude Code loads it beside `CLAUDE.md`.
 
 ## Build
 
