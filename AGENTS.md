@@ -35,6 +35,13 @@ a bare `gh` here means upstream, `nashsu/llm_wiki`.
 The seat's local paths, account rule and PM seat facts are in
 `CLAUDE.local.md`, untracked, because this repository is public.
 
+## Where knowledge goes
+
+A new term goes to GLOSSARY.md, a lasting direction to an ADR, and a
+behaviour rule no script can enforce to CODING_STANDARDS.md. A next action
+goes to the Firstmate backlog item, because crewmates do not comment on
+issues.
+
 ## Maintaining this file
 
 Keep this file for knowledge useful to almost every future agent session in this project.
