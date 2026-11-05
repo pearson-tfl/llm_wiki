@@ -25,6 +25,9 @@ src-tauri/gen/
 docs/
 AGENTS.md
 
+# This machine's agent facts: local paths, account, PM seat facts
+CLAUDE.local.md
+
 # Benchmark and test data (local only)
 tests/
 
